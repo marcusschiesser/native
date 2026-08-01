@@ -387,6 +387,72 @@ export type AudioEventKind<M extends Msgish> = M extends Msgish
     : never
   : never;
 
+export type AudioCaptureState = "started" | "stopped" | "failed" | "rejected";
+export type AudioCaptureReason =
+  | "none" | "invalid_options" | "permission_missing" | "permission_required"
+  | "already_recording" | "device_not_found" | "device_disconnected"
+  | "output_exists" | "io_failed" | "capture_failed" | "no_audio" | "unsupported";
+export type AudioCaptureEventArm = {
+  readonly key: string;
+  readonly state: AudioCaptureState;
+  readonly reason: AudioCaptureReason;
+  readonly durationMs: number;
+  readonly bytesWritten: number;
+  readonly outputCommitted: boolean;
+};
+export type AudioCaptureEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureEventArm]
+    ? [keyof AudioCaptureEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & AudioCaptureEventArm
+        ? [AudioCaptureState] extends [M["state"]]
+          ? [AudioCaptureReason] extends [M["reason"]] ? M["kind"] : never
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+export type MicrophoneDeviceState = "device" | "completed" | "failed" | "rejected";
+export type MicrophoneDeviceEventArm = {
+  readonly key: string;
+  readonly state: MicrophoneDeviceState;
+  readonly id: Uint8Array;
+  readonly name: Uint8Array;
+  readonly isDefault: boolean;
+  readonly index: number;
+  readonly total: number;
+};
+export type MicrophoneDeviceEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof MicrophoneDeviceEventArm]
+    ? [keyof MicrophoneDeviceEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & MicrophoneDeviceEventArm
+        ? [MicrophoneDeviceState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+
+export type AudioCaptureAccessSource = "system_audio" | "microphone";
+export type AudioCaptureAccessAction = "status" | "request";
+export type AudioCaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
+export type AudioCaptureAccessEventArm = {
+  readonly key: string;
+  readonly source: AudioCaptureAccessSource;
+  readonly status: AudioCaptureAccessStatus;
+  readonly restartRequired: boolean;
+};
+export type AudioCaptureAccessEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureAccessEventArm]
+    ? [keyof AudioCaptureAccessEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & AudioCaptureAccessEventArm
+        ? [AudioCaptureAccessSource] extends [M["source"]]
+          ? [AudioCaptureAccessStatus] extends [M["status"]] ? M["kind"] : never
+          : never
+        : never
+      : never
+    : never
+  : never;
+
 /// The video event states, the audio vocabulary without spectrum: `loaded`
 /// acknowledges a successful load with the player's duration estimate and
 /// the stream's decoded pixel dimensions; `position` ticks at the
@@ -704,6 +770,19 @@ export interface AudioRoute<M extends Msgish> {
   readonly event: AudioEventKind<M>;
 }
 
+export type MicrophoneSelection = "none" | "default" | Uint8Array;
+export interface AudioCaptureOptions {
+  readonly path: Uint8Array;
+  readonly systemAudio?: boolean;
+  readonly microphone?: MicrophoneSelection;
+  readonly sampleRate?: 16000 | 24000 | 44100 | 48000;
+  readonly channels?: 1 | 2;
+  readonly excludeCurrentProcessAudio?: boolean;
+}
+export interface AudioCaptureRoute<M extends Msgish> { readonly event: AudioCaptureEventKind<M>; }
+export interface MicrophoneDevicesRoute<M extends Msgish> { readonly event: MicrophoneDeviceEventKind<M>; }
+export interface AudioCaptureAccessRoute<M extends Msgish> { readonly event: AudioCaptureAccessEventKind<M>; }
+
 /// A `Cmd.videoLoad` source. `surface` is the model-owned media-surface id
 /// the markup binds — the texture channel the decoded frames feed. The
 /// local `path` is tried first; a missing file falls through to `url`
@@ -843,6 +922,21 @@ export type Cmd<M extends Msgish> =
       readonly verb: "pause" | "resume" | "stop" | "seek" | "volume";
       /// Seek position (ms) / volume (0..1); 0 for the value-less verbs.
       readonly value: number;
+    }
+  | {
+      readonly op: "audio_capture_start";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly options: AudioCaptureOptions;
+    }
+  | { readonly op: "audio_capture_stop"; readonly key: string }
+  | { readonly op: "microphone_devices"; readonly key: string; readonly eventKind: string }
+  | {
+      readonly op: "audio_capture_access";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly source: AudioCaptureAccessSource;
+      readonly action: AudioCaptureAccessAction;
     }
   | {
       readonly op: "video_load";
@@ -1119,6 +1213,22 @@ export const Cmd = {
     return { op: "audio_ctl", key, verb: "volume", value: volume };
   },
 
+  audioCaptureStart<M extends Msgish>(key: string, options: AudioCaptureOptions, route: AudioCaptureRoute<M>): Cmd<M> {
+    return { op: "audio_capture_start", key, eventKind: route.event, options };
+  },
+
+  audioCaptureStop(key: string): Cmd<never> {
+    return { op: "audio_capture_stop", key };
+  },
+
+  microphoneDevices<M extends Msgish>(key: string, route: MicrophoneDevicesRoute<M>): Cmd<M> {
+    return { op: "microphone_devices", key, eventKind: route.event };
+  },
+
+  audioCaptureAccess<M extends Msgish>(key: string, source: AudioCaptureAccessSource, action: AudioCaptureAccessAction, route: AudioCaptureAccessRoute<M>): Cmd<M> {
+    return { op: "audio_capture_access", key, eventKind: route.event, source, action };
+  },
+
   /// Open (or replace — one player is the whole surface) the keyed video
   /// event stream: claim the media-surface the source names, resolve the
   /// source cascade (local path, then url) and start playback (autoplay,
@@ -1375,6 +1485,7 @@ export const Cmd = {
 export type Sub<M extends Msgish> =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | { readonly op: "microphone_devices_changed"; readonly msgKind: string }
   | { readonly op: "batch"; readonly subs: readonly Sub<M>[] };
 
 export const Sub = {
@@ -1386,6 +1497,10 @@ export const Sub = {
   /// its single number payload field.
   timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M> {
     return { op: "timer", key, everyMs, msgKind };
+  },
+
+  microphoneDevicesChanged<M extends Msgish>(msgKind: EmptyKind<M>): Sub<M> {
+    return { op: "microphone_devices_changed", msgKind };
   },
 
   /// Several subscriptions at once.

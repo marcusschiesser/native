@@ -186,6 +186,9 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
             "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
             "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
+            "audio_capture=" ++ layout_fingerprint.describe(platform.AudioCaptureEvent) ++ "\n" ++
+            "microphone_device=" ++ layout_fingerprint.describe(platform.MicrophoneDeviceEvent) ++ "\n" ++
+            "audio_capture_access=" ++ layout_fingerprint.describe(platform.AudioCaptureAccessEvent) ++ "\n" ++
             "video=" ++ layout_fingerprint.describe(platform.VideoEvent) ++ "\n" ++
             "files_dropped=" ++ layout_fingerprint.describe(platform.FileDropEvent) ++ "\n" ++
             // gpu_surface_frame journals a deliberate SUBSET of a
@@ -464,6 +467,10 @@ const EventTag = enum(u8) {
     audio = 24,
     video = 25,
     view_focused = 26,
+    audio_capture = 27,
+    microphone_device = 28,
+    microphone_devices_changed = 29,
+    audio_capture_access = 30,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -621,6 +628,30 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeBool(audio.playing);
             try cursor.writeBool(audio.buffering);
             try cursor.writeBytes(&audio.bands);
+        },
+        .audio_capture => |capture| {
+            try cursor.writeEnum(EventTag.audio_capture);
+            try cursor.writeEnum(capture.state);
+            try cursor.writeEnum(capture.reason);
+            try cursor.writeInt(u64, capture.duration_ms);
+            try cursor.writeInt(u64, capture.bytes_written);
+            try cursor.writeBool(capture.output_committed);
+        },
+        .microphone_device => |device| {
+            try cursor.writeEnum(EventTag.microphone_device);
+            try cursor.writeEnum(device.state);
+            try cursor.writeStr(device.id);
+            try cursor.writeStr(device.name);
+            try cursor.writeBool(device.is_default);
+            try cursor.writeInt(u32, device.index);
+            try cursor.writeInt(u32, device.total);
+        },
+        .microphone_devices_changed => try cursor.writeEnum(EventTag.microphone_devices_changed),
+        .audio_capture_access => |access| {
+            try cursor.writeEnum(EventTag.audio_capture_access);
+            try cursor.writeEnum(access.source);
+            try cursor.writeEnum(access.status);
+            try cursor.writeBool(access.restart_required);
         },
         // Recorded for stream fidelity like `.audio`. On replay the
         // journaled video EFFECT records are the Msg source; the
@@ -849,6 +880,27 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             @memcpy(&decoded.bands, try cursor.readBytes(decoded.bands.len));
             break :blk .{ .audio = decoded };
         },
+        .audio_capture => .{ .audio_capture = .{
+            .state = try cursor.readEnum(platform.AudioCaptureEventState),
+            .reason = try cursor.readEnum(platform.AudioCaptureEventReason),
+            .duration_ms = try cursor.readInt(u64),
+            .bytes_written = try cursor.readInt(u64),
+            .output_committed = try cursor.readBool(),
+        } },
+        .microphone_device => .{ .microphone_device = .{
+            .state = try cursor.readEnum(platform.MicrophoneDeviceEventState),
+            .id = try cursor.readStr(),
+            .name = try cursor.readStr(),
+            .is_default = try cursor.readBool(),
+            .index = try cursor.readInt(u32),
+            .total = try cursor.readInt(u32),
+        } },
+        .microphone_devices_changed => .microphone_devices_changed,
+        .audio_capture_access => .{ .audio_capture_access = .{
+            .source = try cursor.readEnum(platform.AudioCaptureAccessSource),
+            .status = try cursor.readEnum(platform.AudioCaptureAccessStatus),
+            .restart_required = try cursor.readBool(),
+        } },
         .video => blk: {
             const kind = try cursor.readEnum(platform.VideoEventKind);
             break :blk .{ .video = .{
@@ -1482,6 +1534,47 @@ test "event codec round-trips every payload variant" {
         try testing.expect(decoded.video.buffering);
         try testing.expectEqual(@as(u64, 1280), decoded.video.width);
         try testing.expectEqual(@as(u64, 720), decoded.video.height);
+    }
+    {
+        const decoded = try roundTripEvent(.{ .audio_capture = .{
+            .state = .failed,
+            .reason = .device_disconnected,
+            .duration_ms = 1250,
+            .bytes_written = 4096,
+            .output_committed = true,
+        } });
+        try testing.expectEqual(platform.AudioCaptureEventState.failed, decoded.audio_capture.state);
+        try testing.expectEqual(platform.AudioCaptureEventReason.device_disconnected, decoded.audio_capture.reason);
+        try testing.expectEqual(@as(u64, 1250), decoded.audio_capture.duration_ms);
+        try testing.expectEqual(@as(u64, 4096), decoded.audio_capture.bytes_written);
+        try testing.expect(decoded.audio_capture.output_committed);
+    }
+    {
+        const decoded = try roundTripEvent(.{ .microphone_device = .{
+            .state = .device,
+            .id = "usb-mic",
+            .name = "USB Microphone",
+            .is_default = true,
+            .index = 1,
+            .total = 2,
+        } });
+        try testing.expectEqual(platform.MicrophoneDeviceEventState.device, decoded.microphone_device.state);
+        try testing.expectEqualStrings("usb-mic", decoded.microphone_device.id);
+        try testing.expectEqualStrings("USB Microphone", decoded.microphone_device.name);
+        try testing.expect(decoded.microphone_device.is_default);
+        try testing.expectEqual(@as(u32, 2), decoded.microphone_device.total);
+    }
+    {
+        const changed = try roundTripEvent(.microphone_devices_changed);
+        try testing.expect(changed == .microphone_devices_changed);
+        const decoded = try roundTripEvent(.{ .audio_capture_access = .{
+            .source = .system_audio,
+            .status = .authorized,
+            .restart_required = true,
+        } });
+        try testing.expectEqual(platform.AudioCaptureAccessSource.system_audio, decoded.audio_capture_access.source);
+        try testing.expectEqual(platform.AudioCaptureAccessStatus.authorized, decoded.audio_capture_access.status);
+        try testing.expect(decoded.audio_capture_access.restart_required);
     }
     {
         const paths = [_][]const u8{ "/tmp/a.txt", "/tmp/b.txt" };

@@ -1,0 +1,26 @@
+<column padding="20" gap="14" background="background">
+  <text label="Audio capture"><span weight="bold" scale="1.5">Audio capture</span></text>
+  <text foreground="text_muted">macOS 15+ · TypeScript command and subscription API</text>
+  <row gap="8">
+    <button on-press="request_microphone">Request microphone</button>
+    <button on-press="request_system_audio">Request system audio</button>
+    <button on-press="list_microphones">List microphones</button>
+  </row>
+  <text>Microphone: {microphoneAccess}</text>
+  <text>System audio: {systemAccess}</text>
+  <text>{deviceCount} connected microphone(s)</text>
+  <separator />
+  <row gap="8">
+    <button variant="primary" on-press="start_capture">Start combined capture</button>
+    <button variant="destructive" on-press="stop_capture">Stop</button>
+  </row>
+  <panel padding="14" background="surface" radius="md" border-color="border">
+    <column gap="4">
+      <text>Status: {captureState}</text>
+      <text>Reason: {captureReason}</text>
+      <text>{durationMs} ms · {bytesWritten} bytes</text>
+    </column>
+  </panel>
+  <spacer grow="1" />
+  <status-bar>Output: /tmp/native-sdk-combined-ts.wav</status-bar>
+</column>

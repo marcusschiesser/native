@@ -34,6 +34,10 @@ typedef enum {
     NATIVE_SDK_APPKIT_EVENT_AUDIO = 20,
     NATIVE_SDK_APPKIT_EVENT_VIDEO = 21,
     NATIVE_SDK_APPKIT_EVENT_VIEW_FOCUSED = 22,
+    NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE = 23,
+    NATIVE_SDK_APPKIT_EVENT_MICROPHONE_DEVICE = 24,
+    NATIVE_SDK_APPKIT_EVENT_MICROPHONE_DEVICES_CHANGED = 25,
+    NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE_ACCESS = 26,
 } native_sdk_appkit_event_kind_t;
 
 /* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
@@ -356,6 +360,22 @@ typedef struct {
      * event kind. */
     uint64_t video_width;
     uint64_t video_height;
+    int audio_capture_state;
+    int audio_capture_reason;
+    uint64_t audio_capture_duration_ms;
+    uint64_t audio_capture_bytes_written;
+    int audio_capture_output_committed;
+    int microphone_device_state;
+    const char *microphone_device_id;
+    size_t microphone_device_id_len;
+    const char *microphone_device_name;
+    size_t microphone_device_name_len;
+    int microphone_device_is_default;
+    uint32_t microphone_device_index;
+    uint32_t microphone_device_total;
+    int audio_capture_access_source;
+    int audio_capture_access_status;
+    int audio_capture_restart_required;
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);
@@ -530,6 +550,11 @@ int native_sdk_appkit_audio_pause(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_audio_stop(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t position_ms);
 int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume);
+int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, const char *path, size_t path_len, int system_audio, int microphone_kind, const char *microphone_id, size_t microphone_id_len, uint32_t sample_rate_hz, uint8_t channel_count, int exclude_current_process_audio);
+void native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host);
+void native_sdk_appkit_microphone_devices(native_sdk_appkit_host_t *host);
+void native_sdk_appkit_audio_capture_access(native_sdk_appkit_host_t *host, int source, int action);
+void native_sdk_appkit_observe_microphone_devices(native_sdk_appkit_host_t *host, int enabled);
 
 /* Where the video player delivers decoded frames: one tightly packed,
  * row-major, straight-alpha RGBA8 frame per call (len = width * height

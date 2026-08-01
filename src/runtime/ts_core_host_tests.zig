@@ -83,6 +83,11 @@ const mini_core = struct {
     /// carries TWO name-matched unions).
     pub const PtyState = enum { exit, output };
     pub const PtyReason = enum { cancelled, exited, rejected, spawn_failed, signaled };
+    pub const CaptureState = enum { rejected, failed, stopped, started };
+    pub const CaptureReason = enum { unsupported, no_audio, capture_failed, io_failed, output_exists, device_disconnected, device_not_found, already_recording, permission_required, permission_missing, invalid_options, none };
+    pub const DeviceState = enum { rejected, failed, completed, device };
+    pub const AccessSource = enum { microphone, system_audio };
+    pub const AccessStatus = enum { unavailable, restricted, denied, not_determined, not_authorized, authorized };
 
     pub const Model = struct {
         polling: bool,
@@ -145,6 +150,22 @@ const mini_core = struct {
         // Unsigned-class mirrors (u64-classed arm routing).
         ustamp_ms: u64,
         ucode: u64,
+        mic_watch: bool,
+        capture_state: CaptureState,
+        capture_reason: CaptureReason,
+        capture_duration: f64,
+        capture_bytes: f64,
+        capture_committed: bool,
+        capture_events: i64,
+        device_state: DeviceState,
+        device_total: f64,
+        device_default: bool,
+        device_events: i64,
+        access_source: AccessSource,
+        access_status: AccessStatus,
+        access_restart: bool,
+        access_events: i64,
+        device_change_events: i64,
     };
 
     pub const Msg = union(enum) {
@@ -289,6 +310,35 @@ const mini_core = struct {
         uget, // 81: fetch "uget" -> ufetched/failed
         ufetched: struct { status: u64, body: []const u8 }, // 82: fetch ok
         // record with a u64-classed number field
+        start_capture, // 83: combined capture -> capture_evt
+        stop_capture, // 84: stop the active capture key
+        list_mics, // 85: enumerate microphone records -> device_evt
+        capture_evt: struct { // 86
+            key: []const u8,
+            state: CaptureState,
+            reason: CaptureReason,
+            durationMs: f64,
+            bytesWritten: f64,
+            outputCommitted: bool,
+        },
+        device_evt: struct { // 87
+            key: []const u8,
+            state: DeviceState,
+            id: []const u8,
+            name: []const u8,
+            isDefault: bool,
+            index: f64,
+            total: f64,
+        },
+        capture_access, // 88: microphone permission request -> access_evt
+        access_evt: struct { // 89
+            key: []const u8,
+            source: AccessSource,
+            status: AccessStatus,
+            restartRequired: bool,
+        },
+        toggle_mic_watch, // 90: subscription on/off
+        devices_changed, // 91: no-payload subscription event
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -353,6 +403,22 @@ const mini_core = struct {
                 .video2_events = 0,
                 .ustamp_ms = 0,
                 .ucode = 0,
+                .mic_watch = false,
+                .capture_state = .rejected,
+                .capture_reason = .none,
+                .capture_duration = 0,
+                .capture_bytes = 0,
+                .capture_committed = false,
+                .capture_events = 0,
+                .device_state = .completed,
+                .device_total = 0,
+                .device_default = false,
+                .device_events = 0,
+                .access_source = .microphone,
+                .access_status = .unavailable,
+                .access_restart = false,
+                .access_events = 0,
+                .device_change_events = 0,
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -640,6 +706,46 @@ const mini_core = struct {
                 @memcpy(out[first.len..], second);
                 return .{ .model = model, .cmd = out };
             },
+            .start_capture => return .{ .model = model, .cmd = cmdAudioCaptureStart("meeting", 86, "meeting.wav", true, 2, "usb-mic", 44_100, 1, true) },
+            .stop_capture => return .{ .model = model, .cmd = cmdKeyOnly(0x1E, "meeting") },
+            .list_mics => return .{ .model = model, .cmd = cmdRoutedKey(0x1F, "mics", 87) },
+            .capture_evt => |event| {
+                const out = frameCreate(model.*);
+                out.capture_state = event.state;
+                out.capture_reason = event.reason;
+                out.capture_duration = event.durationMs;
+                out.capture_bytes = event.bytesWritten;
+                out.capture_committed = event.outputCommitted;
+                out.capture_events = model.capture_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
+            .device_evt => |event| {
+                const out = frameCreate(model.*);
+                out.device_state = event.state;
+                out.device_total = event.total;
+                out.device_default = event.isDefault;
+                out.device_events = model.device_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
+            .capture_access => return .{ .model = model, .cmd = cmdAudioCaptureAccess("access", 89, 1, 1) },
+            .access_evt => |event| {
+                const out = frameCreate(model.*);
+                out.access_source = event.source;
+                out.access_status = event.status;
+                out.access_restart = event.restartRequired;
+                out.access_events = model.access_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
+            .toggle_mic_watch => {
+                const out = frameCreate(model.*);
+                out.mic_watch = !model.mic_watch;
+                return .{ .model = out, .cmd = "" };
+            },
+            .devices_changed => {
+                const out = frameCreate(model.*);
+                out.device_change_events = model.device_change_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
         }
     }
 
@@ -651,6 +757,7 @@ const mini_core = struct {
     }
 
     pub fn subscriptions(model: *const Model) []const u8 {
+        if (model.mic_watch) return subMicrophoneDevicesChanged(91);
         if (!model.polling) return "";
         return subTimer("tick", if (model.fast) 40 else 100, 9);
     }
@@ -852,6 +959,51 @@ const mini_core = struct {
         return out;
     }
 
+    fn cmdAudioCaptureStart(key: []const u8, event_tag: u8, path: []const u8, system_audio: bool, microphone_kind: u8, microphone_id: []const u8, sample_rate: u32, channels: u8, exclude_current_process_audio: bool) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + key.len + 8 + 4 + path.len + 4 + microphone_id.len);
+        out[0] = 0x1D;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        var off: usize = 2 + key.len;
+        out[off] = event_tag;
+        out[off + 1] = @as(u8, @intFromBool(system_audio)) | (@as(u8, @intFromBool(exclude_current_process_audio)) << 1);
+        out[off + 2] = microphone_kind;
+        std.mem.writeInt(u32, out[off + 3 ..][0..4], sample_rate, .little);
+        out[off + 7] = channels;
+        off += 8;
+        off = writeLongBytes(out, off, path);
+        _ = writeLongBytes(out, off, microphone_id);
+        return out;
+    }
+
+    fn cmdKeyOnly(op: u8, key: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + key.len);
+        out[0] = op;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        return out;
+    }
+
+    fn cmdRoutedKey(op: u8, key: []const u8, event_tag: u8) []const u8 {
+        const out = rt.frameAlloc(u8, 3 + key.len);
+        out[0] = op;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = event_tag;
+        return out;
+    }
+
+    fn cmdAudioCaptureAccess(key: []const u8, event_tag: u8, source: u8, action: u8) []const u8 {
+        const out = rt.frameAlloc(u8, 5 + key.len);
+        out[0] = 0x20;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = event_tag;
+        out[3 + key.len] = source;
+        out[4 + key.len] = action;
+        return out;
+    }
+
     fn cmdVideoLoad(key: []const u8, event_tag: u8, surface: f64, video_path: []const u8, url: []const u8, flags: u8) []const u8 {
         const out = rt.frameAlloc(u8, 2 + key.len + 1 + 8 + 4 + video_path.len + 4 + url.len + 1);
         out[0] = 0x17;
@@ -974,6 +1126,13 @@ const mini_core = struct {
         @memcpy(out[2..][0..key.len], key);
         std.mem.writeInt(u64, out[2 + key.len ..][0..8], @bitCast(every_ms), .little);
         out[2 + key.len + 8] = msg_tag;
+        return out;
+    }
+
+    fn subMicrophoneDevicesChanged(msg_tag: u8) []const u8 {
+        const out = rt.frameAlloc(u8, 2);
+        out[0] = 0x02;
+        out[1] = msg_tag;
         return out;
     }
 };
@@ -1813,6 +1972,49 @@ test "audio_ctl verbs drive the engine channel, gated by the wire key" {
     Host.dispatch(fx, .stop_it);
     try std.testing.expect(!fx.audioSnapshot().active);
     try std.testing.expectError(error.EffectNotFound, fx.feedAudioEvent(.position, 50_000, 183_000, true));
+}
+
+test "audio capture commands route fixed records and retire on stop" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .start_capture);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureState.started, Host.model().capture_state);
+    try std.testing.expectEqual(mini_core.CaptureReason.none, Host.model().capture_reason);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().capture_events);
+
+    Host.dispatch(fx, .stop_capture);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureState.stopped, Host.model().capture_state);
+    try std.testing.expect(Host.model().capture_committed);
+    try std.testing.expectEqual(@as(i64, 2), Host.model().capture_events);
+}
+
+test "microphone listing access and changed subscription route through the TS host" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .list_mics);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 3), Host.model().device_events);
+    try std.testing.expectEqual(mini_core.DeviceState.completed, Host.model().device_state);
+    try std.testing.expectEqual(@as(f64, 2), Host.model().device_total);
+
+    Host.dispatch(fx, .capture_access);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().access_events);
+    try std.testing.expectEqual(mini_core.AccessSource.microphone, Host.model().access_source);
+    try std.testing.expectEqual(mini_core.AccessStatus.authorized, Host.model().access_status);
+
+    Host.dispatch(fx, .toggle_mic_watch);
+    const changed = fx.takeMicrophoneDevicesChangedMsg() orelse return error.TestExpectedMsg;
+    Host.dispatch(fx, changed);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().device_change_events);
+    Host.dispatch(fx, .toggle_mic_watch);
+    try std.testing.expect(fx.takeMicrophoneDevicesChangedMsg() == null);
 }
 
 test "a replacing audio_play re-keys the stream and the url source decodes whole" {

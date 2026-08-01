@@ -282,6 +282,28 @@ pub const NullAudio = struct {
     }
 };
 
+pub const NullAudioCapture = struct {
+    active: bool = false,
+    started_pending: bool = false,
+    path_storage: [types.max_audio_capture_path_bytes]u8 = undefined,
+    path_len: usize = 0,
+    system_audio: bool = false,
+    microphone: types.MicrophoneSelectionKind = .none,
+    microphone_device_id_storage: [types.max_microphone_device_id_bytes]u8 = undefined,
+    microphone_device_id_len: usize = 0,
+    sample_rate_hz: u32 = 48_000,
+    channel_count: u8 = 2,
+    exclude_current_process_audio: bool = true,
+
+    pub fn path(self: *const NullAudioCapture) []const u8 {
+        return self.path_storage[0..self.path_len];
+    }
+
+    pub fn microphoneDeviceId(self: *const NullAudioCapture) []const u8 {
+        return self.microphone_device_id_storage[0..self.microphone_device_id_len];
+    }
+};
+
 pub const NullPlatform = struct {
     surface_value: Surface = .{},
     web_engine: WebEngine = .system,
@@ -625,6 +647,20 @@ pub const NullPlatform = struct {
     audio_stop_count: usize = 0,
     audio_seek_count: usize = 0,
     audio_volume_count: usize = 0,
+    audio_capture: bool = true,
+    microphone_device_enumeration: bool = true,
+    capture: NullAudioCapture = .{},
+    audio_capture_start_count: usize = 0,
+    audio_capture_stop_count: usize = 0,
+    microphone_devices_count: usize = 0,
+    microphone_devices_observing: bool = false,
+    default_microphone_index: u8 = 0,
+    microphone_connected: [2]bool = .{ true, true },
+    audio_capture_output_exists: bool = false,
+    audio_capture_io_failure: bool = false,
+    system_audio_access: types.AudioCaptureAccessStatus = .authorized,
+    microphone_access: types.AudioCaptureAccessStatus = .authorized,
+    access_pending: ?types.AudioCaptureAccessEvent = null,
     /// Whether this modeled host has a video decoder. On by default (the
     /// fake below stands in for AVFoundation); tests modelling a staged
     /// host (Windows/Linux today) set it false BEFORE `platform()` so
@@ -851,6 +887,11 @@ pub const NullPlatform = struct {
                 .audio_stop_fn = if (self.audio_playback) audioStop else null,
                 .audio_seek_fn = if (self.audio_playback) audioSeek else null,
                 .audio_set_volume_fn = if (self.audio_playback) audioSetVolume else null,
+                .audio_capture_start_fn = if (self.audio_capture) audioCaptureStart else null,
+                .audio_capture_stop_fn = if (self.audio_capture) audioCaptureStop else null,
+                .microphone_devices_fn = if (self.microphone_device_enumeration) microphoneDevices else null,
+                .audio_capture_access_fn = if (self.audio_capture) audioCaptureAccess else null,
+                .microphone_devices_observe_fn = if (self.microphone_device_enumeration) observeMicrophoneDevices else null,
                 .video_load_fn = if (self.video_playback) videoLoad else null,
                 .video_load_url_fn = if (self.video_playback) videoLoadUrl else null,
                 .video_play_fn = if (self.video_playback) videoPlay else null,
@@ -915,6 +956,8 @@ pub const NullPlatform = struct {
             .audio_playback => self.audio_playback,
             .audio_streaming => self.audio_playback and self.audio_streaming,
             .audio_spectrum => self.audio_playback and self.audio_spectrum,
+            .system_audio_capture, .microphone_capture => self.audio_capture,
+            .microphone_device_enumeration => self.microphone_device_enumeration,
             .video_playback => self.video_playback,
         };
     }
@@ -1665,6 +1708,134 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.audio_volume_count += 1;
         self.audio.volume = volume;
+    }
+
+    fn audioCaptureStart(context: ?*anyopaque, config: types.AudioCaptureConfig) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (self.capture.active) return error.AudioCaptureAlreadyActive;
+        if ((!config.system_audio and config.microphone == .none) or
+            config.path.len == 0 or config.path.len > self.capture.path_storage.len or
+            config.microphone_device_id.len > self.capture.microphone_device_id_storage.len)
+            return error.InvalidAudioCaptureOptions;
+        if (config.system_audio and self.system_audio_access != .authorized) return error.AudioCapturePermissionRequired;
+        if (config.microphone != .none and self.microphone_access != .authorized) return error.AudioCapturePermissionRequired;
+        if (self.audio_capture_output_exists) return error.AudioCaptureOutputExists;
+        if (self.audio_capture_io_failure) return error.AudioCaptureIoFailed;
+        var resolved_microphone_id = config.microphone_device_id;
+        if (config.microphone == .default) {
+            if (self.default_microphone_index >= self.microphone_connected.len or !self.microphone_connected[self.default_microphone_index]) return error.MicrophoneDeviceNotFound;
+            resolved_microphone_id = if (self.default_microphone_index == 0) "default-mic" else "usb-mic";
+        } else if (config.microphone == .device_id) {
+            const index: ?usize = if (std.mem.eql(u8, config.microphone_device_id, "default-mic")) 0 else if (std.mem.eql(u8, config.microphone_device_id, "usb-mic")) 1 else null;
+            if (index == null or !self.microphone_connected[index.?]) return error.MicrophoneDeviceNotFound;
+        }
+        self.audio_capture_start_count += 1;
+        self.capture = .{
+            .active = true,
+            .started_pending = true,
+            .system_audio = config.system_audio,
+            .microphone = config.microphone,
+            .sample_rate_hz = config.sample_rate_hz,
+            .channel_count = config.channel_count,
+            .exclude_current_process_audio = config.exclude_current_process_audio,
+        };
+        @memcpy(self.capture.path_storage[0..config.path.len], config.path);
+        self.capture.path_len = config.path.len;
+        @memcpy(self.capture.microphone_device_id_storage[0..resolved_microphone_id.len], resolved_microphone_id);
+        self.capture.microphone_device_id_len = resolved_microphone_id.len;
+    }
+
+    fn audioCaptureStop(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if (!self.capture.active) return;
+        self.audio_capture_stop_count += 1;
+        self.capture.active = false;
+    }
+
+    fn microphoneDevices(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.microphone_devices_count += 1;
+    }
+
+    fn audioCaptureAccess(context: ?*anyopaque, source: types.AudioCaptureAccessSource, action: types.AudioCaptureAccessAction) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        _ = action;
+        self.access_pending = .{
+            .source = source,
+            .status = switch (source) {
+                .system_audio => self.system_audio_access,
+                .microphone => self.microphone_access,
+            },
+        };
+    }
+
+    fn observeMicrophoneDevices(context: ?*anyopaque, enabled: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        self.microphone_devices_observing = enabled;
+    }
+
+    pub fn takeAudioCaptureStarted(self: *NullPlatform) ?Event {
+        if (!self.capture.started_pending) return null;
+        self.capture.started_pending = false;
+        return .{ .audio_capture = .{ .state = .started } };
+    }
+
+    pub fn completeAudioCapture(self: *NullPlatform, duration_ms: u64, bytes_written: u64) ?Event {
+        if (self.capture.active) self.capture.active = false;
+        return .{ .audio_capture = .{
+            .state = .stopped,
+            .duration_ms = duration_ms,
+            .bytes_written = bytes_written,
+            .output_committed = true,
+        } };
+    }
+
+    pub fn microphoneDeviceEvent(self: *const NullPlatform, index: u32) Event {
+        const total: u32 = @as(u32, @intFromBool(self.microphone_connected[0])) + @as(u32, @intFromBool(self.microphone_connected[1]));
+        var emitted: u32 = 0;
+        for (self.microphone_connected, 0..) |connected, device_index| {
+            if (!connected) continue;
+            if (emitted == index) return .{ .microphone_device = .{
+                .state = .device,
+                .id = if (device_index == 0) "default-mic" else "usb-mic",
+                .name = if (device_index == 0) "Default Microphone" else "USB Microphone",
+                .is_default = device_index == self.default_microphone_index,
+                .index = emitted,
+                .total = total,
+            } };
+            emitted += 1;
+        }
+        return .{ .microphone_device = .{ .state = .completed, .index = total, .total = total } };
+    }
+
+    pub fn setDefaultMicrophone(self: *NullPlatform, index: u8) !void {
+        if (index >= self.microphone_connected.len or !self.microphone_connected[index]) return error.MicrophoneDeviceNotFound;
+        self.default_microphone_index = index;
+    }
+
+    pub fn disconnectMicrophone(self: *NullPlatform, id: []const u8, duration_ms: u64, bytes_written: u64) ?Event {
+        const index: usize = if (std.mem.eql(u8, id, "default-mic")) 0 else if (std.mem.eql(u8, id, "usb-mic")) 1 else return null;
+        self.microphone_connected[index] = false;
+        if (!self.capture.active or !std.mem.eql(u8, self.capture.microphoneDeviceId(), id)) return self.microphoneDevicesChanged();
+        self.capture.active = false;
+        return .{ .audio_capture = .{
+            .state = .failed,
+            .reason = .device_disconnected,
+            .duration_ms = duration_ms,
+            .bytes_written = bytes_written,
+            .output_committed = bytes_written > 44,
+        } };
+    }
+
+    pub fn takeAudioCaptureAccess(self: *NullPlatform) ?Event {
+        const access = self.access_pending orelse return null;
+        self.access_pending = null;
+        return .{ .audio_capture_access = access };
+    }
+
+    pub fn microphoneDevicesChanged(self: *NullPlatform) ?Event {
+        if (!self.microphone_devices_observing) return null;
+        return .microphone_devices_changed;
     }
 
     fn audioUrlHash(url: []const u8) u64 {

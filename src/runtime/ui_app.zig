@@ -3968,6 +3968,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .audio => |audio_event| if (self.effects.takeAudioMsg(audio_event)) |msg| {
                     try self.dispatch(runtime, self.canvas_window_id, msg);
                 },
+                .audio_capture => |capture_event| if (self.effects.takeAudioCaptureMsg(capture_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                .microphone_device => |device_event| if (self.effects.takeMicrophoneDeviceMsg(device_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                .audio_capture_access => |access_event| if (self.effects.takeAudioCaptureAccessMsg(access_event)) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
+                .microphone_devices_changed => if (self.effects.takeMicrophoneDevicesChangedMsg()) |msg| {
+                    try self.dispatch(runtime, self.canvas_window_id, msg);
+                },
                 // Platform video reports route the same way: through
                 // the effects channel into the app's `on_event` Msg,
                 // journaled at the delivery boundary. Without an app

@@ -181,3 +181,34 @@ export interface AudioEvent {
   readonly buffering: boolean;
   readonly bands: Uint8Array;
 }
+
+export type AudioCaptureState = "started" | "stopped" | "failed" | "rejected";
+export type AudioCaptureReason = "none" | "invalid_options" | "permission_missing" | "permission_required" | "already_recording" | "device_not_found" | "device_disconnected" | "output_exists" | "io_failed" | "capture_failed" | "no_audio" | "unsupported";
+export interface AudioCaptureEvent {
+  readonly key: string;
+  readonly state: AudioCaptureState;
+  readonly reason: AudioCaptureReason;
+  readonly durationMs: number;
+  readonly bytesWritten: number;
+  readonly outputCommitted: boolean;
+}
+
+export type MicrophoneDeviceState = "device" | "completed" | "failed" | "rejected";
+export interface MicrophoneDeviceEvent {
+  readonly key: string;
+  readonly state: MicrophoneDeviceState;
+  readonly id: Uint8Array;
+  readonly name: Uint8Array;
+  readonly isDefault: boolean;
+  readonly index: number;
+  readonly total: number;
+}
+
+export type AudioCaptureAccessSource = "system_audio" | "microphone";
+export type AudioCaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
+export interface AudioCaptureAccessEvent {
+  readonly key: string;
+  readonly source: AudioCaptureAccessSource;
+  readonly status: AudioCaptureAccessStatus;
+  readonly restartRequired: boolean;
+}

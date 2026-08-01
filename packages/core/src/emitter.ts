@@ -14,7 +14,7 @@
 
 import path from "node:path";
 import { ts, TypedAst, hasExportModifier, exportListBindings, sdkCoreModulePath } from "./typed_ast.ts";
-import { TypeTable, snakeCase, zigDeclName, zigLocalName, isZigPrimitiveName, isStaticMember, mangleZType, type ZType, type ZField, type UnionInfo, type StructInfo, type ClassInfo } from "./types.ts";
+import { TypeTable, snakeCase, zigDeclName, zigLocalName, isZigPrimitiveName, isStaticMember, mangleZType, type ZType, type ZField, type UnionArm, type UnionInfo, type StructInfo, type ClassInfo } from "./types.ts";
 import { IntInference, returnExpressionsOf } from "./infer.ts";
 import { thrownShapeOf, thrownArmsOfShape, THROWN_UNION_NAME, type CheckResult } from "./checker.ts";
 import type { RuleId } from "./diagnostics.ts";
@@ -232,6 +232,11 @@ const FETCH_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
 /// engine's event vocabulary, matched by member NAME (declaration order is
 /// the app's own).
 const AUDIO_STATES = ["loaded", "position", "completed", "failed", "rejected", "spectrum"];
+const AUDIO_CAPTURE_STATES = ["started", "stopped", "failed", "rejected"];
+const AUDIO_CAPTURE_REASONS = ["none", "invalid_options", "permission_missing", "permission_required", "already_recording", "device_not_found", "device_disconnected", "output_exists", "io_failed", "capture_failed", "no_audio", "unsupported"];
+const MICROPHONE_DEVICE_STATES = ["device", "completed", "failed", "rejected"];
+const AUDIO_CAPTURE_ACCESS_SOURCES = ["system_audio", "microphone"];
+const AUDIO_CAPTURE_ACCESS_STATUSES = ["authorized", "not_authorized", "not_determined", "denied", "restricted", "unavailable"];
 
 /// The video event states an event arm's `state` union must carry — the
 /// engine's event vocabulary, matched by member NAME (declaration order is
@@ -2456,6 +2461,13 @@ export class Emitter {
       if (method === "audioPlay") {
         return this.emitAudioPlayCmd(e, ctx);
       }
+      if (method === "audioCaptureStart") return this.emitAudioCaptureStartCmd(e, ctx);
+      if (method === "audioCaptureStop") {
+        const key = this.literalEffectKey(e, e.arguments[0], "Cmd.audioCaptureStop");
+        return `rt.cmdAudioCaptureStop("${escapeZigString(key)}")`;
+      }
+      if (method === "microphoneDevices") return this.emitMicrophoneDevicesCmd(e, ctx);
+      if (method === "audioCaptureAccess") return this.emitAudioCaptureAccessCmd(e, ctx);
       if (method === "imageLoad") {
         return this.emitImageLoadCmd(e, ctx);
       }
@@ -2570,7 +2582,7 @@ export class Emitter {
       }
       this.fail(
         e,
-        `Cmd.${method} (the v3 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, videoLoad, videoPlay, videoPause, videoStop, videoSeek, videoSetVolume, videoSetMuted, videoSetLoop, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, channelOpen, channelClose, ptySpawn, ptyWrite, ptyResize, ptyKill, batch)`,
+        `Cmd.${method} (the v4 command set is none, persist, now, host, request, cancel, readFile, writeFile, fetch, clipboardWrite, clipboardRead, delay, spawn, audioPlay, audioPause, audioResume, audioStop, audioSeek, audioSetVolume, videoLoad, videoPlay, videoPause, videoStop, videoSeek, videoSetVolume, videoSetMuted, videoSetLoop, showWindow, quitApp, imageLoad, imageCancel, imageUnregister, channelOpen, channelClose, ptySpawn, ptyWrite, ptyResize, ptyKill, audioCaptureStart, audioCaptureStop, microphoneDevices, audioCaptureAccess, batch)`,
       );
     }
     this.fail(expr, "command expression (Cmd values are built inline from the Cmd.* factories)");
@@ -2845,6 +2857,135 @@ export class Emitter {
     if (!event) this.fail(route, `\`Cmd.audioPlay\` routing without an \`event\` arm`, "NS1027");
     const tag = this.audioEventArmTag(event, ctx);
     return `rt.cmdAudioPlay("${escapeZigString(keyArg.text)}", ${tag}, ${audio_path}, ${url}, ${cache_path}, ${expected})`;
+  }
+
+  private literalEffectKey(call: ts.CallExpression, arg: ts.Expression | undefined, factory: string): string {
+    if (!arg || !ts.isStringLiteral(arg)) this.fail(call, `\`${factory}\` takes its key as a string literal`, "NS1027");
+    if (utf8ByteLength(arg.text) > 255) this.fail(arg, `${factory} key over 255 bytes`);
+    return arg.text;
+  }
+
+  private eventRouteArm(call: ts.CallExpression, arg: ts.Expression | undefined, factory: string): ts.StringLiteral {
+    let route = arg;
+    while (route && (ts.isParenthesizedExpression(route) || ts.isAsExpression(route) || ts.isSatisfiesExpression(route))) route = route.expression;
+    if (!route || !ts.isObjectLiteralExpression(route)) this.fail(arg ?? call, `\`${factory}\` routing is an inline \`{ event }\` object`, "NS1027");
+    let event: ts.StringLiteral | null = null;
+    for (const p of route.properties) {
+      if (!ts.isPropertyAssignment(p) || !ts.isIdentifier(p.name) || p.name.text !== "event") this.fail(p, `\`${factory}\` routing accepts only \`event\``, "NS1027");
+      let value: ts.Expression = p.initializer;
+      while (ts.isParenthesizedExpression(value) || ts.isAsExpression(value) || ts.isSatisfiesExpression(value)) value = value.expression;
+      if (!ts.isStringLiteral(value)) this.fail(value, `\`${factory}\` event arm is not a string literal`, "NS1027");
+      event = value;
+    }
+    if (!event) this.fail(route, `\`${factory}\` routing without an \`event\` arm`, "NS1027");
+    return event;
+  }
+
+  private emitAudioCaptureStartCmd(e: ts.CallExpression, ctx: Ctx): string {
+    const key = this.literalEffectKey(e, e.arguments[0], "Cmd.audioCaptureStart");
+    let options = e.arguments[1];
+    while (options && (ts.isParenthesizedExpression(options) || ts.isAsExpression(options) || ts.isSatisfiesExpression(options))) options = options.expression;
+    if (!options || !ts.isObjectLiteralExpression(options)) this.fail(e.arguments[1] ?? e, `\`Cmd.audioCaptureStart\` options must be an inline object`, "NS1029");
+    let path: string | null = null;
+    let systemAudio = false;
+    let microphoneKind = 0;
+    let microphoneID = '""';
+    let sampleRate = 48000;
+    let channels = 2;
+    let exclude = true;
+    for (const p of options.properties) {
+      if (!ts.isPropertyAssignment(p) || !ts.isIdentifier(p.name)) this.fail(p, `invalid Cmd.audioCaptureStart option`, "NS1029");
+      const name = p.name.text;
+      let value: ts.Expression = p.initializer;
+      while (ts.isParenthesizedExpression(value) || ts.isAsExpression(value) || ts.isSatisfiesExpression(value)) value = value.expression;
+      if (name === "path") path = this.effectBytesArg(e, p.initializer, "Cmd.audioCaptureStart path", MAX_AUDIO_PATH_BYTES, ctx);
+      else if (name === "systemAudio" || name === "excludeCurrentProcessAudio") {
+        if (value.kind !== ts.SyntaxKind.TrueKeyword && value.kind !== ts.SyntaxKind.FalseKeyword) this.fail(value, `Cmd.audioCaptureStart ${name} must be a boolean literal`, "NS1030");
+        const on = value.kind === ts.SyntaxKind.TrueKeyword;
+        if (name === "systemAudio") systemAudio = on; else exclude = on;
+      } else if (name === "microphone") {
+        if (ts.isStringLiteral(value)) {
+          if (value.text === "none") microphoneKind = 0;
+          else if (value.text === "default") microphoneKind = 1;
+          else this.fail(value, `Cmd.audioCaptureStart microphone string must be "none" or "default"`, "NS1030");
+        } else {
+          microphoneKind = 2;
+          microphoneID = this.effectBytesArg(e, p.initializer, "Cmd.audioCaptureStart microphone device id", 512, ctx);
+        }
+      } else if (name === "sampleRate") {
+        const literal = this.numberLiteralValue(value);
+        if (literal === null || ![16000, 24000, 44100, 48000].includes(literal)) this.fail(value, `Cmd.audioCaptureStart sampleRate must be 16000, 24000, 44100, or 48000`, "NS1030");
+        sampleRate = literal;
+      } else if (name === "channels") {
+        const literal = this.numberLiteralValue(value);
+        if (literal !== 1 && literal !== 2) this.fail(value, `Cmd.audioCaptureStart channels must be 1 or 2`, "NS1030");
+        channels = literal;
+      } else this.fail(p, `unknown Cmd.audioCaptureStart option \`${name}\``, "NS1029");
+    }
+    if (path === null) this.fail(options, `Cmd.audioCaptureStart requires path`, "NS1029");
+    if (!systemAudio && microphoneKind === 0) this.fail(options, `Cmd.audioCaptureStart must enable systemAudio and/or microphone`, "NS1030");
+    const event = this.eventRouteArm(e, e.arguments[2], "Cmd.audioCaptureStart");
+    const tag = this.audioCaptureEventArmTag(event, ctx);
+    return `rt.cmdAudioCaptureStart("${escapeZigString(key)}", ${tag}, ${path}, ${systemAudio}, ${microphoneKind}, ${microphoneID}, ${sampleRate}, ${channels}, ${exclude})`;
+  }
+
+  private emitMicrophoneDevicesCmd(e: ts.CallExpression, ctx: Ctx): string {
+    const key = this.literalEffectKey(e, e.arguments[0], "Cmd.microphoneDevices");
+    const event = this.eventRouteArm(e, e.arguments[1], "Cmd.microphoneDevices");
+    return `rt.cmdMicrophoneDevices("${escapeZigString(key)}", ${this.microphoneDeviceEventArmTag(event, ctx)})`;
+  }
+
+  private emitAudioCaptureAccessCmd(e: ts.CallExpression, ctx: Ctx): string {
+    const key = this.literalEffectKey(e, e.arguments[0], "Cmd.audioCaptureAccess");
+    const source = e.arguments[1];
+    const action = e.arguments[2];
+    if (!source || !ts.isStringLiteral(source) || !AUDIO_CAPTURE_ACCESS_SOURCES.includes(source.text)) this.fail(source ?? e, `Cmd.audioCaptureAccess source must be "system_audio" or "microphone"`, "NS1030");
+    if (!action || !ts.isStringLiteral(action) || (action.text !== "status" && action.text !== "request")) this.fail(action ?? e, `Cmd.audioCaptureAccess action must be "status" or "request"`, "NS1030");
+    const event = this.eventRouteArm(e, e.arguments[3], "Cmd.audioCaptureAccess");
+    return `rt.cmdAudioCaptureAccess("${escapeZigString(key)}", ${this.audioCaptureAccessEventArmTag(event, ctx)}, ${source.text === "microphone" ? 1 : 0}, ${action.text === "request" ? 1 : 0})`;
+  }
+
+  private fixedEventArm(arg: ts.StringLiteral, ctx: Ctx): { arm: UnionArm; unionName: string } {
+    const unionName = ctx.cmdReturn!.msgUnion;
+    const info = this.table.unions.get(unionName);
+    if (!info) this.fail(arg, `unknown union ${unionName}`);
+    const arm = info.arms.find((candidate) => candidate.tag === arg.text);
+    if (!arm) this.fail(arg, `routing target \`${arg.text}\` is not an arm of ${unionName}`, "NS1027");
+    return { arm, unionName };
+  }
+
+  private enumFieldMatches(field: ZField | undefined, members: readonly string[]): boolean {
+    return field !== undefined && field.type.k === "enum" && field.type.members.length === members.length && members.every((member) => field.type.k === "enum" && field.type.members.includes(member));
+  }
+
+  private audioCaptureEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
+    const { arm, unionName } = this.fixedEventArm(arg, ctx);
+    const fields = new Map(arm.fields.map((f) => [f.tsName, f]));
+    const number = (name: string) => ["number", "i64", "f64"].includes(fields.get(name)?.type.k ?? "");
+    const ok = arm.fields.length === 6 && fields.get("key")?.type.k === "string" &&
+      this.enumFieldMatches(fields.get("state"), AUDIO_CAPTURE_STATES) && this.enumFieldMatches(fields.get("reason"), AUDIO_CAPTURE_REASONS) &&
+      number("durationMs") && number("bytesWritten") && fields.get("outputCommitted")?.type.k === "bool";
+    if (!ok) this.fail(arg, `audio capture event arm must carry key, state, reason, durationMs, bytesWritten, and outputCommitted`, "NS1027");
+    return `@intFromEnum(std.meta.Tag(${unionName}).${zigId(arg.text)})`;
+  }
+
+  private microphoneDeviceEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
+    const { arm, unionName } = this.fixedEventArm(arg, ctx);
+    const fields = new Map(arm.fields.map((f) => [f.tsName, f]));
+    const number = (name: string) => ["number", "i64", "f64"].includes(fields.get(name)?.type.k ?? "");
+    const ok = arm.fields.length === 7 && fields.get("key")?.type.k === "string" && this.enumFieldMatches(fields.get("state"), MICROPHONE_DEVICE_STATES) &&
+      fields.get("id")?.type.k === "bytes" && fields.get("name")?.type.k === "bytes" && fields.get("isDefault")?.type.k === "bool" && number("index") && number("total");
+    if (!ok) this.fail(arg, `microphone device event arm must carry key, state, id, name, isDefault, index, and total`, "NS1027");
+    return `@intFromEnum(std.meta.Tag(${unionName}).${zigId(arg.text)})`;
+  }
+
+  private audioCaptureAccessEventArmTag(arg: ts.StringLiteral, ctx: Ctx): string {
+    const { arm, unionName } = this.fixedEventArm(arg, ctx);
+    const fields = new Map(arm.fields.map((f) => [f.tsName, f]));
+    const ok = arm.fields.length === 4 && fields.get("key")?.type.k === "string" && this.enumFieldMatches(fields.get("source"), AUDIO_CAPTURE_ACCESS_SOURCES) &&
+      this.enumFieldMatches(fields.get("status"), AUDIO_CAPTURE_ACCESS_STATUSES) && fields.get("restartRequired")?.type.k === "bool";
+    if (!ok) this.fail(arg, `audio capture access event arm must carry key, source, status, and restartRequired`, "NS1027");
+    return `@intFromEnum(std.meta.Tag(${unionName}).${zigId(arg.text)})`;
   }
 
   /// `Cmd.imageLoad(id, source, route)`: the app's numeric ImageId (any
@@ -3864,6 +4005,14 @@ export class Emitter {
         }
         return `rt.subTimer("${escapeZigString(keyArg.text)}", ${every}, @intFromEnum(std.meta.Tag(${unionName}).${zigId(kindArg.text)}))`;
       }
+      if (method === "microphoneDevicesChanged") {
+        const kindArg = e.arguments[0];
+        if (!kindArg || !ts.isStringLiteral(kindArg)) this.fail(e, `Sub.microphoneDevicesChanged takes its target Msg kind as a string literal`, "NS1027");
+        const unionName = ctx.subReturn!.msgUnion;
+        const arm = this.table.unions.get(unionName)?.arms.find((candidate) => candidate.tag === kindArg.text);
+        if (!arm || arm.fields.length !== 0) this.fail(kindArg, `microphone device change target must carry no payload fields`, "NS1027");
+        return `rt.subMicrophoneDevicesChanged(@intFromEnum(std.meta.Tag(${unionName}).${zigId(kindArg.text)}))`;
+      }
       if (method === "batch") {
         const arr = e.arguments[0];
         if (!arr || !ts.isArrayLiteralExpression(arr)) this.fail(e, "Sub.batch argument (an array literal)");
@@ -3871,7 +4020,7 @@ export class Emitter {
         if (parts.length === 0) return "rt.sub_none";
         return `rt.subBatch(&.{ ${parts.join(", ")} })`;
       }
-      this.fail(e, `Sub.${method} (the subscription set is none, timer, batch)`);
+      this.fail(e, `Sub.${method} (the subscription set is none, timer, microphoneDevicesChanged, batch)`);
     }
     this.fail(expr, "subscription expression (Sub values are built inline from the Sub.* factories)");
   }

@@ -1,0 +1,7 @@
+{
+  "name": "audio-capture-ts",
+  "private": true,
+  "dependencies": {
+    "@native-sdk/core": "0.7.1"
+  }
+}
