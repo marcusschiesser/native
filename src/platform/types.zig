@@ -158,6 +158,12 @@ pub const PlatformFeature = enum {
     /// keeps emitting; the null platform models the rule through its
     /// windows' modeled occlusion so the suites can pin it.
     audio_spectrum,
+    /// Capture all system output audio into an app-selected PCM WAV file.
+    system_audio_capture,
+    /// Capture a default or explicitly selected microphone into PCM WAV.
+    microphone_capture,
+    /// Enumerate connected microphones and observe list invalidations.
+    microphone_device_enumeration,
     /// The `close_policy = .hide` window shape: the host can intercept
     /// the user's close affordance, keep the window alive off the
     /// glass, and re-show it later (`show_window_fn`, tray actions, the
@@ -1208,6 +1214,9 @@ pub const AppInfo = struct {
     /// folds this into its `window_hide_on_close` answer; macOS ignores
     /// it (the Dock reopen path always exists).
     declares_tray: bool = false,
+    /// Manifest permission grants, threaded to native services so APIs
+    /// that bypass the web bridge still enforce the same declaration.
+    permissions: []const []const u8 = &.{},
     window_title: []const u8 = "",
     bundle_id: []const u8 = "dev.native_sdk.app",
     icon_path: []const u8 = "",
@@ -1450,6 +1459,98 @@ pub const AudioEvent = struct {
 pub const AudioLoadResolution = enum(u8) {
     cache,
     stream,
+};
+
+pub const max_audio_capture_path_bytes: usize = 1024;
+pub const max_microphone_device_id_bytes: usize = 512;
+pub const max_microphone_device_name_bytes: usize = 512;
+
+pub const MicrophoneSelectionKind = enum(u8) {
+    none,
+    default,
+    device_id,
+};
+
+pub const AudioCaptureConfig = struct {
+    path: []const u8,
+    system_audio: bool = false,
+    microphone: MicrophoneSelectionKind = .none,
+    microphone_device_id: []const u8 = &.{},
+    sample_rate_hz: u32 = 48_000,
+    channel_count: u8 = 2,
+    exclude_current_process_audio: bool = true,
+};
+
+pub const AudioCaptureEventState = enum(u8) {
+    started,
+    stopped,
+    failed,
+    rejected,
+};
+
+pub const AudioCaptureEventReason = enum(u8) {
+    none,
+    invalid_options,
+    permission_missing,
+    permission_required,
+    already_recording,
+    device_not_found,
+    device_disconnected,
+    output_exists,
+    io_failed,
+    capture_failed,
+    no_audio,
+    unsupported,
+};
+
+pub const AudioCaptureEvent = struct {
+    state: AudioCaptureEventState,
+    reason: AudioCaptureEventReason = .none,
+    duration_ms: u64 = 0,
+    bytes_written: u64 = 0,
+    output_committed: bool = false,
+};
+
+pub const MicrophoneDeviceEventState = enum(u8) {
+    device,
+    completed,
+    failed,
+    rejected,
+};
+
+/// Device strings are borrowed for the duration of EventHandler dispatch.
+pub const MicrophoneDeviceEvent = struct {
+    state: MicrophoneDeviceEventState,
+    id: []const u8 = &.{},
+    name: []const u8 = &.{},
+    is_default: bool = false,
+    index: u32 = 0,
+    total: u32 = 0,
+};
+
+pub const AudioCaptureAccessSource = enum(u8) {
+    system_audio,
+    microphone,
+};
+
+pub const AudioCaptureAccessAction = enum(u8) {
+    status,
+    request,
+};
+
+pub const AudioCaptureAccessStatus = enum(u8) {
+    authorized,
+    not_authorized,
+    not_determined,
+    denied,
+    restricted,
+    unavailable,
+};
+
+pub const AudioCaptureAccessEvent = struct {
+    source: AudioCaptureAccessSource,
+    status: AudioCaptureAccessStatus,
+    restart_required: bool = false,
 };
 
 /// Longest video source string (local path or URL) `videoLoad`/
@@ -2255,6 +2356,10 @@ pub const Event = union(enum) {
     /// Audio player reports: load acknowledgment, coarse position ticks
     /// while playing, one completion at natural end, async failures.
     audio: AudioEvent,
+    audio_capture: AudioCaptureEvent,
+    microphone_device: MicrophoneDeviceEvent,
+    microphone_devices_changed,
+    audio_capture_access: AudioCaptureAccessEvent,
     /// Video player reports — the same shape, plus the stream's decoded
     /// dimensions on `.loaded`. Pixels never ride here.
     video: VideoEvent,
@@ -2286,6 +2391,10 @@ pub const Event = union(enum) {
             .context_menu_action => "context_menu_action",
             .widget_accessibility_action => "widget_accessibility_action",
             .audio => "audio",
+            .audio_capture => "audio_capture",
+            .microphone_device => "microphone_device",
+            .microphone_devices_changed => "microphone_devices_changed",
+            .audio_capture_access => "audio_capture_access",
             .video => "video",
         };
     }
@@ -2461,6 +2570,11 @@ pub const PlatformServices = struct {
     audio_seek_fn: ?*const fn (context: ?*anyopaque, position_ms: u64) anyerror!void = null,
     /// Set the player volume, `0.0` (silent) through `1.0` (full).
     audio_set_volume_fn: ?*const fn (context: ?*anyopaque, volume: f32) anyerror!void = null,
+    audio_capture_start_fn: ?*const fn (context: ?*anyopaque, config: AudioCaptureConfig) anyerror!void = null,
+    audio_capture_stop_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    microphone_devices_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
+    audio_capture_access_fn: ?*const fn (context: ?*anyopaque, source: AudioCaptureAccessSource, action: AudioCaptureAccessAction) anyerror!void = null,
+    microphone_devices_observe_fn: ?*const fn (context: ?*anyopaque, enabled: bool) anyerror!void = null,
     /// Load a local video file into THE app's single video player,
     /// leaving it PAUSED at position zero (transport is a separate
     /// verb, exactly like audio). Loading replaces whatever was loaded
@@ -3064,6 +3178,31 @@ pub const PlatformServices = struct {
         return volume_fn(self.context, volume);
     }
 
+    pub fn audioCaptureStart(self: PlatformServices, config: AudioCaptureConfig) anyerror!void {
+        const start_fn = self.audio_capture_start_fn orelse return error.UnsupportedService;
+        return start_fn(self.context, config);
+    }
+
+    pub fn audioCaptureStop(self: PlatformServices) anyerror!void {
+        const stop_fn = self.audio_capture_stop_fn orelse return error.UnsupportedService;
+        return stop_fn(self.context);
+    }
+
+    pub fn microphoneDevices(self: PlatformServices) anyerror!void {
+        const list_fn = self.microphone_devices_fn orelse return error.UnsupportedService;
+        return list_fn(self.context);
+    }
+
+    pub fn audioCaptureAccess(self: PlatformServices, source: AudioCaptureAccessSource, action: AudioCaptureAccessAction) anyerror!void {
+        const access_fn = self.audio_capture_access_fn orelse return error.UnsupportedService;
+        return access_fn(self.context, source, action);
+    }
+
+    pub fn observeMicrophoneDevices(self: PlatformServices, enabled: bool) anyerror!void {
+        const observe_fn = self.microphone_devices_observe_fn orelse return error.UnsupportedService;
+        return observe_fn(self.context, enabled);
+    }
+
     /// Load a local video file into the app's single video player (see
     /// `video_load_fn`). Platforms without video playback answer
     /// `error.UnsupportedService`; bad arguments are rejected here
@@ -3303,6 +3442,9 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         // cannot see it; platforms that analyze answer through their own
         // `supports_fn` (like file_drops and gpu_surfaces above).
         .audio_spectrum => false,
+        .system_audio_capture => services.audio_capture_start_fn != null,
+        .microphone_capture => services.audio_capture_start_fn != null,
+        .microphone_device_enumeration => services.microphone_devices_fn != null,
         // Hide-on-close is host close-delegate behavior, not a service
         // verb: hosts that implement it answer through their own
         // `supports_fn`. The generic floor is honest refusal.

@@ -651,6 +651,47 @@ pub const EffectAudioSource = enum(u8) {
     stream,
 };
 
+pub const EffectAudioCaptureState = platform.AudioCaptureEventState;
+pub const EffectAudioCaptureReason = platform.AudioCaptureEventReason;
+pub const EffectMicrophoneDeviceState = platform.MicrophoneDeviceEventState;
+pub const EffectAudioCaptureAccessSource = platform.AudioCaptureAccessSource;
+pub const EffectAudioCaptureAccessAction = platform.AudioCaptureAccessAction;
+pub const EffectAudioCaptureAccessStatus = platform.AudioCaptureAccessStatus;
+
+pub const EffectAudioCapture = struct {
+    key: u64,
+    state: EffectAudioCaptureState,
+    reason: EffectAudioCaptureReason = .none,
+    duration_ms: u64 = 0,
+    bytes_written: u64 = 0,
+    output_committed: bool = false,
+};
+
+/// Strings borrow platform event storage and must be copied before the
+/// update callback returns when an app wants to retain them in its model.
+pub const EffectMicrophoneDevice = struct {
+    key: u64,
+    state: EffectMicrophoneDeviceState,
+    id: []const u8 = &.{},
+    name: []const u8 = &.{},
+    is_default: bool = false,
+    index: u32 = 0,
+    total: u32 = 0,
+};
+
+pub const EffectAudioCaptureAccess = struct {
+    key: u64,
+    source: EffectAudioCaptureAccessSource,
+    status: EffectAudioCaptureAccessStatus,
+    restart_required: bool = false,
+};
+
+pub const MicrophoneSelection = union(enum) {
+    none,
+    default,
+    device_id: []const u8,
+};
+
 /// Longest video source string (path or url) `loadVideo` accepts,
 /// mirroring the platform bound. Longer strings deliver exactly one
 /// `.rejected` video event Msg.
@@ -2403,6 +2444,10 @@ pub fn Effects(comptime Msg: type) type {
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
         pub const AudioMsgFn = *const fn (event: EffectAudio) Msg;
+        pub const AudioCaptureMsgFn = *const fn (event: EffectAudioCapture) Msg;
+        pub const MicrophoneDeviceMsgFn = *const fn (event: EffectMicrophoneDevice) Msg;
+        pub const AudioCaptureAccessMsgFn = *const fn (event: EffectAudioCaptureAccess) Msg;
+        pub const MicrophoneDevicesChangedMsgFn = *const fn () Msg;
         pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
         pub const ImageMsgFn = *const fn (result: EffectImageResult) Msg;
@@ -2488,6 +2533,38 @@ pub fn Effects(comptime Msg: type) type {
             return struct {
                 fn make(event: EffectAudio) Msg {
                     return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        pub fn audioCaptureMsg(comptime tag: std.meta.Tag(Msg)) AudioCaptureMsgFn {
+            return struct {
+                fn make(event: EffectAudioCapture) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        pub fn microphoneDeviceMsg(comptime tag: std.meta.Tag(Msg)) MicrophoneDeviceMsgFn {
+            return struct {
+                fn make(event: EffectMicrophoneDevice) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        pub fn audioCaptureAccessMsg(comptime tag: std.meta.Tag(Msg)) AudioCaptureAccessMsgFn {
+            return struct {
+                fn make(event: EffectAudioCaptureAccess) Msg {
+                    return @unionInit(Msg, @tagName(tag), event);
+                }
+            }.make;
+        }
+
+        pub fn microphoneDevicesChangedMsg(comptime tag: std.meta.Tag(Msg)) MicrophoneDevicesChangedMsgFn {
+            return struct {
+                fn make() Msg {
+                    return @unionInit(Msg, @tagName(tag), {});
                 }
             }.make;
         }
@@ -2792,6 +2869,29 @@ pub fn Effects(comptime Msg: type) type {
             /// `audioMsg`). Without one, playback still runs; the app
             /// just hears nothing back.
             on_event: ?AudioMsgFn = null,
+        };
+
+        pub const StartAudioCaptureOptions = struct {
+            key: u64,
+            path: []const u8,
+            system_audio: bool = false,
+            microphone: MicrophoneSelection = .none,
+            sample_rate_hz: u32 = 48_000,
+            channel_count: u8 = 2,
+            exclude_current_process_audio: bool = true,
+            on_event: ?AudioCaptureMsgFn = null,
+        };
+
+        pub const ListMicrophoneDevicesOptions = struct {
+            key: u64,
+            on_event: ?MicrophoneDeviceMsgFn = null,
+        };
+
+        pub const AudioCaptureAccessOptions = struct {
+            key: u64,
+            source: EffectAudioCaptureAccessSource,
+            action: EffectAudioCaptureAccessAction = .status,
+            on_event: ?AudioCaptureAccessMsgFn = null,
         };
 
         pub const LoadImageOptions = struct {
@@ -3132,6 +3232,25 @@ pub fn Effects(comptime Msg: type) type {
             }
         };
 
+        const AudioCaptureChannel = struct {
+            active: bool = false,
+            fake: bool = false,
+            key: u64 = 0,
+            on_event: ?AudioCaptureMsgFn = null,
+        };
+
+        const MicrophoneDeviceQuery = struct {
+            active: bool = false,
+            key: u64 = 0,
+            on_event: ?MicrophoneDeviceMsgFn = null,
+        };
+
+        const AudioCaptureAccessQuery = struct {
+            active: bool = false,
+            key: u64 = 0,
+            on_event: ?AudioCaptureAccessMsgFn = null,
+        };
+
         /// Playback state the automation snapshot exposes: honest — it
         /// reports what the platform has told us, not what the UI wishes.
         pub const AudioSnapshot = struct {
@@ -3436,6 +3555,10 @@ pub fn Effects(comptime Msg: type) type {
             /// `takeAudioMsg`. Non-resolving entries (rejections and
             /// synchronous failures) are fully formed at enqueue.
             audio: struct { event: EffectAudio, audio_fn: ?AudioMsgFn, resolve: bool },
+            audio_capture: struct { event: EffectAudioCapture, capture_fn: ?AudioCaptureMsgFn },
+            microphone_device: struct { event: EffectMicrophoneDevice, device_fn: ?MicrophoneDeviceMsgFn },
+            audio_capture_access: struct { event: EffectAudioCaptureAccess, access_fn: ?AudioCaptureAccessMsgFn },
+            microphone_devices_changed: struct { changed_fn: ?MicrophoneDevicesChangedMsgFn },
             /// The audio entry's shape for the video channel, staged
             /// in the non-lossy `pending_videos` (see `PendingVideo`)
             /// and taking this union shape only at drain time.
@@ -3493,6 +3616,7 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectAudio carries no drop counter either; the
                     // next position tick supersedes a lost one.
                     .audio => {},
+                    .audio_capture, .microphone_device, .audio_capture_access, .microphone_devices_changed => {},
                     // Video events never enter the ring (they stage in
                     // the non-lossy `pending_videos`): a loop-side
                     // `.rejected`/`.failed` is its load's only
@@ -3532,6 +3656,7 @@ pub fn Effects(comptime Msg: type) type {
                     .clipboard => |entry| entry.result.dropped_before,
                     .timer => 0,
                     .audio => 0,
+                    .audio_capture, .microphone_device, .audio_capture_access, .microphone_devices_changed => 0,
                     .pty => 0,
                     .host => 0,
                     // Never in the ring; see `addDropped`.
@@ -4254,6 +4379,10 @@ pub fn Effects(comptime Msg: type) type {
         /// The single audio playback channel (see `AudioChannel`).
         /// Loop-thread only, like the timer table.
         audio: AudioChannel = .{},
+        audio_capture: AudioCaptureChannel = .{},
+        microphone_device_query: MicrophoneDeviceQuery = .{},
+        audio_capture_access_query: AudioCaptureAccessQuery = .{},
+        microphone_devices_changed_fn: ?MicrophoneDevicesChangedMsgFn = null,
         /// The single video playback channel (see `VideoChannel`).
         video: VideoChannel = .{},
         /// Monotonic per-load video token mint (see
@@ -4485,6 +4614,16 @@ pub fn Effects(comptime Msg: type) type {
                 if (self.services) |services| services.audioStop() catch {};
             }
             self.audio = .{};
+            if (self.audio_capture.active and !self.audio_capture.fake) {
+                if (self.services) |services| services.audioCaptureStop() catch {};
+            }
+            if (self.microphone_devices_changed_fn != null) {
+                if (self.services) |services| services.observeMicrophoneDevices(false) catch {};
+            }
+            self.audio_capture = .{};
+            self.microphone_device_query = .{};
+            self.audio_capture_access_query = .{};
+            self.microphone_devices_changed_fn = null;
             // Stop the platform video player (best effort), release the
             // media-surface claim, and clear the channel.
             if (self.video.active and !self.video.fake) {
@@ -7824,6 +7963,194 @@ pub fn Effects(comptime Msg: type) type {
             services.audioSetVolume(clamped) catch {};
         }
 
+        pub fn startAudioCapture(self: *Self, options: StartAudioCaptureOptions) void {
+            var microphone_kind: platform.MicrophoneSelectionKind = .none;
+            var microphone_id: []const u8 = &.{};
+            switch (options.microphone) {
+                .none => {},
+                .default => microphone_kind = .default,
+                .device_id => |id| {
+                    microphone_kind = .device_id;
+                    microphone_id = id;
+                },
+            }
+            const valid_rate = options.sample_rate_hz == 16_000 or options.sample_rate_hz == 24_000 or
+                options.sample_rate_hz == 44_100 or options.sample_rate_hz == 48_000;
+            const rejected = options.path.len == 0 or options.path.len > platform.max_audio_capture_path_bytes or
+                (!options.system_audio and microphone_kind == .none) or
+                (microphone_kind == .device_id and (microphone_id.len == 0 or microphone_id.len > platform.max_microphone_device_id_bytes)) or
+                !valid_rate or (options.channel_count != 1 and options.channel_count != 2);
+            if (rejected) {
+                self.deliverPending(.{ .audio_capture = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                    .reason = .invalid_options,
+                }, .capture_fn = options.on_event } });
+                return;
+            }
+            if (self.audio_capture.active) {
+                self.deliverPending(.{ .audio_capture = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                    .reason = .already_recording,
+                }, .capture_fn = options.on_event } });
+                return;
+            }
+            self.audio_capture = .{
+                .active = true,
+                .fake = self.executor == .fake,
+                .key = options.key,
+                .on_event = options.on_event,
+            };
+            if (self.audio_capture.fake) {
+                // Session replay parks the request until the recorded
+                // platform events arrive. Ordinary fake-executor tests
+                // keep their deterministic synthetic lifecycle.
+                if (self.replay) return;
+                self.deliverPending(.{ .audio_capture = .{ .event = .{ .key = options.key, .state = .started }, .capture_fn = options.on_event } });
+                return;
+            }
+            const services = self.services orelse return self.rejectAudioCapture(.unsupported);
+            services.audioCaptureStart(.{
+                .path = options.path,
+                .system_audio = options.system_audio,
+                .microphone = microphone_kind,
+                .microphone_device_id = microphone_id,
+                .sample_rate_hz = options.sample_rate_hz,
+                .channel_count = options.channel_count,
+                .exclude_current_process_audio = options.exclude_current_process_audio,
+            }) catch |err| return self.rejectAudioCapture(switch (err) {
+                error.UnsupportedService => .unsupported,
+                error.PermissionMissing => .permission_missing,
+                error.AudioCapturePermissionRequired => .permission_required,
+                error.AudioCaptureAlreadyActive => .already_recording,
+                error.MicrophoneDeviceNotFound => .device_not_found,
+                error.AudioCaptureOutputExists => .output_exists,
+                error.AudioCaptureIoFailed => .io_failed,
+                error.InvalidAudioCaptureOptions => .invalid_options,
+                else => .capture_failed,
+            });
+        }
+
+        pub fn stopAudioCapture(self: *Self) void {
+            if (!self.audio_capture.active) return;
+            const key = self.audio_capture.key;
+            const on_event = self.audio_capture.on_event;
+            if (self.audio_capture.fake) {
+                // The recorded terminal event is authoritative during
+                // replay; keep the parked route alive until it arrives.
+                if (self.replay) return;
+                self.audio_capture = .{};
+                self.deliverPending(.{ .audio_capture = .{ .event = .{
+                    .key = key,
+                    .state = .stopped,
+                    .output_committed = true,
+                }, .capture_fn = on_event } });
+                return;
+            }
+            const services = self.services orelse return self.failAudioCapture(.unsupported);
+            services.audioCaptureStop() catch return self.failAudioCapture(.capture_failed);
+        }
+
+        pub fn listMicrophoneDevices(self: *Self, options: ListMicrophoneDevicesOptions) void {
+            if (self.microphone_device_query.active) {
+                self.deliverPending(.{ .microphone_device = .{ .event = .{
+                    .key = options.key,
+                    .state = .rejected,
+                }, .device_fn = options.on_event } });
+                return;
+            }
+            self.microphone_device_query = .{ .active = true, .key = options.key, .on_event = options.on_event };
+            if (self.executor == .fake) {
+                if (self.replay) return;
+                self.deliverPending(.{ .microphone_device = .{ .event = .{ .key = options.key, .state = .device, .id = "default-mic", .name = "Default Microphone", .is_default = true, .index = 0, .total = 2 }, .device_fn = options.on_event } });
+                self.deliverPending(.{ .microphone_device = .{ .event = .{ .key = options.key, .state = .device, .id = "usb-mic", .name = "USB Microphone", .index = 1, .total = 2 }, .device_fn = options.on_event } });
+                self.deliverPending(.{ .microphone_device = .{ .event = .{ .key = options.key, .state = .completed, .index = 2, .total = 2 }, .device_fn = options.on_event } });
+                self.microphone_device_query = .{};
+                return;
+            }
+            const services = self.services orelse return self.finishMicrophoneDevices(.rejected);
+            services.microphoneDevices() catch |err| return self.finishMicrophoneDevices(if (err == error.UnsupportedService or err == error.PermissionMissing) .rejected else .failed);
+        }
+
+        pub fn audioCaptureAccess(self: *Self, options: AudioCaptureAccessOptions) void {
+            if (self.audio_capture_access_query.active) {
+                self.deliverPending(.{ .audio_capture_access = .{ .event = .{
+                    .key = options.key,
+                    .source = options.source,
+                    .status = .unavailable,
+                }, .access_fn = options.on_event } });
+                return;
+            }
+            self.audio_capture_access_query = .{ .active = true, .key = options.key, .on_event = options.on_event };
+            if (self.executor == .fake) {
+                if (self.replay) return;
+                self.deliverPending(.{ .audio_capture_access = .{ .event = .{
+                    .key = options.key,
+                    .source = options.source,
+                    .status = .authorized,
+                }, .access_fn = options.on_event } });
+                self.audio_capture_access_query = .{};
+                return;
+            }
+            const services = self.services orelse return self.failAudioCaptureAccess(options.source);
+            services.audioCaptureAccess(options.source, options.action) catch return self.failAudioCaptureAccess(options.source);
+        }
+
+        pub fn observeMicrophoneDevices(self: *Self, on_change: ?MicrophoneDevicesChangedMsgFn) void {
+            self.microphone_devices_changed_fn = on_change;
+            if (self.executor == .fake) return;
+            const services = self.services orelse return;
+            services.observeMicrophoneDevices(on_change != null) catch {};
+        }
+
+        pub fn takeAudioCaptureMsg(self: *Self, event: platform.AudioCaptureEvent) ?Msg {
+            if (!self.audio_capture.active) return null;
+            const key = self.audio_capture.key;
+            const event_fn = self.audio_capture.on_event;
+            if (event.state != .started) self.audio_capture = .{};
+            const map = event_fn orelse return null;
+            return map(.{
+                .key = key,
+                .state = event.state,
+                .reason = event.reason,
+                .duration_ms = event.duration_ms,
+                .bytes_written = event.bytes_written,
+                .output_committed = event.output_committed,
+            });
+        }
+
+        pub fn takeMicrophoneDeviceMsg(self: *Self, event: platform.MicrophoneDeviceEvent) ?Msg {
+            if (!self.microphone_device_query.active) return null;
+            const key = self.microphone_device_query.key;
+            const event_fn = self.microphone_device_query.on_event;
+            if (event.state != .device) self.microphone_device_query = .{};
+            const map = event_fn orelse return null;
+            return map(.{
+                .key = key,
+                .state = event.state,
+                .id = event.id,
+                .name = event.name,
+                .is_default = event.is_default,
+                .index = event.index,
+                .total = event.total,
+            });
+        }
+
+        pub fn takeAudioCaptureAccessMsg(self: *Self, event: platform.AudioCaptureAccessEvent) ?Msg {
+            if (!self.audio_capture_access_query.active) return null;
+            const key = self.audio_capture_access_query.key;
+            const event_fn = self.audio_capture_access_query.on_event;
+            self.audio_capture_access_query = .{};
+            const map = event_fn orelse return null;
+            return map(.{ .key = key, .source = event.source, .status = event.status, .restart_required = event.restart_required });
+        }
+
+        pub fn takeMicrophoneDevicesChangedMsg(self: *Self) ?Msg {
+            const map = self.microphone_devices_changed_fn orelse return null;
+            return map();
+        }
+
         /// Route a platform audio event back into an `on_event` Msg for
         /// the active channel, updating the playback mirrors on the way.
         /// Null when the channel is idle (a straggler after `stopAudio`)
@@ -8973,6 +9300,22 @@ pub fn Effects(comptime Msg: type) type {
                                 .audio_bands = event.bands,
                             });
                             return event_fn(event);
+                        },
+                        .audio_capture => |entry| {
+                            const event_fn = entry.capture_fn orelse continue;
+                            return event_fn(entry.event);
+                        },
+                        .microphone_device => |entry| {
+                            const event_fn = entry.device_fn orelse continue;
+                            return event_fn(entry.event);
+                        },
+                        .audio_capture_access => |entry| {
+                            const event_fn = entry.access_fn orelse continue;
+                            return event_fn(entry.event);
+                        },
+                        .microphone_devices_changed => |entry| {
+                            const event_fn = entry.changed_fn orelse continue;
+                            return event_fn();
                         },
                         .video => |entry| {
                             var event = entry.event;
@@ -11248,6 +11591,49 @@ pub fn Effects(comptime Msg: type) type {
             const on_event = self.audio.on_event;
             self.audio = .{ .volume = self.audio.volume };
             self.deliverLoopAudio(.{ .key = key, .kind = .failed }, on_event);
+        }
+
+        fn failAudioCapture(self: *Self, reason: EffectAudioCaptureReason) void {
+            const key = self.audio_capture.key;
+            const on_event = self.audio_capture.on_event;
+            self.audio_capture = .{};
+            self.deliverPending(.{ .audio_capture = .{ .event = .{
+                .key = key,
+                .state = .failed,
+                .reason = reason,
+            }, .capture_fn = on_event } });
+        }
+
+        fn rejectAudioCapture(self: *Self, reason: EffectAudioCaptureReason) void {
+            const key = self.audio_capture.key;
+            const on_event = self.audio_capture.on_event;
+            self.audio_capture = .{};
+            self.deliverPending(.{ .audio_capture = .{ .event = .{
+                .key = key,
+                .state = .rejected,
+                .reason = reason,
+            }, .capture_fn = on_event } });
+        }
+
+        fn finishMicrophoneDevices(self: *Self, state: EffectMicrophoneDeviceState) void {
+            const key = self.microphone_device_query.key;
+            const on_event = self.microphone_device_query.on_event;
+            self.microphone_device_query = .{};
+            self.deliverPending(.{ .microphone_device = .{ .event = .{
+                .key = key,
+                .state = state,
+            }, .device_fn = on_event } });
+        }
+
+        fn failAudioCaptureAccess(self: *Self, source: EffectAudioCaptureAccessSource) void {
+            const key = self.audio_capture_access_query.key;
+            const on_event = self.audio_capture_access_query.on_event;
+            self.audio_capture_access_query = .{};
+            self.deliverPending(.{ .audio_capture_access = .{ .event = .{
+                .key = key,
+                .source = source,
+                .status = .unavailable,
+            }, .access_fn = on_event } });
         }
 
         /// Queue an audio event Msg produced on the loop thread
