@@ -4,6 +4,9 @@ const geometry = @import("geometry");
 const platform_mod = @import("../root.zig");
 
 fn isMacOS15OrNewer() bool {
+    // This backend is imported into every desktop target's platform tests.
+    // Keep the Darwin-only sysctl out of Linux and Windows compilation.
+    if (comptime builtin.os.tag != .macos) return false;
     var version_buf: [64]u8 = undefined;
     var version_len: usize = version_buf.len;
     if (std.posix.system.sysctlbyname("kern.osproductversion", &version_buf, &version_len, null, 0) != 0) return false;
@@ -1128,26 +1131,48 @@ fn videoEventKindFromInt(value: c_int) platform_mod.VideoEventKind {
 }
 
 fn audioCaptureStateFromInt(value: c_int) platform_mod.AudioCaptureEventState {
-    return switch (value) { 0 => .started, 1 => .stopped, 2 => .failed, else => .rejected };
+    return switch (value) {
+        0 => .started,
+        1 => .stopped,
+        2 => .failed,
+        else => .rejected,
+    };
 }
 
 fn audioCaptureReasonFromInt(value: c_int) platform_mod.AudioCaptureEventReason {
     return switch (value) {
-        0 => .none, 1 => .invalid_options, 2 => .permission_missing, 3 => .permission_required,
-        4 => .already_recording, 5 => .device_not_found, 6 => .device_disconnected,
-        7 => .output_exists, 8 => .io_failed, 9 => .capture_failed, 10 => .no_audio,
+        0 => .none,
+        1 => .invalid_options,
+        2 => .permission_missing,
+        3 => .permission_required,
+        4 => .already_recording,
+        5 => .device_not_found,
+        6 => .device_disconnected,
+        7 => .output_exists,
+        8 => .io_failed,
+        9 => .capture_failed,
+        10 => .no_audio,
         else => .unsupported,
     };
 }
 
 fn microphoneDeviceStateFromInt(value: c_int) platform_mod.MicrophoneDeviceEventState {
-    return switch (value) { 0 => .device, 1 => .completed, 2 => .failed, else => .rejected };
+    return switch (value) {
+        0 => .device,
+        1 => .completed,
+        2 => .failed,
+        else => .rejected,
+    };
 }
 
 fn audioCaptureAccessStatusFromInt(value: c_int) platform_mod.AudioCaptureAccessStatus {
     return switch (value) {
-        0 => .authorized, 1 => .not_authorized, 2 => .not_determined,
-        3 => .denied, 4 => .restricted, else => .unavailable,
+        0 => .authorized,
+        1 => .not_authorized,
+        2 => .not_determined,
+        3 => .denied,
+        4 => .restricted,
+        else => .unavailable,
     };
 }
 
