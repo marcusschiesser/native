@@ -7,6 +7,7 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreMedia/CoreMedia.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <objc/message.h>
 #pragma clang diagnostic pop
 #include <math.h>
 #include <stdlib.h>
@@ -26,6 +27,24 @@ enum {
     NS_ACCESS_AUTHORIZED = 0, NS_ACCESS_NOT_AUTHORIZED = 1, NS_ACCESS_NOT_DETERMINED = 2,
     NS_ACCESS_DENIED = 3, NS_ACCESS_RESTRICTED = 4, NS_ACCESS_UNAVAILABLE = 5,
 };
+
+/*
+ * Native SDK still builds with Xcode 15.4 / the macOS 14.5 SDK. The
+ * ScreenCaptureKit microphone declarations were added to the macOS 15 SDK,
+ * so name them dynamically after the runtime availability gate instead of
+ * making the compiler require newer headers. SCStreamOutputTypeMicrophone is
+ * the third SCStreamOutputType case (raw value 2) in the macOS 15 SDK.
+ */
+static const SCStreamOutputType NativeSdkSCStreamOutputTypeMicrophone = (SCStreamOutputType)2;
+
+static BOOL NativeSdkConfigureScreenCaptureMicrophone(SCStreamConfiguration *configuration, NSString *deviceID) {
+    SEL captureSelector = NSSelectorFromString(@"setCaptureMicrophone:");
+    SEL deviceSelector = NSSelectorFromString(@"setMicrophoneCaptureDeviceID:");
+    if (![configuration respondsToSelector:captureSelector] || ![configuration respondsToSelector:deviceSelector]) return NO;
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(configuration, captureSelector, YES);
+    ((void (*)(id, SEL, id))objc_msgSend)(configuration, deviceSelector, deviceID);
+    return YES;
+}
 
 API_AVAILABLE(macos(15.0))
 @interface NativeSdkAudioBlock : NSObject
@@ -306,14 +325,14 @@ static AVCaptureDevice *NativeSdkMicrophone(NSString *identifier, BOOL useDefaul
             configuration.sampleRate = sampleRate;
             configuration.channelCount = channels;
             configuration.excludesCurrentProcessAudio = exclude;
-            if (microphoneKind != 0) {
-                configuration.captureMicrophone = YES;
-                configuration.microphoneCaptureDeviceID = device.uniqueID;
+            if (microphoneKind != 0 && !NativeSdkConfigureScreenCaptureMicrophone(configuration, device.uniqueID)) {
+                [self finishWithState:NS_CAPTURE_FAILED reason:NS_REASON_UNSUPPORTED];
+                return;
             }
             SCStream *stream = [[SCStream alloc] initWithFilter:filter configuration:configuration delegate:self];
             NSError *addError = nil;
             if (![stream addStreamOutput:self type:SCStreamOutputTypeAudio sampleHandlerQueue:self.sampleQueue error:&addError] ||
-                (microphoneKind != 0 && ![stream addStreamOutput:self type:SCStreamOutputTypeMicrophone sampleHandlerQueue:self.sampleQueue error:&addError])) {
+                (microphoneKind != 0 && ![stream addStreamOutput:self type:NativeSdkSCStreamOutputTypeMicrophone sampleHandlerQueue:self.sampleQueue error:&addError])) {
                 [self finishWithState:NS_CAPTURE_FAILED reason:NS_REASON_CAPTURE_FAILED];
                 return;
             }
@@ -359,7 +378,7 @@ static AVCaptureDevice *NativeSdkMicrophone(NSString *identifier, BOOL useDefaul
 
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type {
     (void)stream;
-    [self consumeSampleBuffer:sampleBuffer microphone:(type == SCStreamOutputTypeMicrophone)];
+    [self consumeSampleBuffer:sampleBuffer microphone:(type == NativeSdkSCStreamOutputTypeMicrophone)];
 }
 
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
