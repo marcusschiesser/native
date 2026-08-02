@@ -1,0 +1,1 @@
+feature: **macOS audio capture**: add macOS 15+ reliable paired system-audio and selectable-microphone s16le PCM streams, microphone enumeration, explicit permission flows, and Zig/TypeScript pull APIs.

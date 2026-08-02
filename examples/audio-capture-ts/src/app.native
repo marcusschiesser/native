@@ -1,0 +1,29 @@
+<column padding="20" gap="14" background="background">
+  <text label="Reliable audio stream"><span weight="bold" scale="1.5">Reliable audio stream</span></text>
+  <text foreground="text_muted">macOS 15+ · aligned s16le system/microphone chunks · 5 second buffer</text>
+  <row gap="8">
+    <button on-press="request_microphone">Request microphone</button>
+    <button on-press="request_system_audio">Request system audio</button>
+    <button on-press="list_microphones">List microphones</button>
+  </row>
+  <text>Microphone: {microphoneAccess}</text>
+  <text>System audio: {systemAccess}</text>
+  <text>{deviceCount} connected microphone(s)</text>
+  <separator />
+  <row gap="8">
+    <button variant="primary" on-press="start_capture">Start combined capture</button>
+    <button variant="destructive" on-press="stop_capture">Stop + drain</button>
+    <button on-press="discard_capture">Discard</button>
+  </row>
+  <panel padding="14" background="surface" radius="md" border-color="border">
+    <column gap="4">
+      <text>Status: {captureState} · {captureReason}</text>
+      <text>{availableFrames}/{capacityFrames} buffered frames · {framesConsumed} consumed</text>
+      <text>Last chunk: {lastSystemBytes} system bytes · {lastMicrophoneBytes} mic bytes</text>
+      <text>Inserted gaps: {systemGapFrames} system · {microphoneGapFrames} mic</text>
+      <text>Format: {sampleRate} Hz · {channels} channel(s)</text>
+    </column>
+  </panel>
+  <spacer grow="1" />
+  <status-bar>The app consumes borrowed PCM immediately; no file is created by the SDK.</status-bar>
+</column>

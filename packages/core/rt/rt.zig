@@ -1410,7 +1410,7 @@ pub fn Kernel(comptime opts: Options) type {
         // copies) them after the model commit and BEFORE frameReset — the same
         // boundary the committed model crosses.
 
-        pub const cmd_format_version: u32 = 3;
+        pub const cmd_format_version: u32 = 5;
 
         /// An encoded command value: op records per the layout above.
         pub const Cmd = []const u8;
@@ -1444,6 +1444,12 @@ pub fn Kernel(comptime opts: Options) type {
             pty_write = 0x1A,
             pty_resize = 0x1B,
             pty_kill = 0x1C,
+            audio_capture_start = 0x1D,
+            audio_capture_stop = 0x1E,
+            microphone_devices = 0x1F,
+            audio_capture_access = 0x20,
+            audio_capture_read = 0x21,
+            audio_capture_discard = 0x22,
         };
 
         /// The spawn record's "no line routing" sentinel: a `line_tag` of
@@ -1736,6 +1742,76 @@ pub fn Kernel(comptime opts: Options) type {
             return out;
         }
 
+        pub fn cmdAudioCaptureStart(key: []const u8, event_tag: u8, system_audio: bool, microphone_kind: u8, microphone_id: []const u8, sample_rate: u32, channels: u8, exclude_current_process_audio: bool, buffer_duration_ms: u32) Cmd {
+            std.debug.assert(key.len <= 255);
+            std.debug.assert(microphone_id.len <= std.math.maxInt(u32));
+            const out = frameAlloc(u8, 2 + key.len + 1 + 1 + 1 + 4 + 1 + 4 + 4 + microphone_id.len);
+            out[0] = @intFromEnum(CmdOp.audio_capture_start);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            var off: usize = 2 + key.len;
+            out[off] = event_tag;
+            out[off + 1] = @as(u8, @intFromBool(system_audio)) | (@as(u8, @intFromBool(exclude_current_process_audio)) << 1);
+            out[off + 2] = microphone_kind;
+            std.mem.writeInt(u32, out[off + 3 ..][0..4], sample_rate, .little);
+            out[off + 7] = channels;
+            std.mem.writeInt(u32, out[off + 8 ..][0..4], buffer_duration_ms, .little);
+            off += 12;
+            _ = writeLongBytes(out, off, microphone_id);
+            return out;
+        }
+
+        pub fn cmdAudioCaptureStop(key: []const u8) Cmd {
+            std.debug.assert(key.len <= 255);
+            const out = frameAlloc(u8, 2 + key.len);
+            out[0] = @intFromEnum(CmdOp.audio_capture_stop);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            return out;
+        }
+
+        pub fn cmdAudioCaptureRead(key: []const u8, event_tag: u8, max_frames: u32) Cmd {
+            std.debug.assert(key.len <= 255);
+            const out = frameAlloc(u8, 3 + key.len + 4);
+            out[0] = @intFromEnum(CmdOp.audio_capture_read);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            out[2 + key.len] = event_tag;
+            std.mem.writeInt(u32, out[3 + key.len ..][0..4], max_frames, .little);
+            return out;
+        }
+
+        pub fn cmdAudioCaptureDiscard(key: []const u8) Cmd {
+            std.debug.assert(key.len <= 255);
+            const out = frameAlloc(u8, 2 + key.len);
+            out[0] = @intFromEnum(CmdOp.audio_capture_discard);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            return out;
+        }
+
+        pub fn cmdMicrophoneDevices(key: []const u8, event_tag: u8) Cmd {
+            std.debug.assert(key.len <= 255);
+            const out = frameAlloc(u8, 3 + key.len);
+            out[0] = @intFromEnum(CmdOp.microphone_devices);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            out[2 + key.len] = event_tag;
+            return out;
+        }
+
+        pub fn cmdAudioCaptureAccess(key: []const u8, event_tag: u8, source: u8, action: u8) Cmd {
+            std.debug.assert(key.len <= 255);
+            const out = frameAlloc(u8, 5 + key.len);
+            out[0] = @intFromEnum(CmdOp.audio_capture_access);
+            out[1] = @intCast(key.len);
+            @memcpy(out[2..][0..key.len], key);
+            out[2 + key.len] = event_tag;
+            out[3 + key.len] = source;
+            out[4 + key.len] = action;
+            return out;
+        }
+
         pub fn cmdWindowShow(label: []const u8) Cmd {
             // The emitter's byte gate on the literal label is the
             // build-time teaching; this is the loud runtime backstop.
@@ -1954,7 +2030,7 @@ pub fn Kernel(comptime opts: Options) type {
         /// An encoded subscription set: records per the layout above.
         pub const Sub = []const u8;
 
-        pub const SubOp = enum(u8) { timer = 0x01 };
+        pub const SubOp = enum(u8) { timer = 0x01, microphone_devices_changed = 0x02 };
 
         pub const sub_none: Sub = &.{};
 
@@ -1966,6 +2042,13 @@ pub fn Kernel(comptime opts: Options) type {
             @memcpy(out[2..][0..key.len], key);
             std.mem.writeInt(u64, out[2 + key.len ..][0..8], @bitCast(every_ms), .little);
             out[2 + key.len + 8] = msg_tag;
+            return out;
+        }
+
+        pub fn subMicrophoneDevicesChanged(msg_tag: u8) Sub {
+            const out = frameAlloc(u8, 2);
+            out[0] = @intFromEnum(SubOp.microphone_devices_changed);
+            out[1] = msg_tag;
             return out;
         }
 

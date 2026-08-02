@@ -72,9 +72,9 @@ fn dispatch(msg: core.Msg) []const u8 {
 }
 
 test "cmd bytes flow through update -> commit -> effect log" {
-    // v3 is additive: the v1/v2 op records asserted below are
+    // v4 is additive: the v1/v2/v3 op records asserted below are
     // byte-identical under the bumped version.
-    try std.testing.expectEqual(@as(u32, 3), rt.cmd_format_version);
+    try std.testing.expectEqual(@as(u32, 5), rt.cmd_format_version);
 
     rt.resetAll();
     g_model = core.commitModelRoot(core.initialModel());
@@ -237,7 +237,7 @@ fn expectRecord(bytes: []const u8, expected: []const u8) !void {
 }
 
 test "v2 wire: init command, payloads, routing, cancel, subscriptions" {
-    try std.testing.expectEqual(@as(u32, 3), rt.cmd_format_version);
+    try std.testing.expectEqual(@as(u32, 5), rt.cmd_format_version);
 
     var log: [512]u8 = undefined;
 
@@ -409,7 +409,7 @@ fn appendLong(list: *std.ArrayList(u8), a: std.mem.Allocator, bytes: []const u8)
 }
 
 test "named-op wire records match the documented additive layout" {
-    try std.testing.expectEqual(@as(u32, 3), rt.cmd_format_version);
+    try std.testing.expectEqual(@as(u32, 5), rt.cmd_format_version);
     const a = std.testing.allocator;
     var log: [512]u8 = undefined;
 
@@ -523,6 +523,138 @@ test("v2 effects: wire bytes through the real dispatch cycle", { skip: !hasZig, 
     } catch (e) {
       const err = e as { stderr?: string; stdout?: string };
       assert.fail(`v2 effects harness failed:\n${err.stderr ?? ""}${err.stdout ?? ""}`);
+    }
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- audio capture v5
+
+const coreAudioCapture = `
+import { Cmd, Sub, asciiBytes } from "@native-sdk/core";
+
+type CaptureState = "started" | "readable" | "stopped" | "failed" | "rejected";
+type CaptureReason = "none" | "invalid_options" | "permission_missing" | "permission_required" | "already_recording" | "device_not_found" | "device_disconnected" | "capture_failed" | "no_audio" | "consumer_too_slow" | "discarded" | "unsupported";
+type ReadState = "chunk" | "empty" | "ended" | "rejected";
+type ReadReason = "none" | "invalid_options" | "not_recording" | "read_in_progress";
+type DeviceState = "device" | "completed" | "failed" | "rejected";
+type AccessSource = "system_audio" | "microphone";
+type AccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
+
+export interface Model { readonly events: number; }
+export type Msg =
+  | { readonly kind: "start" }
+  | { readonly kind: "read" }
+  | { readonly kind: "stop" }
+  | { readonly kind: "discard" }
+  | { readonly kind: "list" }
+  | { readonly kind: "access" }
+  | { readonly kind: "capture_event"; readonly key: string; readonly state: CaptureState; readonly reason: CaptureReason; readonly sampleRate: number; readonly channels: number; readonly availableFrames: number; readonly capacityFrames: number; readonly framesProduced: number }
+  | { readonly kind: "read_event"; readonly key: string; readonly state: ReadState; readonly reason: ReadReason; readonly sequence: number; readonly frameOffset: number; readonly frames: number; readonly systemPcm: Uint8Array; readonly microphonePcm: Uint8Array; readonly systemGapFrames: number; readonly microphoneGapFrames: number; readonly remainingFrames: number; readonly endOfStream: boolean }
+  | { readonly kind: "device_event"; readonly key: string; readonly state: DeviceState; readonly id: Uint8Array; readonly name: Uint8Array; readonly isDefault: boolean; readonly index: number; readonly total: number }
+  | { readonly kind: "access_event"; readonly key: string; readonly source: AccessSource; readonly status: AccessStatus; readonly restartRequired: boolean }
+  | { readonly kind: "devices_changed" };
+
+export function initialModel(): Model { return { events: 0 }; }
+
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "start": return [model, Cmd.audioCaptureStart("capture", { systemAudio: true, microphone: asciiBytes("usb"), sampleRate: 44100, channels: 1, bufferDurationMs: 3000 }, { event: "capture_event" })];
+    case "read": return [model, Cmd.audioCaptureRead("capture", 882, { event: "read_event" })];
+    case "stop": return [model, Cmd.audioCaptureStop("capture")];
+    case "discard": return [model, Cmd.audioCaptureDiscard("capture")];
+    case "list": return [model, Cmd.microphoneDevices("list", { event: "device_event" })];
+    case "access": return [model, Cmd.audioCaptureAccess("access", "microphone", "request", { event: "access_event" })];
+    case "capture_event": case "read_event": case "device_event": case "access_event": case "devices_changed": return { events: model.events + 1 };
+  }
+}
+
+export function subscriptions(model: Model): Sub<Msg> {
+  return Sub.microphoneDevicesChanged("devices_changed");
+}
+`;
+
+const harnessAudioCapture = `
+const std = @import("std");
+const core = @import("core.zig");
+const rt = core.rt;
+
+var g_model: *const core.Model = undefined;
+
+fn dispatch(msg: core.Msg, log: []u8) []const u8 {
+    const r = core.update(g_model, msg);
+    g_model = core.commitModelRoot(r.model);
+    @memcpy(log[0..r.cmd.len], r.cmd);
+    const out = log[0..r.cmd.len];
+    rt.frameReset();
+    return out;
+}
+
+fn expectLong(bytes: []const u8, at: *usize, expected: []const u8) !void {
+    const len = std.mem.readInt(u32, bytes[at.*..][0..4], .little);
+    try std.testing.expectEqual(@as(u32, @intCast(expected.len)), len);
+    try std.testing.expectEqualStrings(expected, bytes[at.* + 4 ..][0..expected.len]);
+    at.* += 4 + expected.len;
+}
+
+test "audio capture command and subscription wire records" {
+    try std.testing.expectEqual(@as(u32, 5), rt.cmd_format_version);
+    var log: [512]u8 = undefined;
+    rt.resetAll();
+    g_model = core.commitModelRoot(core.initialModel());
+    rt.frameReset();
+
+    const start = dispatch(.start, &log);
+    try std.testing.expectEqual(@as(u8, 0x1D), start[0]);
+    try std.testing.expectEqual(@as(u8, 7), start[1]);
+    try std.testing.expectEqualStrings("capture", start[2..9]);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(std.meta.Tag(core.Msg).capture_event)), start[9]);
+    try std.testing.expectEqual(@as(u8, 3), start[10]); // system audio + exclude current process
+    try std.testing.expectEqual(@as(u8, 2), start[11]); // explicit microphone id
+    try std.testing.expectEqual(@as(u32, 44100), std.mem.readInt(u32, start[12..16], .little));
+    try std.testing.expectEqual(@as(u8, 1), start[16]);
+    try std.testing.expectEqual(@as(u32, 3000), std.mem.readInt(u32, start[17..21], .little));
+    var at: usize = 21;
+    try expectLong(start, &at, "usb");
+    try std.testing.expectEqual(start.len, at);
+
+    const read = dispatch(.read, &log);
+    try std.testing.expectEqual(@as(u8, 0x21), read[0]);
+    try std.testing.expectEqual(@as(u8, 7), read[1]);
+    try std.testing.expectEqualStrings("capture", read[2..9]);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(std.meta.Tag(core.Msg).read_event)), read[9]);
+    try std.testing.expectEqual(@as(u32, 882), std.mem.readInt(u32, read[10..14], .little));
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x1E, 7 } ++ "capture", dispatch(.stop, &log));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x22, 7 } ++ "capture", dispatch(.discard, &log));
+
+    const devices = dispatch(.list, &log);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x1F, 4 } ++ "list" ++ .{@intFromEnum(std.meta.Tag(core.Msg).device_event)}, devices);
+
+    const access = dispatch(.access, &log);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x20, 6 } ++ "access" ++ .{ @intFromEnum(std.meta.Tag(core.Msg).access_event), 1, 1 }, access);
+
+    const subs = core.subscriptions(g_model);
+    try std.testing.expectEqualSlices(u8, &.{ 0x02, @intFromEnum(std.meta.Tag(core.Msg).devices_changed) }, subs);
+    rt.frameReset();
+}
+`;
+
+test("audio capture effects: wire bytes through the real dispatch cycle", { skip: !hasZig, timeout: 300_000 }, () => {
+  const result = transpile(coreAudioCapture);
+  const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");
+  assert.equal(result.ok, true, `transpile failed\n${result.typeErrors.join("\n")}\n${details}`);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-effects-audio-capture-"));
+  try {
+    fs.copyFileSync(path.join(pkg, "rt", "rt.zig"), path.join(work, "rt.zig"));
+    fs.writeFileSync(path.join(work, "core.zig"), result.zig!);
+    fs.writeFileSync(path.join(work, "harness.zig"), harnessAudioCapture);
+    try {
+      execFileSync("zig", ["test", "harness.zig"], { cwd: work, encoding: "utf8", stdio: "pipe" });
+    } catch (e) {
+      const err = e as { stderr?: string; stdout?: string };
+      assert.fail(`audio capture harness failed:\n${err.stderr ?? ""}${err.stdout ?? ""}`);
     }
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
