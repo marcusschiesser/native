@@ -963,10 +963,10 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         }
         app_mod.linkFramework("AppKit", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
-                app_mod.linkFramework("AVFoundation", .{});
-                app_mod.linkFramework("ScreenCaptureKit", .{});
-                app_mod.linkFramework("AudioToolbox", .{});
-                app_mod.linkFramework("CoreMedia", .{});
+        app_mod.linkFramework("AVFoundation", .{});
+        app_mod.linkFramework("ScreenCaptureKit", .{});
+        app_mod.linkFramework("AudioToolbox", .{});
+        app_mod.linkFramework("CoreMedia", .{});
         // CVPixelBuffer for the video frame path (the video player's
         // AVPlayerItemVideoOutput frames). CoreMedia's CMTime use stays
         // header-only, but the pixel-buffer calls are real symbols.

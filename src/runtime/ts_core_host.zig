@@ -2560,11 +2560,15 @@ pub fn TsCoreHost(comptime core: type) type {
             if (info != .@"struct" or info.@"struct".fields.len != 6) return false;
             var ok = true;
             for (info.@"struct".fields) |field| {
-                if (std.mem.eql(u8, field.name, "key")) { if (field.type != []const u8) ok = false; }
-                else if (std.mem.eql(u8, field.name, "state") or std.mem.eql(u8, field.name, "reason")) { if (@typeInfo(field.type) != .@"enum") ok = false; }
-                else if (std.mem.eql(u8, field.name, "durationMs") or std.mem.eql(u8, field.name, "bytesWritten")) { if (field.type != i64 and field.type != u64 and field.type != f64) ok = false; }
-                else if (std.mem.eql(u8, field.name, "outputCommitted")) { if (field.type != bool) ok = false; }
-                else ok = false;
+                if (std.mem.eql(u8, field.name, "key")) {
+                    if (field.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, field.name, "state") or std.mem.eql(u8, field.name, "reason")) {
+                    if (@typeInfo(field.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, field.name, "durationMs") or std.mem.eql(u8, field.name, "bytesWritten")) {
+                    if (field.type != i64 and field.type != u64 and field.type != f64) ok = false;
+                } else if (std.mem.eql(u8, field.name, "outputCommitted")) {
+                    if (field.type != bool) ok = false;
+                } else ok = false;
             }
             return ok;
         }
@@ -2574,12 +2578,19 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (comptime audioCaptureArmShape(arm.type)) {
                     var payload: arm.type = undefined;
                     inline for (@typeInfo(arm.type).@"struct".fields) |field| {
-                        if (comptime std.mem.eql(u8, field.name, "key")) @field(payload, field.name) = copyFrameBytes(wire_key)
-                        else if (comptime std.mem.eql(u8, field.name, "state")) @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.state))
-                        else if (comptime std.mem.eql(u8, field.name, "reason")) @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.reason))
-                        else if (comptime std.mem.eql(u8, field.name, "durationMs")) @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.duration_ms) else @intCast(event.duration_ms)
-                        else if (comptime std.mem.eql(u8, field.name, "bytesWritten")) @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.bytes_written) else @intCast(event.bytes_written)
-                        else @field(payload, field.name) = event.output_committed;
+                        if (comptime std.mem.eql(u8, field.name, "key")) {
+                            @field(payload, field.name) = copyFrameBytes(wire_key);
+                        } else if (comptime std.mem.eql(u8, field.name, "state")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.state));
+                        } else if (comptime std.mem.eql(u8, field.name, "reason")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.reason));
+                        } else if (comptime std.mem.eql(u8, field.name, "durationMs")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.duration_ms) else @intCast(event.duration_ms);
+                        } else if (comptime std.mem.eql(u8, field.name, "bytesWritten")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.bytes_written) else @intCast(event.bytes_written);
+                        } else {
+                            @field(payload, field.name) = event.output_committed;
+                        }
                     }
                     return @unionInit(Msg, arm.name, payload);
                 }
@@ -2593,11 +2604,15 @@ pub fn TsCoreHost(comptime core: type) type {
             if (info != .@"struct" or info.@"struct".fields.len != 7) return false;
             var ok = true;
             for (info.@"struct".fields) |field| {
-                if (std.mem.eql(u8, field.name, "key") or std.mem.eql(u8, field.name, "id") or std.mem.eql(u8, field.name, "name")) { if (field.type != []const u8) ok = false; }
-                else if (std.mem.eql(u8, field.name, "state")) { if (@typeInfo(field.type) != .@"enum") ok = false; }
-                else if (std.mem.eql(u8, field.name, "isDefault")) { if (field.type != bool) ok = false; }
-                else if (std.mem.eql(u8, field.name, "index") or std.mem.eql(u8, field.name, "total")) { if (field.type != i64 and field.type != u64 and field.type != f64) ok = false; }
-                else ok = false;
+                if (std.mem.eql(u8, field.name, "key") or std.mem.eql(u8, field.name, "id") or std.mem.eql(u8, field.name, "name")) {
+                    if (field.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, field.name, "state")) {
+                    if (@typeInfo(field.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, field.name, "isDefault")) {
+                    if (field.type != bool) ok = false;
+                } else if (std.mem.eql(u8, field.name, "index") or std.mem.eql(u8, field.name, "total")) {
+                    if (field.type != i64 and field.type != u64 and field.type != f64) ok = false;
+                } else ok = false;
             }
             return ok;
         }
@@ -2607,13 +2622,21 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (comptime microphoneDeviceArmShape(arm.type)) {
                     var payload: arm.type = undefined;
                     inline for (@typeInfo(arm.type).@"struct".fields) |field| {
-                        if (comptime std.mem.eql(u8, field.name, "key")) @field(payload, field.name) = copyFrameBytes(wire_key)
-                        else if (comptime std.mem.eql(u8, field.name, "state")) @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.state))
-                        else if (comptime std.mem.eql(u8, field.name, "id")) @field(payload, field.name) = copyFrameBytes(event.id)
-                        else if (comptime std.mem.eql(u8, field.name, "name")) @field(payload, field.name) = copyFrameBytes(event.name)
-                        else if (comptime std.mem.eql(u8, field.name, "isDefault")) @field(payload, field.name) = event.is_default
-                        else if (comptime std.mem.eql(u8, field.name, "index")) @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.index) else @intCast(event.index)
-                        else @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.total) else @intCast(event.total);
+                        if (comptime std.mem.eql(u8, field.name, "key")) {
+                            @field(payload, field.name) = copyFrameBytes(wire_key);
+                        } else if (comptime std.mem.eql(u8, field.name, "state")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.state));
+                        } else if (comptime std.mem.eql(u8, field.name, "id")) {
+                            @field(payload, field.name) = copyFrameBytes(event.id);
+                        } else if (comptime std.mem.eql(u8, field.name, "name")) {
+                            @field(payload, field.name) = copyFrameBytes(event.name);
+                        } else if (comptime std.mem.eql(u8, field.name, "isDefault")) {
+                            @field(payload, field.name) = event.is_default;
+                        } else if (comptime std.mem.eql(u8, field.name, "index")) {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.index) else @intCast(event.index);
+                        } else {
+                            @field(payload, field.name) = if (comptime field.type == f64) @floatFromInt(event.total) else @intCast(event.total);
+                        }
                     }
                     return @unionInit(Msg, arm.name, payload);
                 }
@@ -2627,10 +2650,13 @@ pub fn TsCoreHost(comptime core: type) type {
             if (info != .@"struct" or info.@"struct".fields.len != 4) return false;
             var ok = true;
             for (info.@"struct".fields) |field| {
-                if (std.mem.eql(u8, field.name, "key")) { if (field.type != []const u8) ok = false; }
-                else if (std.mem.eql(u8, field.name, "source") or std.mem.eql(u8, field.name, "status")) { if (@typeInfo(field.type) != .@"enum") ok = false; }
-                else if (std.mem.eql(u8, field.name, "restartRequired")) { if (field.type != bool) ok = false; }
-                else ok = false;
+                if (std.mem.eql(u8, field.name, "key")) {
+                    if (field.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, field.name, "source") or std.mem.eql(u8, field.name, "status")) {
+                    if (@typeInfo(field.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, field.name, "restartRequired")) {
+                    if (field.type != bool) ok = false;
+                } else ok = false;
             }
             return ok;
         }
@@ -2640,10 +2666,15 @@ pub fn TsCoreHost(comptime core: type) type {
                 if (comptime audioCaptureAccessArmShape(arm.type)) {
                     var payload: arm.type = undefined;
                     inline for (@typeInfo(arm.type).@"struct".fields) |field| {
-                        if (comptime std.mem.eql(u8, field.name, "key")) @field(payload, field.name) = copyFrameBytes(wire_key)
-                        else if (comptime std.mem.eql(u8, field.name, "source")) @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.source))
-                        else if (comptime std.mem.eql(u8, field.name, "status")) @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.status))
-                        else @field(payload, field.name) = event.restart_required;
+                        if (comptime std.mem.eql(u8, field.name, "key")) {
+                            @field(payload, field.name) = copyFrameBytes(wire_key);
+                        } else if (comptime std.mem.eql(u8, field.name, "source")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.source));
+                        } else if (comptime std.mem.eql(u8, field.name, "status")) {
+                            @field(payload, field.name) = enumValueNamed(field.type, @tagName(event.status));
+                        } else {
+                            @field(payload, field.name) = event.restart_required;
+                        }
                     }
                     return @unionInit(Msg, arm.name, payload);
                 }
