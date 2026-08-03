@@ -1,0 +1,1 @@
+feature: **Zig credential effects**: `UiApp.update` can set, get, and delete `(service, account)` secrets through typed effects, with fake-executor and replay support, secure effect-buffer wiping, and credential reads rejected before OS access while session recording is active so secret bytes never enter effect-result journals.
