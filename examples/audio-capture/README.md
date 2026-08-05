@@ -1,6 +1,6 @@
 # Audio Capture
 
-The canonical TypeScript example for reliable audio capture on macOS 15+. It queries microphone and system-audio access on boot, requires an explicit microphone-access request in each app session, lists connected microphones, starts system-only, microphone-only, or aligned combined capture, drains aligned PCM after stop, and discards on demand.
+The canonical TypeScript example for reliable audio capture on macOS 15+. It queries microphone and system-audio access on boot, lists connected microphones, starts system-only, microphone-only, or aligned combined capture, drains aligned PCM after stop, and discards on demand.
 
 ```sh
 native dev
