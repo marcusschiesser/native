@@ -1647,11 +1647,17 @@ pub fn TsCoreHost(comptime core: type) type {
             const tag = entry.event_tag;
             const key = entry.wireKey();
             const msg = msgFromTagAudioCapture(tag, key, event);
-            // Discard queues its synthetic stopped/discarded lifecycle
-            // event after releasing the stream. Keep the route alive until
-            // that event is delivered so an earlier queued started/readable
-            // event cannot arrive against a prematurely retired entry.
-            if (event.state == .stopped and event.reason == .discarded) entry.used = false;
+            // A rejected start never opened a drainable stream, so its one
+            // terminal retires the route immediately. Discard queues its
+            // synthetic stopped/discarded lifecycle event after releasing an
+            // opened stream; keep that route alive until the terminal is
+            // delivered so an earlier queued started/readable event cannot
+            // arrive against a prematurely retired entry.
+            if (event.state == .rejected or
+                (event.state == .stopped and event.reason == .discarded))
+            {
+                entry.used = false;
+            }
             return msg;
         }
 

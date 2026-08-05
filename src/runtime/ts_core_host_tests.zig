@@ -373,6 +373,7 @@ const mini_core = struct {
             remainingFrames: f64,
             endOfStream: bool,
         },
+        start_capture_invalid, // 95: rejected capture -> capture_evt
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -755,6 +756,7 @@ const mini_core = struct {
                 return .{ .model = model, .cmd = out };
             },
             .start_capture => return .{ .model = model, .cmd = cmdAudioCaptureStart("meeting", 86, true, 2, "usb-mic", 44_100, 1, true, 5_000) },
+            .start_capture_invalid => return .{ .model = model, .cmd = cmdAudioCaptureStart("meeting", 86, true, 0, "", 12_345, 1, true, 5_000) },
             .stop_capture => return .{ .model = model, .cmd = cmdKeyOnly(0x1F, "meeting") },
             .read_capture => return .{ .model = model, .cmd = cmdAudioCaptureRead("meeting", 94, 882) },
             .discard_capture => return .{ .model = model, .cmd = cmdKeyOnly(0x23, "meeting") },
@@ -2125,6 +2127,28 @@ test "audio capture discard keeps its route through queued lifecycle events" {
     Host.drain(fx);
     try std.testing.expectEqual(mini_core.CaptureState.started, Host.model().capture_state);
     try std.testing.expectEqual(@as(i64, 3), Host.model().capture_events);
+}
+
+test "rejected audio capture starts retire their routes before discard" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // A rejected start never creates an effects stream, so the following
+    // discard is an idempotent no-op. Repeat past the bridge table's capacity
+    // to prove each rejected lifecycle event retires its own routing slot.
+    for (0..effects_mod.max_effects + 1) |_| {
+        Host.dispatch(fx, .start_capture_invalid);
+        Host.drain(fx);
+        try std.testing.expectEqual(mini_core.CaptureState.rejected, Host.model().capture_state);
+        try std.testing.expectEqual(mini_core.CaptureReason.invalid_options, Host.model().capture_reason);
+        Host.dispatch(fx, .discard_capture);
+    }
+
+    // The table still has capacity for a real stream after all refusals.
+    Host.dispatch(fx, .start_capture);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureState.started, Host.model().capture_state);
 }
 
 test "microphone listing access and changed subscription route through the TS host" {
