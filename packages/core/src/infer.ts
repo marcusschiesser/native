@@ -1323,7 +1323,7 @@ export class IntInference {
     // comparisons against proven/demanded integer sides. Comparison-origin
     // demand never claims a host-boundary slot, nor any slot a host-boundary
     // slot feeds: the comparison itself does not require an integer (the
-    // emitter widens the integer side into f64 instead), and an i64-claimed
+    // integer side widens into f64 instead), and an i64-claimed
     // exported signature would truncate host f64 values that node compares
     // exactly — claiming only part of such a chain would manufacture an
     // NS1016 conflict out of thin air. Genuine demand chains (index,

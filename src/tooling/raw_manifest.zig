@@ -13,10 +13,10 @@ pub const RawManifest = struct {
     bridge: RawBridge = .{},
     web_engine: []const u8 = @tagName(web_engine.default_engine),
     webview_layer: []const u8 = "auto",
-    /// How a TypeScript core compiles: "transpiler" (default — the
-    /// emitted-Zig lane) or "external" (the opt-in external core
-    /// compiler lane; `-Dcore-compiler` overrides per invocation).
-    core_compiler: []const u8 = "transpiler",
+    /// How a TypeScript core compiles: "external" (the default and only
+    /// lane — the external core compiler). The removed transpiled
+    /// lane's spelling is refused with a teaching at validation.
+    core_compiler: []const u8 = "external",
     theme: ?[]const u8 = null,
     theme_accent: ?[]const u8 = null,
     cef: RawCef = .{},

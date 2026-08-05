@@ -738,6 +738,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                     if (std.mem.eql(u8, attribute.name, "on-details")) continue;
                     if (std.mem.eql(u8, attribute.name, "details-expanded")) continue;
                     if (std.mem.eql(u8, attribute.name, "issue-link-base")) continue;
+                    if (std.mem.eql(u8, attribute.name, "images")) continue;
                     fail(node, markup.markdown_attr_message);
                 }
             }
@@ -762,6 +763,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             }
             if (comptime (node.attr("details-expanded") != null)) {
                 options.details_expanded = detailsExpandedItems(node, entries, comptime node.attr("details-expanded").?, ui, model, scope);
+            }
+            if (comptime (node.attr("images") != null)) {
+                options.images = markdownImageItems(node, entries, comptime node.attr("images").?, ui, model, scope);
             }
             if (comptime (node.attr("issue-link-base") != null)) {
                 const raw = comptime node.attr("issue-link-base").?;
@@ -941,6 +945,31 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             const info = comptime (eachInfo(path) orelse fail(node, markup.markdown_details_expanded_message));
             comptime {
                 if (info.Item != bool) fail(node, markup.markdown_details_expanded_message);
+            }
+            return eachItems(info, ui, model);
+        }
+
+        /// Comptime twin of the interpreter's registered-image iterable
+        /// binding. Scope slice arguments shadow model iterables.
+        fn markdownImageItems(comptime node: markup.MarkupNode, comptime entries: []const ScopeEntry, comptime raw: []const u8, ui: *Ui, model: *const ModelT, scope: anytype) []const canvas.markdown.ResolvedImage {
+            const path = comptime blk: {
+                const expression = markup.parseAttrExpression(raw) orelse fail(node, markup.markdown_images_message);
+                if (expression != .binding) fail(node, markup.markdown_images_message);
+                break :blk expression.binding;
+            };
+            const scope_index_opt = comptime scopeIndex(entries, path);
+            if (comptime (scope_index_opt != null)) {
+                const scope_index = comptime scope_index_opt.?;
+                comptime {
+                    if (entries[scope_index].kind != .slice_arg or entries[scope_index].Item != canvas.markdown.ResolvedImage) {
+                        fail(node, markup.markdown_images_message);
+                    }
+                }
+                return scopePayload(entries, scope_index, scope);
+            }
+            const info = comptime (eachInfo(path) orelse fail(node, markup.markdown_images_message));
+            comptime {
+                if (info.Item != canvas.markdown.ResolvedImage) fail(node, markup.markdown_images_message);
             }
             return eachItems(info, ui, model);
         }

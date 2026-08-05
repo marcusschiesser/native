@@ -140,6 +140,12 @@ export interface FetchSpec {
   readonly timeoutMs?: number;
 }
 
+export interface NotificationSpec {
+  readonly title: Uint8Array;
+  readonly subtitle?: Uint8Array;
+  readonly body?: Uint8Array;
+}
+
 /// The inert command data — the reference module's Cmd<M> union with
 /// the type parameter erased (M constrains only the factories' arm-name
 /// checking, never the data).
@@ -186,6 +192,7 @@ export type CmdData =
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
+  | { readonly op: "show_notification"; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
   | {
       readonly op: "spawn";
@@ -377,6 +384,15 @@ export const Cmd = {
 
   clipboardRead(route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
     return { op: "clip_read", key: route.key ?? "", okKind: route.ok, errKind: route.err };
+  },
+
+  showNotification(spec: NotificationSpec): CmdData {
+    return {
+      op: "show_notification",
+      title: spec.title,
+      subtitle: spec.subtitle ?? new Uint8Array(0),
+      body: spec.body ?? new Uint8Array(0),
+    };
   },
 
   delay(key: string, ms: number, msgKind: string): CmdData {

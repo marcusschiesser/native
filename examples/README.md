@@ -10,7 +10,19 @@ native build   # produce a ReleaseFast binary in zig-out/bin/
 
 (In this repository the CLI is `zig-out/bin/native`, built by `zig build` at the root.) A handful of examples own a `build.zig` because they genuinely outgrow the generated graph — each one's build file opens with the reason.
 
-## Zero-config apps (native-rendered)
+## Start here: TypeScript + Native markup
+
+TypeScript is the primary app-authoring language. A new `native init my_app` project has `src/core.ts`, `src/app.native`, and `app.zon`; the core compiles ahead of time to native code, so no JS runtime ships in the app. These examples are the clearest substantial references for that path:
+
+| Example | Shows |
+| --- | --- |
+| `ai-chat-ts` | Multi-module TypeScript core, text editing, `Cmd.fetch`, environment messages, and deterministic replay. |
+| `soundboard-ts` | Full music player: audio effects, timers, search, assets, native context menus, and adaptive markup. |
+| `system-monitor-ts` | Subprocess effects, timers, parsing, tables, charts, controlled scroll, and confirmation flows. |
+
+The `-ts` suffix is historical: `soundboard-ts` and `system-monitor-ts` distinguish ports from older Zig originals in the same catalog, while `ai-chat-ts` was introduced as a TypeScript-only example. It is not a template convention: new TypeScript apps need no suffix because TypeScript is the default. Many unsuffixed showcase apps predate that default and still use `src/main.zig`; use them for their feature or visual patterns, not as evidence that new app logic should be Zig.
+
+## Earlier native-rendered showcase apps (Zig cores)
 
 | Example | Shows |
 | --- | --- |
@@ -48,4 +60,4 @@ native build   # produce a ReleaseFast binary in zig-out/bin/
 
 `mobile-shell`, `ios`, and `android` are mobile host projects (Xcode/Gradle shells plus shared `app.zon` metadata) rather than desktop app directories.
 
-Start with `habits` for the native-rendered markup path, or `hello` for the WebView path. Move to `webview` when you need native commands or WebView policy, `capabilities` for guarded OS services, the GPU trio when you want custom-rendered or retained-canvas panes, and a frontend example when building a real web frontend.
+Start with `native init` for a small TypeScript + Native markup app, then use `ai-chat-ts`, `soundboard-ts`, or `system-monitor-ts` according to the feature you need. Use `habits` when you specifically want the smallest Zig-core equivalent, `hello` for the lower-level WebView path, `webview` for native commands or WebView policy, `capabilities` for guarded OS services, and the GPU trio for custom-rendered or retained-canvas panes.

@@ -22,7 +22,8 @@
 //   sub arm|re-arm|cancel <key>          subscription reconciliation by key
 //   fire <key> -> <kind> @ <ms>          a virtual timer fired (dispatched)
 //
-// Virtual-host semantics match the run-fidelity harness (node = native):
+// Virtual-host semantics match the compiled core's (node = native; the
+// SDK's ts-core e2e batteries pin the native side over real archives):
 //   - Cmd.now dispatches its arm immediately at the current virtual time;
 //   - Sub.timer reconciles by key after every commit (new key or changed
 //     interval arms, missing key cancels), each fire dispatching the named
@@ -32,7 +33,8 @@
 //   - timer/now/delay arms carry exactly one number payload field (pinned
 //     by tsc), so the harness constructs them shape-directed without
 //     needing the field's name.
-// Every other effect (files, fetch, clipboard, spawn, audio, host commands)
+// Every other effect (files, fetch, clipboard, notifications, spawn, audio,
+// host commands)
 // is printed as `cmd ...` and NOT performed — feed its result back yourself
 // as an ordinary Msg line. That is the point: results are plain messages,
 // and the loop stays deterministic.
@@ -70,8 +72,8 @@ if (!entry) usage();
 // The resolver hook maps "@native-sdk/core" onto this package's own SDK
 // module (app trees carry no node_modules for bare resolution to find),
 // and the byte-text methods (s.toUpperCase(), s.split(sep), ...) install
-// on Uint8Array.prototype before the core loads — the same tables the
-// native rt helpers use, so node runs are byte-identical by construction.
+// on Uint8Array.prototype before the core loads — locale-free simple
+// case tables, the semantics the compiled core carries natively.
 installTextMethods();
 register(new URL("./devhost_resolver.mjs", import.meta.url));
 
@@ -161,6 +163,14 @@ function performCmd(cmd: Cmdish): void {
       } else {
         say(`cmd cancel ${key} (not performed here - a live request or named op drops silently; a live spawn ends loudly, err arm "cancelled")`);
       }
+      return;
+    }
+    case "show_notification": {
+      const details = Object.entries(cmd)
+        .filter(([k]) => k !== "op")
+        .map(([k, v]) => `${k}=${JSON.stringify(jsonable(v))}`)
+        .join(" ");
+      say(`cmd ${cmd.op} ${details}`.trimEnd() + " (not performed by the virtual host; no result Msg)");
       return;
     }
     default: {

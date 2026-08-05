@@ -150,8 +150,13 @@ pub fn layoutWidgetDepth(
             }
         },
         // Span paragraphs and span-carrying table cells share the link
-        // hotspot child convention (no spans or no children is a no-op).
-        .text, .data_cell => try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens),
+        // hotspot child convention. A span-less table cell may instead be
+        // a composed inline row (Markdown's resolved image + text shape).
+        .text => try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens),
+        .data_cell => if (widget.spans.len > 0)
+            try layoutTextSpanLinkChildren(widget, content, index, depth, output, len, tokens)
+        else
+            try layoutAxisChildren(widget.children, content, .horizontal, index, depth, output, len, widget.layout, tokens),
         .icon, .image, .avatar, .badge, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .tooltip, .menu_item, .status_bar, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .progress, .separator, .skeleton, .spinner, .chart, .split_divider, .media_surface, .terminal => {},
     }
 
@@ -824,10 +829,25 @@ fn wrappedVerticalExtentForWidth(widget: Widget, width: f32, tokens: DesignToken
     const padding = widget.layout.padding;
     const inner_width = @max(0, width - padding.left - padding.right);
     const content_height: f32 = switch (widget.kind) {
-        .text, .data_cell => if (widget.spans.len > 0)
+        .text => if (widget.spans.len > 0)
             spanParagraphHeight(widget, inner_width, tokens)
         else
             return preferredMainExtent(widget, .vertical, tokens),
+        .data_cell => if (widget.spans.len > 0)
+            spanParagraphHeight(widget, inner_width, tokens)
+        else if (widget.children.len > 0) blk: {
+            var max_height: f32 = 0;
+            for (widget.children, 0..) |child, index| {
+                if (child.layout.anchor != null) continue;
+                max_height = @max(max_height, wrappedVerticalExtentForWidth(
+                    child,
+                    rowChildWidth(widget, inner_width, index, tokens),
+                    tokens,
+                    depth + 1,
+                ));
+            }
+            break :blk max_height;
+        } else return preferredMainExtent(widget, .vertical, tokens),
         .column, .list, .data_grid, .table, .menu_surface, .dropdown_menu => blk: {
             if (widget.layout.virtualized) return preferredMainExtent(widget, .vertical, tokens);
             var sum: f32 = 0;
@@ -1021,6 +1041,7 @@ fn layoutTextSpanLinkChildren(
         content.x += gutter;
         content.width -= gutter;
     }
+    content = widget_metrics.widgetTextSpanAlignedContentFrame(widget, content, tokens);
 
     var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
     const layout = text_spans_model.layoutTextSpans(
@@ -1806,6 +1827,8 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
         // span paragraph; classic cells keep the single-line row metric.
         .data_cell => if (widget.spans.len > 0)
             paddedIntrinsicSize(widget, intrinsicTextWidgetSize(widget, tokens, widgetBodyTextSize(widget, tokens)))
+        else if (widget.children.len > 0)
+            intrinsicAxisChildrenSize(widget, tokens, .horizontal, depth)
         else
             intrinsicRowTextWidgetSize(widget, tokens),
         // Table rows sit taller than list rows: the comfortable row

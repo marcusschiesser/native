@@ -1,8 +1,8 @@
-// Docs honesty gate: every complete app-core sample in the docs transpiles.
+// Docs honesty gate: every complete app-core sample in the docs checks clean.
 //
 // Scans docs/src/app/docs/**/page.mdx for ```ts fences (with or without a
 // :filename info-string suffix) and runs the full
-// pipeline (tsc semantics + subset rules + emission) over each block that
+// pipeline (tsc semantics + subset rules + contract analysis) over each block that
 // is a whole core — the discriminator is `export function update(`, the
 // one export every complete core carries. Fragments (case-arm excerpts,
 // type-only declarations) are teaching excerpts of the same idioms and are
@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { transpile } from "./helpers.ts";
+import { check } from "./helpers.ts";
 
 const repoRoot = path.dirname(
   path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url)))),
@@ -34,21 +34,21 @@ function tsFences(source: string): string[] {
   return [...source.matchAll(/^```ts(?::[^\n]*)?\n([\s\S]*?)^```$/gm)].map((match) => match[1]);
 }
 
-test("docs samples: every complete core in the docs transpiles clean", () => {
+test("docs samples: every complete core in the docs checks clean", () => {
   assert.ok(fs.existsSync(docsAppDir), `docs pages not found at ${docsAppDir}`);
   let cores = 0;
   for (const page of mdxPages(docsAppDir)) {
     for (const fence of tsFences(fs.readFileSync(page, "utf8"))) {
       if (!fence.includes("export function update(")) continue;
       cores += 1;
-      const result = transpile(fence);
+      const result = check(fence);
       const details = [
         ...result.typeErrors,
         ...result.diagnostics.map((d) => `${d.id} ${d.title}: ${d.message}`),
       ].join("\n");
       assert.ok(
-        result.ok && result.zig !== null,
-        `${path.relative(docsAppDir, page)} has a core sample that fails the transpiler:\n${details}\n--- sample\n${fence}`,
+        result.ok,
+        `${path.relative(docsAppDir, page)} has a core sample that fails the checker:\n${details}\n--- sample\n${fence}`,
       );
     }
   }

@@ -1142,10 +1142,10 @@ export class SubsetChecker {
     }
   }
 
-  /// NS1038 — one flat emitted namespace: type names (which the whole
+  /// NS1038 — one flat compiled namespace: type names (which the whole
   /// pipeline resolves by name) and EXPORTED value names must be unique
   /// across the core's modules. Private value collisions are fine — the
-  /// emitter uniques those with a per-module prefix.
+  /// compile uniques those per module.
   private checkNameCollisions(): void {
     interface Claim {
       readonly file: ts.SourceFile;
@@ -1754,7 +1754,7 @@ export class SubsetChecker {
       // NS1045 — destructuring: record fields into const locals only.
       if (ts.isArrayBindingPattern(node)) {
         // `for (const [i, x] of xs.entries())` keeps its own tailored
-        // teaching (the emitter names the classic-loop rewrite).
+        // teaching (it names the classic-loop rewrite).
         if (!isEntriesLoopBinding(node)) {
           this.report("NS1045", "Array destructuring binds element positions.", node);
         }

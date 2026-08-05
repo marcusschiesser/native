@@ -923,6 +923,27 @@ test "real fetch round-trips a POST payload through the echo route" {
     try std.testing.expectEqualStrings("the payload rides in the fetch buffer", h.app_state.model.body());
 }
 
+test "real fetch sends a payload-free POST as an explicit zero-length body" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fixture = try Fixture.start(std.testing.allocator);
+    defer fixture.stop();
+
+    var url_buffer: [128]u8 = undefined;
+    test_url = fixture.url(&url_buffer, "/echo");
+    test_method = .POST;
+    test_headers = &.{};
+    test_payload = null;
+    test_timeout_ms = effects_mod.default_effect_fetch_timeout_ms;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+    try waitForResponse(&h);
+
+    try std.testing.expectEqual(effects_mod.EffectFetchOutcome.ok, h.app_state.model.outcome.?);
+    try std.testing.expectEqual(@as(u16, 200), h.app_state.model.status);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.model.body_len);
+    try std.testing.expect(fixture.headContains("content-length: 0"));
+}
+
 test "real fetch preserves binary bodies byte for byte" {
     var h = try Harness.create();
     defer h.destroy();

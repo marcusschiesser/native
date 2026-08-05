@@ -1,5 +1,5 @@
 //! TypeScript-core plumbing for the `native` CLI: tree detection (which
-//! core does this app carry?), the transpiler-checker pass `native check`
+//! core does this app carry?), the frontend check pass `native check`
 //! runs over src/core.ts, and the node dev-harness `native dev --core`
 //! launches. The build graph re-derives the same detection in
 //! build/app.zig; the CLI checks first so a both-cores tree fails with one
@@ -8,7 +8,7 @@
 //! Multi-file cores: src/core.ts stays the detection root AND the entry
 //! module, but a core may split into modules under src/ (relative imports
 //! with real .ts filenames) plus SDK library modules
-//! ("@native-sdk/core/text"). The transpiler walks that import graph
+//! ("@native-sdk/core/text"). The frontend walks that import graph
 //! itself, so `native check` reports diagnostics with each module's own
 //! path, and `native dev --core` runs the same graph under node (relative
 //! imports are real files; the resolver hook maps only the SDK names).
@@ -68,7 +68,7 @@ pub fn failBothCores() Error {
 
 fn nodeMissing() Error {
     std.debug.print(
-        \\TypeScript app cores need node on PATH (the @native-sdk/core transpiler and the
+        \\TypeScript app cores need node on PATH (the @native-sdk/core frontend and the
         \\core dev-harness run under it; the binary you ship carries no JS runtime).
         \\Install Node.js 22.15+ (on the 23 line: 23.5+) - https://nodejs.org or
         \\`brew install node` - and re-run.
@@ -87,7 +87,7 @@ fn transpilerPath(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     return path;
 }
 
-/// The layout-neutral runner for the transpiler tier's .ts modules
+/// The layout-neutral runner for the frontend tier's .ts modules
 /// (build/ts_run.mjs): a pass-through on a repo checkout, and the type
 /// stripper for the npm-installed layout, where the same modules sit
 /// inside node_modules and node refuses its builtin stripping. Every
@@ -103,7 +103,7 @@ fn tsRunnerPath(allocator: std.mem.Allocator, io: std.Io, framework_root: []cons
 }
 
 /// The install command the repo-checkout teaching names. `--include=dev`
-/// is correctness, not style: @typescript/typescript6 is packages/core's
+/// is correctness, not style: @typescript/old is packages/core's
 /// devDependency, and a plain `npm ci` under ambient production npm config
 /// (NODE_ENV=production, `omit=dev` in an npmrc) skips devDependencies
 /// while exiting 0 — the named command would "succeed" and install
@@ -131,19 +131,13 @@ pub const npm_ci_teaching_command = "npm ci --include=dev";
 ///     (nested under the CLI on global prefixes, hoisted to the project
 ///     root on local ones, pnpm's sibling node_modules)
 ///
-/// The @typescript/typescript6 wrapper is deliberately NOT probed:
-/// nothing imports it at run time (typed_ast.ts bypasses its one-line
-/// re-export on purpose — see the comment there), so holding the
-/// wrapper's resolution — or the alias's version as seen FROM the
-/// wrapper's origin — against the pin can only FALSE-REJECT healthy
-/// trees. npm's own conflict shape hoists a consumer's conflicting
-/// `@typescript/old` at the project root (where it wins the walk from a
-/// hoisted wrapper) while our exact pin lands nested under the CLI — and
-/// that nested copy is precisely what runtime loads from packages/core;
-/// a consumer's own shadowing wrapper install must not sway the verdict
-/// either. The wrapper stays a DECLARED dependency in both manifests
-/// (continuity semantics, and it keeps npm shipping the package) — it is
-/// just not what validation vouches for.
+/// A stray `@typescript/typescript6` compat wrapper in a consumer tree
+/// (a former dependency of this package, or the consumer's own) is
+/// deliberately NOT probed: nothing imports it at run time, and holding
+/// the alias's version as seen FROM a wrapper's origin against the pin
+/// can only FALSE-REJECT healthy trees — a consumer's hoisted conflicting
+/// `@typescript/old` wins the walk from there while the copy runtime
+/// actually loads sits correctly pinned under packages/core.
 ///
 /// Resolvable means the alias's manifest AND its entrypoint are present
 /// and its installed version equals the pin — see
@@ -313,7 +307,7 @@ fn pinnedCompilerVersion(allocator: std.mem.Allocator, io: std.Io, framework_roo
 /// `npm ci` there would teach mutating an npm-owned tree.
 fn transpilerDepsMissing(framework_root: []const u8) Error {
     std.debug.print(
-        \\the @native-sdk/core transpiler's dependencies are not installed
+        \\the @native-sdk/core frontend's dependencies are not installed
         \\(its TypeScript compiler, @typescript/old, resolves nowhere). Fix with:
         \\  cd {s}/packages/core && {s}
         \\
@@ -351,7 +345,7 @@ fn toolchainInstallBroken(framework_root: []const u8) Error {
 /// conflict instead.
 fn compilerVersionMismatch(resolved: []const u8, pinned: []const u8) Error {
     std.debug.print(
-        \\the transpiler's TypeScript compiler resolves at the wrong version:
+        \\the frontend's TypeScript compiler resolves at the wrong version:
         \\@typescript/old resolves to typescript {s}, but the SDK pins npm:typescript@{s}.
         \\Another package in this tree pins a conflicting @typescript/old - align it with
         \\the SDK's pin (or remove it) and reinstall, so the SDK's exact pin is the copy
@@ -409,23 +403,21 @@ pub fn ensureResolvedTranspiler(allocator: std.mem.Allocator, io: std.Io, framew
     return transpilerDepsMissing(resolved);
 }
 
-/// `native check` over a TypeScript core: run the transpiler (checker +
-/// emitter) on src/core.ts — and, through it, the core's whole import
-/// graph under src/ — and surface its NS diagnostics verbatim — they
-/// are the teaching layer, nothing wraps them (each diagnostic carries
-/// the owning module's path). The emitted Zig lands in .native/check/ (a
-/// scratch product, gitignored with the rest of .native/). Exit 0 =
-/// typechecked, subset-clean, emitted.
+/// `native check` over a TypeScript core: run the frontend in
+/// check-only mode on src/core.ts — and, through it, the core's whole
+/// import graph under src/ — and surface its NS diagnostics verbatim —
+/// they are the teaching layer, nothing wraps them (each diagnostic
+/// carries the owning module's path). Exit 0 = typechecked,
+/// subset-clean.
 pub fn checkCore(allocator: std.mem.Allocator, io: std.Io, base_env: *std.process.Environ.Map, framework_root: []const u8) !void {
     const cli_path = try transpilerPath(allocator, io, framework_root, "src/cli.ts");
     defer allocator.free(cli_path);
     const runner_path = try tsRunnerPath(allocator, io, framework_root);
     defer allocator.free(runner_path);
     try ensureResolvedTranspiler(allocator, io, framework_root);
-    try std.Io.Dir.cwd().createDirPath(io, ".native/check");
 
     var child = std.process.spawn(io, .{
-        .argv = &.{ "node", runner_path, cli_path, "src/core.ts", "-o", ".native/check/core.zig" },
+        .argv = &.{ "node", runner_path, cli_path, "src/core.ts" },
         .stdin = .ignore,
         .stdout = .inherit,
         .stderr = .inherit,
@@ -436,9 +428,38 @@ pub fn checkCore(allocator: std.mem.Allocator, io: std.Io, base_env: *std.proces
         .exited => |code| if (code == 0) return,
         else => {},
     }
-    // The transpiler's own diagnostics are already on screen; name the
+    // The frontend's own diagnostics are already on screen; name the
     // failing pass without burying them.
     std.debug.print("native check: src/core.ts failed the @native-sdk/core checker (diagnostics above)\n", .{});
+    return error.CoreCheckFailed;
+}
+
+/// The compiler-truth pass `checkCore` chains after the frontend: the
+/// pinned external core compiler's analyzer over the same entry, with
+/// the shipped SDK declarations mapped — the check verdict and the
+/// build verdict come from ONE compiler. Analyzer type errors fail the
+/// check with the compiler's own diagnostics; a toolchain that cannot
+/// reach a verdict defers to the build rather than wedging check.
+pub fn compilerTypecheckCore(allocator: std.mem.Allocator, io: std.Io, base_env: *std.process.Environ.Map, framework_root: []const u8) !void {
+    const script_path = try transpilerPath(allocator, io, framework_root, "scripts/compiler_typecheck.mjs");
+    defer allocator.free(script_path);
+    var child = std.process.spawn(io, .{
+        .argv = &.{ "node", script_path, "src/core.ts" },
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .environ_map = base_env,
+    }) catch return nodeMissing();
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| switch (code) {
+            0 => return,
+            2 => return error.MissingTranspiler,
+            else => {},
+        },
+        else => {},
+    }
+    std.debug.print("native check: src/core.ts does not typecheck under the external core compiler (its diagnostics above are the build's verdict too)\n", .{});
     return error.CoreCheckFailed;
 }
 
@@ -463,7 +484,7 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     defer allocator.free(devhost_path);
     const runner_path = try tsRunnerPath(allocator, io, framework_root);
     defer allocator.free(runner_path);
-    // The harness runs the transpiler tier under node, so it needs the
+    // The harness runs the frontend tier under node, so it needs the
     // TypeScript toolchain to resolve exactly like check/build do.
     try ensureResolvedTranspiler(allocator, io, framework_root);
 
@@ -515,8 +536,8 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
 // the `files: ["sdk"]` allowlist: sdk/core.ts, sdk/text.ts, sdk/events.ts,
 // and the ambient bytes-text method surface core.ts references).
 // The copy is
-// EDITOR-AND-VERSIONING SURFACE ONLY: builds transpile against the SDK
-// checkout's own sources and never read node_modules — delete it and
+// EDITOR-AND-VERSIONING SURFACE ONLY: builds check and compile against the
+// SDK checkout's own sources and never read node_modules — delete it and
 // `native build|dev|check|test` still work; the next check/dev/build puts
 // it back. Once the real package is published, a user-run `npm install`
 // overwrites the copy with identical content; the refresh below compares
@@ -776,7 +797,7 @@ test "the checkout teaching's npm command survives production npm config" {
     try std.testing.expect(std.mem.indexOf(u8, npm_ci_teaching_command, "--include=dev") != null);
 }
 
-/// The minimal manifest of the @typescript/typescript6 WRAPPER a fake
+/// The minimal manifest of a stray @typescript/typescript6 wrapper a fake
 /// COMPLETED install also lands (npm keeps installing it as a declared
 /// dependency). The gate never probes it — validation tracks only the
 /// aliased real compiler runtime loads — so tests land it exactly where

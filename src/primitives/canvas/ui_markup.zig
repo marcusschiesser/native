@@ -1861,11 +1861,12 @@ pub const arena_scalar_equality_message = "arena-computed bindings cannot be com
 pub const binding_text_buffer_message = "this binding names a TextBuffer field - the buffer is the edit model, not the text; bind a pub fn returning its text (pub fn draft(model: *const Model) []const u8 { return model.draft_buffer.text(); })";
 pub const markdown_source_message = "markdown requires a source attribute with one {binding} naming the markdown text (a []const u8 field or fn - arena fns work)";
 pub const markdown_children_message = "markdown takes no children or text content - the source binding provides the markdown";
-pub const markdown_attr_message = "unknown attribute for markdown - it takes source, on-link, on-details, details-expanded, and issue-link-base";
+pub const markdown_attr_message = "unknown attribute for markdown - it takes source, on-link, on-details, details-expanded, issue-link-base, and images";
 pub const markdown_issue_link_base_message = "issue-link-base takes a literal URL prefix or one {binding} producing it - '#123' refs become links to base ++ number (like ghissue:// or https://github.com/owner/repo/issues/)";
 pub const markdown_on_link_message = "on-link takes a bare Msg tag whose payload is the pressed link URL (a []const u8 variant, like open_url: []const u8)";
 pub const markdown_on_details_message = "on-details takes a bare Msg tag whose payload is the details block index (a usize variant, like toggle_details: usize)";
 pub const markdown_details_expanded_message = "details-expanded takes one {binding} naming a []const bool iterable (a model field, pub decl, or fn - the same sources for each accepts)";
+pub const markdown_images_message = "images takes one {binding} naming a []const canvas.markdown.ResolvedImage iterable (source, registered ImageId, width, and height); views never fetch image URLs implicitly";
 pub const code_source_message = "code requires a source attribute with one {binding} naming the source text (a []const u8 field or fn - arena fns work)";
 pub const code_children_message = "code takes no children or text content - the source binding provides the code";
 pub const code_attr_message = "unknown attribute for code - it takes source, language, editable, on-input, line-numbers, added-lines, removed-lines, wrap, width, height, min-width, grow, key, global-key, and label";
@@ -2205,6 +2206,13 @@ fn validateMarkdown(node: MarkupNode) ?MarkupErrorInfo {
             const expression = parseAttrExpression(attribute.value);
             if (expression == null or expression.? != .binding) {
                 return attrError(node, attribute, markdown_details_expanded_message);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, attribute.name, "images")) {
+            const expression = parseAttrExpression(attribute.value);
+            if (expression == null or expression.? != .binding) {
+                return attrError(node, attribute, markdown_images_message);
             }
             continue;
         }

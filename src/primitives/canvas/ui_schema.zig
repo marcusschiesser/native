@@ -576,6 +576,9 @@ pub const attrs = [_]AttrInfo{
     // can state compact runs (`2-4, 7`) without putting +/- bytes in source.
     .{ .code = 94, .name = "added-lines", .class = .text, .group = .composite },
     .{ .code = 95, .name = "removed-lines", .class = .text, .group = .composite },
+    // Markdown's caller-owned source -> registered ImageId mapping. The
+    // markdown rule hook scopes and type-checks the iterable binding.
+    .{ .code = 96, .name = "images", .class = .binding_only, .group = .composite },
 };
 
 // ----------------------------------------------------------------- events

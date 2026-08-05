@@ -21,9 +21,13 @@ The CLI itself serves the full skill content. This is the layer the installed di
 ```sh
 native skills list                    # list built-in skills
 native skills get core                # print a skill
+native skills get native-ui           # default app views and app loop
+native skills get ts-core             # default TypeScript app core
 native skills get core --full         # include its reference files
 native skills get --all [--full]      # print every skill
 ```
+
+For a normal app created by `native init`, give the agent both `native-ui` and `ts-core`: TypeScript + Native markup is the primary authoring path. Load `core --full` when the task reaches shared runtime wiring, WebViews, packaging, or native capabilities; load `zig` for an existing Zig-core app or toolkit-extension work.
 
 `skills get` prints the skill to stdout, so delivering one to an agent is a single redirect into wherever your agent loads skills from:
 
@@ -38,11 +42,11 @@ native skills get native-ui > .claude/skills/native-ui/SKILL.md
 
 <dl>
   <dt><code>core</code></dt>
-  <dd>The shared foundation: the mental model, project structure, <code>app.zon</code>, App and Runtime patterns, frontend integration, web engines, the JavaScript bridge, permissions, windows, WebViews, dialogs, packaging, debugging, and testing. <code>--full</code> appends its five reference files (project anatomy, App/Runtime patterns, frontend assets, web engines/packaging/debugging, bridge/security/native capabilities).</dd>
+  <dd>The shared foundation and task router: it establishes TypeScript + Native markup as the default, then covers project structure, <code>app.zon</code>, lower-level App and Runtime patterns, frontend integration, web engines, the JavaScript bridge, permissions, windows, WebViews, dialogs, packaging, debugging, and testing. <code>--full</code> appends its five reference files.</dd>
   <dt><code>native-ui</code></dt>
-  <dd>Authoring native-rendered apps: <code>.native</code> markup views, bindings and message dispatch, <code>Model</code>/<code>Msg</code>/<code>update</code> on the <code>UiApp</code> loop, testing markup views, hot reload, and verifying the result through the automation harness.</dd>
+  <dd>The view half of primary app authoring: <code>.native</code> markup views, bindings and message dispatch, the <code>Model</code>/<code>Msg</code>/<code>update</code> loop, testing markup views, hot reload, and verification through the automation harness.</dd>
   <dt><code>ts-core</code></dt>
-  <dd>Authoring <a href="/docs/typescript">TypeScript app cores</a>: the app-core subset, every checker rule by ID with its idiomatic fix, text-is-bytes, the full <code>Cmd</code>/<code>Sub</code> effect vocabulary, and the node dev loop.</dd>
+  <dd>The logic half of primary app authoring: <a href="/docs/typescript">TypeScript app cores</a>, the app-core subset, every checker rule by ID with its idiomatic fix, text-is-bytes, the full <code>Cmd</code>/<code>Sub</code> effect vocabulary, and the node dev loop.</dd>
   <dt><code>automation</code></dt>
   <dd>Driving and verifying a running app through <code>native automate</code>: snapshots, readiness waits, assertions, bridge round-trips, and smoke tests.</dd>
   <dt><code>zig</code></dt>

@@ -149,6 +149,11 @@ export interface FetchSpec {
     readonly body?: Uint8Array;
     readonly timeoutMs?: number;
 }
+export interface NotificationSpec {
+    readonly title: Uint8Array;
+    readonly subtitle?: Uint8Array;
+    readonly body?: Uint8Array;
+}
 export type Cmd<M extends Msgish> = {
     readonly op: "none";
 } | {
@@ -208,6 +213,11 @@ export type Cmd<M extends Msgish> = {
     readonly key: string;
     readonly okKind: string;
     readonly errKind: string;
+} | {
+    readonly op: "show_notification";
+    readonly title: Uint8Array;
+    readonly subtitle: Uint8Array;
+    readonly body: Uint8Array;
 } | {
     readonly op: "delay";
     readonly key: string;
@@ -315,6 +325,7 @@ export declare const Cmd: {
     fetch<M extends Msgish>(spec: FetchSpec, route: FetchRoute<M>): Cmd<M>;
     clipboardWrite(bytes: Uint8Array): Cmd<never>;
     clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
+    showNotification(spec: NotificationSpec): Cmd<never>;
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;
     audioPlay<M extends Msgish>(key: string, source: AudioSource, route: AudioRoute<M>): Cmd<M>;

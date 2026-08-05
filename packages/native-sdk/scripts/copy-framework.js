@@ -15,14 +15,14 @@
 // install.
 //
 // packages/core/ ships too, selectively: TypeScript app cores need the
-// @native-sdk/core toolchain (src/, run under node at build time), the
+// @native-sdk/core frontend (src/, run under node at build time), the
 // SDK library modules cores import (sdk/, also the editor package the CLI
 // materializes into apps), the external-compile staging surface
 // (compile-surface/ and the scripts/ drivers the build graph runs),
 // package.json (the bundled version every scaffold pin follows), and
 // package-lock.json (npm only strips the tarball ROOT lockfile; nested
 // ones ship). The frontend's TypeScript toolchain and the external core
-// compiler do NOT ride in the payload: @typescript/typescript6 and
+// compiler do NOT ride in the payload: the @typescript/old alias and
 // scriptc are regular dependencies of @native-sdk/cli, installed by npm
 // in the same transaction and resolved from packages/core by node's
 // ancestor walk. test/ stays out: repo-dev surface, never build inputs.
@@ -64,7 +64,7 @@ for (const dir of ['src', 'build', 'assets', 'skills', 'skill-data']) {
 // The @native-sdk/core closure a TS app build needs (see the header note).
 {
   rmSync(join(projectRoot, 'packages'), { recursive: true, force: true });
-  for (const dir of ['src', 'sdk', 'compile-surface', 'scripts', 'rt']) {
+  for (const dir of ['src', 'sdk', 'compile-surface', 'scripts']) {
     const source = join(repoRoot, 'packages', 'core', dir);
     const target = join(projectRoot, 'packages', 'core', dir);
     cpSync(source, target, { recursive: true });

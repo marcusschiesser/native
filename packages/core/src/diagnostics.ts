@@ -400,14 +400,6 @@ export const rules = {
     fix: "Spell the crossing in a schema-carried form: value-stored records (object-literal aliases) for message payloads, named records around optional or array payloads, and integer aliases whose values reach past 255.",
     why: "The contract sidecar is the machine-readable twin of the core's surface, and a shape its schema cannot state would silently drop from every consumer — so the build stops here with the spelling that carries it instead.",
   },
-  // NS9xxx: internal emit-time verification. A checker gap becomes a loud
-  // internal error naming the construct, never silent misbehavior.
-  NS9001: {
-    id: "NS9001",
-    title: "construct not covered by the v1 emitter",
-    fix: "Rewrite with the constructs in the subset table, or report this file so the mapping gains a rule.",
-    why: "The emitter re-derives every subset rule during emission; anything it cannot prove a mapping for must stop the build.",
-  },
 } as const satisfies Record<string, RuleCopy>;
 
 export type RuleId = keyof typeof rules;

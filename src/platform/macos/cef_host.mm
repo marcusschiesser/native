@@ -2909,19 +2909,35 @@ int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const
     return 0;
 }
 
-/* Mirror of the AppKit host's decoder: pure CoreGraphics/ImageIO with no
- * host state, so both engines decode identically. See appkit_host.h for
- * the pixel-format and return-value contract. */
+/* Mirror of the AppKit host's decoder: ImageIO raster codecs plus NSImage's
+ * system SVG rasterizer, with no host state, so both engines decode
+ * identically. See appkit_host.h for the pixel-format and return-value
+ * contract. */
 int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height) {
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
     if (!bytes || bytes_len == 0 || !pixels) return 0;
     @autoreleasepool {
         NSData *data = [NSData dataWithBytesNoCopy:(void *)bytes length:bytes_len freeWhenDone:NO];
+        CGImageRef image = NULL;
         CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-        if (!source) return 0;
-        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
-        CFRelease(source);
+        if (source) {
+            image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+            CFRelease(source);
+        }
+        if (!image) {
+            NSImage *system_image = [[NSImage alloc] initWithData:data];
+            NSSize size = system_image ? system_image.size : NSZeroSize;
+            if (size.width > 0 && size.height > 0 && size.width <= 8192 && size.height <= 8192) {
+                // Bound SVG rasterization before NSImage materializes the
+                // screen-scale representation; see the AppKit mirror.
+                const CGFloat max_raster_points = 256.0;
+                const CGFloat raster_scale = MIN(1.0, MIN(max_raster_points / size.width, max_raster_points / size.height));
+                NSRect proposed = NSMakeRect(0, 0, size.width * raster_scale, size.height * raster_scale);
+                CGImageRef rendered = [system_image CGImageForProposedRect:&proposed context:nil hints:nil];
+                if (rendered) image = CGImageRetain(rendered);
+            }
+        }
         if (!image) return 0;
 
         size_t width = CGImageGetWidth(image);

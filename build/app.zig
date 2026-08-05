@@ -54,9 +54,10 @@ pub const AppOptions = struct {
 };
 
 /// Which core the app tree carries. No flag and no config anywhere: the
-/// tree IS the truth — `src/core.ts` is a TypeScript core (transpiled at
-/// build time, run through generated wiring), `src/main.zig` a Zig one,
-/// and both at once is a teaching error naming the two files.
+/// tree IS the truth — `src/core.ts` is a TypeScript core (compiled to
+/// native code at build time, run through generated wiring),
+/// `src/main.zig` a Zig one, and both at once is a teaching error
+/// naming the two files.
 const CoreTree = enum { zig, ts, both, neither };
 
 fn detectCoreTree(b: *std.Build, app_root: []const u8) CoreTree {
@@ -73,32 +74,39 @@ fn appFileExists(b: *std.Build, app_root: []const u8, sub_path: []const u8) bool
     return true;
 }
 
-/// How a TypeScript core compiles. `.transpiler` (the default) is the
-/// emitted-Zig lane; `.external` is the OPT-IN external core compiler
-/// lane — the frontend still checks the core and emits its contract
-/// sidecar, corewire projects the compile entry and profile, the
-/// exact-pinned external toolchain builds the archive, and the app
-/// links corewire's generated mirror over it. Selected by
-/// `-Dcore-compiler` orelse app.zon's `.core_compiler` orelse
-/// transpiler; with neither stated the build is the transpiler lane,
-/// byte for byte.
-const CoreCompilerOption = enum { transpiler, external };
+/// How a TypeScript core compiles: through the external core compiler,
+/// always. The frontend checks the core and emits its contract sidecar,
+/// corewire projects the compile entry and profile, the exact-pinned
+/// external toolchain builds the archive, and the app links corewire's
+/// generated mirror over it. `.core_compiler` in app.zon (and the
+/// `-Dcore-compiler` flag) accept only "external" — the value exists so
+/// a stated choice stays stateable; the removed transpiled lane's
+/// spelling is refused with a teaching (see resolveCoreCompiler).
+const core_compiler_teaching =
+    "\ncore_compiler = \"transpiler\" names the removed TS-to-Zig transpiled lane (v0.7.0" ++
+    " removed it): a TypeScript core compiles through the external core compiler now, and" ++
+    " that is the default.\nDelete the setting (or spell it \"external\").\n";
 
 /// The staged TypeScript-core wiring: one generated directory holding the
-/// core module (the transpiled core.zig with its rt kernel, or the
-/// external lane's generated mirror with its staged shim runtime), the
+/// core module (the generated mirror with its staged shim runtime), the
 /// app's markup, and the SDK's generated-wiring entry (ts_core_main.zig
-/// as main.zig). Built once per app build and shared by the exe and
-/// test modules.
+/// as main.zig) — plus the compiled-core archive the app module links
+/// behind the mirror. Built once per app build and shared by the exe
+/// and test modules.
 const TsCoreStage = struct {
     main_root: std.Build.LazyPath,
-    /// The external lane's compiled-core archive: the app module links
-    /// it (with libc, for the toolchain's runtime) beside the staged
-    /// mirror. Null on the transpiler lane.
-    external_archive: ?std.Build.LazyPath = null,
+    /// The compiled-core archive: the app module links it (with libc,
+    /// for the toolchain's runtime) beside the staged mirror.
+    archive: std.Build.LazyPath,
 };
 
-/// Whether the transpiler's TypeScript compiler (@typescript/old, the
+/// The frontend's own sources — the staleness set of every build step
+/// that runs it (a frontend edit re-checks every core).
+const frontend_sources = [_][]const u8{
+    "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "ownership.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
+};
+
+/// Whether the frontend's TypeScript compiler (@typescript/old, the
 /// exactly pinned npm alias of the real `typescript` package) RESOLVES
 /// from the SDK's packages/core, by node's ancestor node_modules walk —
 /// at the SDK's exactly pinned VERSION. The same semantics the CLI gates
@@ -116,17 +124,13 @@ const TsCoreStage = struct {
 /// (nested under the package on global prefixes, hoisted to the project
 /// root on local ones, pnpm's sibling node_modules).
 ///
-/// The @typescript/typescript6 wrapper is deliberately NOT probed:
-/// nothing imports it at run time (typed_ast.ts bypasses its one-line
-/// re-export on purpose), so holding the wrapper's resolution — or the
-/// alias's version as seen FROM the wrapper's origin — against the pin
-/// can only FALSE-REJECT healthy trees: npm's own conflict shape hoists
-/// a consumer's conflicting `@typescript/old` at the project root while
-/// our exact pin lands nested under the CLI, which is precisely the copy
-/// runtime loads from packages/core; a consumer's own shadowing wrapper
-/// must not sway the verdict either. The wrapper stays a DECLARED
-/// dependency in both manifests — it is just not what validation vouches
-/// for (see the twin's doc comment).
+/// A stray `@typescript/typescript6` compat wrapper in a consumer tree
+/// (a former dependency of this package, or the consumer's own) is
+/// deliberately NOT probed: nothing imports it at run time, and holding
+/// the alias's version as seen FROM a wrapper's origin against the pin
+/// can only FALSE-REJECT healthy trees — a consumer's hoisted conflicting
+/// `@typescript/old` wins the walk from there while the copy runtime
+/// actually loads sits correctly pinned under packages/core.
 ///
 /// Resolvable means the alias's manifest AND its entrypoint are present
 /// (see tsAliasedCompilerVersion for node's error shape and the
@@ -234,6 +238,29 @@ fn tsParseQuotedManifestValue(manifest_json: []const u8, comptime key: []const u
     return suffix;
 }
 
+/// The external core compiler's entry module (scriptc's dist/main.js),
+/// resolved by node's ancestor node_modules walk from the SDK's
+/// packages/core — the same origin the frontend toolchain resolves from
+/// (tsAliasedCompilerVersion's walk, kept in lockstep). Repo checkouts
+/// install it there with `npm ci`; the npm-installed CLI carries the
+/// compiler as a regular dependency, nested under the package on global
+/// prefixes and hoisted to the project root on local ones.
+fn tsExternalCompilerJs(b: *std.Build, dep: *std.Build.Dependency) ?[]const u8 {
+    const io = b.graph.io;
+    const sdk_root = tsSdkRoot(b.allocator, io, dep);
+    var dir: []const u8 = b.pathJoin(&.{ sdk_root, "packages", "core" });
+    while (true) {
+        if (!std.mem.eql(u8, std.fs.path.basename(dir), "node_modules")) {
+            const candidate = b.pathJoin(&.{ dir, "node_modules", "scriptc", "dist", "main.js" });
+            found: {
+                std.Io.Dir.cwd().access(io, candidate, .{}) catch break :found;
+                return candidate;
+            }
+        }
+        dir = std.fs.path.dirname(dir) orelse return null;
+    }
+}
+
 /// The SDK dependency's real root, resolved the way both the toolchain
 /// check and its teaching name it.
 fn tsSdkRoot(allocator: std.mem.Allocator, io: std.Io, dep: *std.Build.Dependency) []const u8 {
@@ -241,19 +268,19 @@ fn tsSdkRoot(allocator: std.mem.Allocator, io: std.Io, dep: *std.Build.Dependenc
     return std.Io.Dir.cwd().realPathFileAlloc(io, raw_root, allocator) catch raw_root;
 }
 
-/// The shared TS-core preflight — the markup view, node, and the
-/// transpiler toolchain gate — returning the resolved node program.
-/// Both lanes run it: the external lane still runs the frontend for
-/// checking and the contract sidecar.
+/// The TS-core preflight — the markup view, node, and the frontend
+/// toolchain gate — returning the resolved node program. The frontend
+/// (the subset checker and the contract-sidecar emitter) runs under
+/// node; the compile itself is the external toolchain's.
 fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8) []const u8 {
     if (!appFileExists(b, app_root, "src/app.native")) {
         @panic("\nthis app has a TypeScript core (src/core.ts) but no view: TS apps render markup," ++
-            " so add src/app.native (the whole view tier binds the core's emitted model)\n");
+            " so add src/app.native (the whole view tier binds the core's model)\n");
     }
     const node = b.findProgram(&.{"node"}, &.{}) catch {
-        @panic("\nbuilding a TypeScript app core needs node on PATH (the @native-sdk/core transpiler runs at" ++
-            " build time; the binary it emits ships no JS runtime).\nInstall Node.js 22.15+ (on the 23 line: 23.5+)" ++
-            " — https://nodejs.org or `brew install node` — and re-run.\n");
+        @panic("\nbuilding a TypeScript app core needs node on PATH (the @native-sdk/core frontend checks the" ++
+            " core at build time; the binary you ship carries no JS runtime).\nInstall Node.js 22.15+ (on the 23" ++
+            " line: 23.5+) — https://nodejs.org or `brew install node` — and re-run.\n");
     };
     switch (tsToolchainResolution(b, dep)) {
         .resolved => {},
@@ -267,7 +294,7 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
             const sdk_root = tsSdkRoot(dep.builder.allocator, dep.builder.graph.io, dep);
             std.debug.print(
                 \\
-                \\error: the @native-sdk/core transpiler cannot resolve its TypeScript toolchain
+                \\error: the @native-sdk/core frontend cannot resolve its TypeScript toolchain
                 \\(its compiler, @typescript/old). On a repo checkout, install it once with:
                 \\  cd {s}/packages/core && npm ci --include=dev
                 \\(An npm-installed @native-sdk/cli carries the toolchain automatically; if it
@@ -285,7 +312,7 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
             // to move.
             std.debug.print(
                 \\
-                \\error: the @native-sdk/core transpiler's TypeScript compiler resolves at the
+                \\error: the @native-sdk/core frontend's TypeScript compiler resolves at the
                 \\wrong version: @typescript/old resolves to typescript {s}, but the SDK pins
                 \\npm:typescript@{s}. Another package in this tree pins a conflicting
                 \\@typescript/old - align it with the SDK's pin (or remove it) and reinstall,
@@ -299,83 +326,47 @@ fn tsCorePreflight(b: *std.Build, dep: *std.Build.Dependency, app_root: []const 
     return node;
 }
 
-fn tsCoreStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8) TsCoreStage {
+/// The TypeScript-core compile lane: the frontend checks the core and
+/// emits its contract sidecar, corewire projects the generated compile
+/// entry and library-mode profile, the stager assembles the compile
+/// tree (author sources with the mechanical staging transforms, the
+/// staged SDK modules, the static compile surface), the exact-pinned
+/// external toolchain builds the archive AND co-emits the archive's own
+/// contract sidecar, and corewire generates the mirror module from THAT
+/// document — so the boot identity fence always pairs the mirror with
+/// its own compile. The staged module directory carries core.zig (the
+/// mirror) + its staged runtime + app.native + main.zig, so the
+/// generated wiring imports one fixed shape.
+fn tsCoreStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8, app_name: []const u8) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
 
-    // The transpiler runs through build/ts_run.mjs, not as `node cli.ts`:
-    // on the npm-installed layout the transpiler's .ts sources live inside
-    // node_modules, where node refuses its builtin type stripping — the
-    // runner strips those modules with the transpiler's own installed
-    // TypeScript and is a pass-through on a repo checkout.
-    const transpile = b.addSystemCommand(&.{node});
-    transpile.addFileArg(dep.path("build/ts_run.mjs"));
-    transpile.addFileArg(dep.path("packages/core/src/cli.ts"));
-    transpile.addFileArg(b.path(appPath(b, app_root, "src/core.ts")));
-    transpile.addArg("-o");
-    const emitted_core = transpile.addOutputFileArg("core.zig");
-    // The transpiler reads its own sources, the SDK modules, and the core's
-    // WHOLE import graph at run time; declare them so a transpiler upgrade
-    // or an edit to ANY module of a multi-file core re-emits it. The graph
-    // is declared as every .ts under the app's src/ (a superset of the
-    // reachable imports: over-approximation only re-runs the transpile,
-    // never misses a stale input). Failure mode: the checker's NS
-    // diagnostics stream to stderr verbatim — they are the teaching layer,
-    // nothing wraps them.
-    addTsDirInputs(b, dep.builder, transpile, "packages/core/sdk");
-    addAppTsDirInputs(b, transpile, appPath(b, app_root, "src"));
-    const transpiler_sources = [_][]const u8{
-        "checker.ts", "cli.ts", "diagnostics.ts", "emitter.ts", "infer.ts", "modules.ts", "transpile.ts", "typed_ast.ts", "types.ts",
-    };
-    for (transpiler_sources) |source| {
-        transpile.addFileInput(dep.path(b.fmt("packages/core/src/{s}", .{source})));
-    }
-
-    // The wiring imports core.zig and app.native relatively; the emitted
-    // core imports rt.zig relatively: stage all four into one directory.
-    const staged = b.addWriteFiles();
-    _ = staged.addCopyFile(emitted_core, "core.zig");
-    _ = staged.addCopyFile(dep.path("packages/core/rt/rt.zig"), "rt.zig");
-    _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
-    const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
-    return .{ .main_root = main_root };
-}
-
-/// The OPT-IN external-compile lane for a TypeScript core (see
-/// CoreCompilerOption): the frontend checks the core and emits its
-/// contract sidecar, corewire projects the generated compile entry and
-/// library-mode profile, the stager assembles the compile tree (author
-/// sources with the mechanical staging transforms, the staged SDK
-/// modules, the static compile surface), the exact-pinned external
-/// toolchain builds the archive AND co-emits the archive's own contract
-/// sidecar, and corewire generates the mirror module from THAT document
-/// — so the boot identity fence always pairs the mirror with its own
-/// compile. The staged module directory has the transpiler lane's exact
-/// shape (core.zig + its staged runtime + app.native + main.zig), so
-/// the generated wiring runs unchanged over either lane.
-fn externalCoreStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []const u8, app_name: []const u8) TsCoreStage {
-    const node = tsCorePreflight(b, dep, app_root);
-
-    // The frontend, for checking and the contract: the transpile runs in
-    // full (its emitted Zig is discarded), so every transpile-time
-    // teaching gates this lane exactly as it gates the default one.
-    const transpile = b.addSystemCommand(&.{node});
-    transpile.addFileArg(dep.path("build/ts_run.mjs"));
-    transpile.addFileArg(dep.path("packages/core/src/cli.ts"));
-    transpile.addFileArg(b.path(appPath(b, app_root, "src/core.ts")));
-    transpile.addArg("-o");
-    _ = transpile.addOutputFileArg("core.zig");
-    transpile.addArg("--contract");
-    const contract = transpile.addOutputFileArg("core.contract.json");
+    // The frontend, in check-only mode: the subset checker and the
+    // contract sidecar, no emission. Every check-time teaching gates the
+    // compile here — the checker's NS diagnostics stream to stderr
+    // verbatim; nothing wraps them. The frontend runs through
+    // build/ts_run.mjs, not as `node cli.ts`: on the npm-installed
+    // layout the frontend's .ts sources live inside node_modules, where
+    // node refuses its builtin type stripping — the runner strips those
+    // modules with the frontend's own installed TypeScript and is a
+    // pass-through on a repo checkout. The frontend reads its own
+    // sources, the SDK modules, and the core's WHOLE import graph at
+    // run time; declare them all so an edit to ANY module of a
+    // multi-file core re-checks it (every .ts under src/ is a superset
+    // of the reachable imports: over-approximation only re-runs the
+    // check, never misses a stale input).
+    const check = b.addSystemCommand(&.{node});
+    check.addFileArg(dep.path("build/ts_run.mjs"));
+    check.addFileArg(dep.path("packages/core/src/cli.ts"));
+    check.addFileArg(b.path(appPath(b, app_root, "src/core.ts")));
+    check.addArg("--contract");
+    const contract = check.addOutputFileArg("core.contract.json");
     // The document's entry spelling is app-relative (the sidecar/facade
     // contract carries no machine paths).
-    transpile.addArgs(&.{ "--contract-entry", "src/core.ts" });
-    addTsDirInputs(b, dep.builder, transpile, "packages/core/sdk");
-    addAppTsDirInputs(b, transpile, appPath(b, app_root, "src"));
-    const transpiler_sources = [_][]const u8{
-        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "emitter.ts", "infer.ts", "modules.ts", "transpile.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
-    };
-    for (transpiler_sources) |source| {
-        transpile.addFileInput(dep.path(b.fmt("packages/core/src/{s}", .{source})));
+    check.addArgs(&.{ "--contract-entry", "src/core.ts" });
+    addTsDirInputs(b, dep.builder, check, "packages/core/sdk");
+    addAppTsDirInputs(b, check, appPath(b, app_root, "src"));
+    for (frontend_sources) |source| {
+        check.addFileInput(dep.path(b.fmt("packages/core/src/{s}", .{source})));
     }
 
     // corewire, compiled from the SDK dependency for the build host: one
@@ -426,23 +417,24 @@ fn externalCoreStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []cons
         // driver still refuses a release other than the SDK's pin.
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        const main_js = "packages/core/node_modules/scriptc/dist/main.js";
-        dep.builder.build_root.handle.access(b.graph.io, main_js, .{}) catch {
+        const compiler_js = tsExternalCompilerJs(b, dep) orelse {
             const sdk_root = tsSdkRoot(dep.builder.allocator, dep.builder.graph.io, dep);
             std.debug.print(
                 \\
-                \\error: the external core compiler is not installed (app.zon/-Dcore-compiler
-                \\selected core_compiler = external). It ships as an exact-pinned dependency of
-                \\the SDK's packages/core — install it once with:
+                \\error: the external core compiler is not installed (TypeScript cores compile
+                \\through it). It ships as an exact-pinned dependency of the SDK's packages/core
+                \\— install it once with:
                 \\  cd {s}/packages/core && npm ci
-                \\(or point NATIVE_SDK_CORE_COMPILER at the pinned release's command).
+                \\(or point NATIVE_SDK_CORE_COMPILER at the pinned release's command; an
+                \\npm-installed @native-sdk/cli carries the compiler automatically — if it is
+                \\missing there, the install is broken: reinstall @native-sdk/cli).
                 \\
                 \\
             , .{sdk_root});
             std.process.exit(1);
         };
         compile.addArg("--compiler-js");
-        compile.addFileArg(dep.path(main_js));
+        compile.addFileArg(.{ .cwd_relative = compiler_js });
     }
 
     // The mirror, generated from the archive's OWN co-emitted contract.
@@ -452,16 +444,15 @@ fn externalCoreStage(b: *std.Build, dep: *std.Build.Dependency, app_root: []cons
     mirror.addArg("--out");
     const shim = mirror.addOutputFileArg("core_shim.zig");
 
-    // The staged module directory, in the transpiler lane's exact shape:
-    // the mirror is the app's core.zig, and it imports its staged shim
-    // runtime relatively exactly as the transpiled core imports rt.zig.
+    // The staged module directory: the mirror is the app's core.zig,
+    // and it imports its staged shim runtime relatively.
     const staged = b.addWriteFiles();
     _ = staged.addCopyFile(shim, "core.zig");
     _ = staged.addCopyFile(dep.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
     _ = staged.addCopyFile(dep.path("tools/corewire/core_abi.zig"), "core_abi.zig");
     _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
     const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
-    return .{ .main_root = main_root, .external_archive = archive };
+    return .{ .main_root = main_root, .archive = archive };
 }
 
 /// corewire (the contract-sidecar shim generator), compiled from the SDK
@@ -681,31 +672,36 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             " src/ are fine either way.)\n");
     }
     const app_config = appManifestBuildConfig(b, app_options.app_root);
-    // The OPT-IN external-compile lane: the flag overrides app.zon's
-    // `.core_compiler`, and with neither stated the transpiler lane runs
-    // byte for byte.
-    const core_compiler_override = b.option(CoreCompilerOption, "core-compiler", "How a TypeScript core compiles: transpiler (default), external");
-    const core_compiler = core_compiler_override orelse app_config.core_compiler;
-    if (core_compiler == .external and core_tree != .ts) {
-        @panic("\ncore_compiler = external applies to TypeScript cores (src/core.ts) only; this app" ++
-            " has a Zig core.\nDrop the opt-in (-Dcore-compiler / app.zon .core_compiler) or port the" ++
-            " core to TypeScript.\n");
+    // The core-compiler setting names the one lane there is; the flag
+    // overrides app.zon's `.core_compiler` and both exist so a stated
+    // choice stays stateable (and so the removed lane's spelling teaches
+    // instead of failing opaquely).
+    if (b.option([]const u8, "core-compiler", "How a TypeScript core compiles: external (the default and only lane)")) |flag| {
+        if (std.mem.eql(u8, flag, "transpiler")) @panic(core_compiler_teaching);
+        if (!std.mem.eql(u8, flag, "external")) @panic("\n-Dcore-compiler must be \"external\" (the default and only lane)\n");
+        if (core_tree != .ts) {
+            @panic("\n-Dcore-compiler applies to TypeScript cores (src/core.ts) only; this app has" ++
+                " a Zig core.\nDrop the flag or port the core to TypeScript.\n");
+        }
     }
-    const ts_stage: ?TsCoreStage = if (core_tree == .ts) switch (core_compiler) {
-        .transpiler => tsCoreStage(b, dep, app_options.app_root),
-        .external => externalCoreStage(b, dep, app_options.app_root, app_options.name),
-    } else null;
+    // Mobile targets are taught BEFORE lane selection: TypeScript cores
+    // are desktop-only until the external core toolchain grows mobile
+    // targets; Zig/markup cores stay fully supported on mobile.
+    if (core_tree == .ts and (target.result.os.tag == .ios or target.result.abi.isAndroid())) {
+        @panic("\nTypeScript app cores are desktop-only today: the external core compiler does not" ++
+            " target mobile yet.\nBuild for a desktop target, or port the core to a Zig" ++
+            " `mobileOptions` app — Zig and markup cores are fully supported on mobile.\n");
+    }
+    const ts_stage: ?TsCoreStage = if (core_tree == .ts)
+        tsCoreStage(b, dep, app_options.app_root, app_options.name)
+    else
+        null;
 
     // Mobile targets get the embed static library as a `lib` step: the
     // artifact the toolkit-owned iOS host (and any hand-written shim)
     // links, so `native dev|package --target ios` works against every
     // standard app build — generated graph or ejected — with nothing but
     // `-Dtarget`. Desktop targets keep the step absent.
-    if (ts_stage != null and (target.result.os.tag == .ios or target.result.abi.isAndroid())) {
-        @panic("\nTypeScript app cores build desktop apps today; the mobile embed library for TS" ++
-            " cores lands with the mobile host tier.\nBuild for a desktop target, or port the core" ++
-            " to a Zig `mobileOptions` app for mobile.\n");
-    }
     if (target.result.os.tag == .ios or target.result.abi.isAndroid()) {
         addMobileLibWithTarget(b, dep, target, optimize, .{
             .name = app_options.name,
@@ -980,8 +976,8 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
 
     const app_mod = if (ts_stage) |stage|
         // TypeScript core: the app module roots at the staged generated
-        // wiring (ts_core_main.zig beside the transpiled core.zig, its rt
-        // kernel, and the app's markup).
+        // wiring (ts_core_main.zig beside the mirror core.zig, its shim
+        // runtime, and the app's markup).
         b.createModule(.{
             .root_source_file = stage.main_root,
             .target = target,
@@ -996,12 +992,10 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         app_mod.addImport("app_manifest_zon", manifest_mod);
     }
     if (ts_stage) |stage| {
-        if (stage.external_archive) |archive| {
-            // The external lane links the compiled-core archive behind
-            // the staged mirror; the toolchain's runtime needs libc.
-            app_mod.link_libc = true;
-            app_mod.addObjectFile(archive);
-        }
+        // The compiled-core archive links behind the staged mirror; the
+        // toolchain's runtime needs libc.
+        app_mod.link_libc = true;
+        app_mod.addObjectFile(stage.archive);
     }
     return app_mod;
 }
@@ -1391,9 +1385,6 @@ const AppManifestBuildConfig = struct {
     cef_dir: []const u8 = "third_party/cef/macos",
     cef_auto_install: bool = false,
     webview_layer: WebLayerOption = .auto,
-    /// The app.zon core-compiler opt-in (see CoreCompilerOption);
-    /// `-Dcore-compiler` overrides it per invocation.
-    core_compiler: CoreCompilerOption = .transpiler,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
     /// NOT web intent — it is the default in many canvas manifests.
@@ -1408,7 +1399,7 @@ const InferenceManifest = struct {
     capabilities: []const []const u8 = &.{},
     web_engine: []const u8 = "system",
     webview_layer: []const u8 = "auto",
-    core_compiler: []const u8 = "transpiler",
+    core_compiler: []const u8 = "external",
     cef: struct {
         dir: []const u8 = "third_party/cef/macos",
         auto_install: bool = false,
@@ -1449,12 +1440,17 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
     const source_z = b.allocator.dupeZ(u8, source) catch return fallback;
     @setEvalBranchQuota(2000);
     const raw = std.zon.parse.fromSliceAlloc(InferenceManifest, b.allocator, source_z, null, .{ .ignore_unknown_fields = true }) catch return fallback;
+    // `.core_compiler` names the one lane there is; validated here so
+    // the removed transpiled lane's spelling teaches at configure time.
+    if (!std.mem.eql(u8, raw.core_compiler, "external")) {
+        if (std.mem.eql(u8, raw.core_compiler, "transpiler")) @panic(core_compiler_teaching);
+        @panic("\napp.zon .core_compiler must be \"external\" (the default and only lane)\n");
+    }
     return .{
         .web_engine = web_layer_contract.parseWebEngine(raw.web_engine) orelse .system,
         .cef_dir = raw.cef.dir,
         .cef_auto_install = raw.cef.auto_install,
         .webview_layer = web_layer_contract.parseWebViewLayer(raw.webview_layer) orelse @panic("app.zon .webview_layer must be \"auto\", \"include\", or \"exclude\""),
-        .core_compiler = std.meta.stringToEnum(CoreCompilerOption, raw.core_compiler) orelse @panic("app.zon .core_compiler must be \"transpiler\" or \"external\""),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };
 }

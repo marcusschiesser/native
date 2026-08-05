@@ -138,15 +138,33 @@ pub fn widgetCodeLineNumberGutterWidth(widget: Widget, tokens: DesignTokens) f32
     ) + 12;
 }
 
+/// Vertically align a span paragraph inside a table cell's padded content.
+/// Rows share the tallest cell's height; centering the laid-out text block
+/// keeps a short text-only cell aligned with image-bearing or wrapped peers.
+/// Other paragraph kinds keep their normal top-aligned document flow.
+pub fn widgetTextSpanAlignedContentFrame(widget: Widget, content_in: geometry.RectF, tokens: DesignTokens) geometry.RectF {
+    if (widget.kind != .data_cell or widget.spans.len == 0 or content_in.height <= 0) return content_in;
+    var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
+    const layout = text_spans_model.layoutTextSpans(
+        widget.spans,
+        widgetTextSpanLayoutOptions(widget, tokens, content_in.width),
+        &runs,
+    );
+    var content = content_in;
+    content.y += @max(0, (content.height - layout.size.height) * 0.5);
+    return content;
+}
+
 /// Span paragraph content after authored padding and the engine-owned code
-/// gutter. Layout, painting, hit mapping, and selection all use this exact
-/// frame so numbered source stays one coherent text model.
+/// gutter, plus table-cell vertical alignment. Layout, painting, hit mapping,
+/// and selection all use this exact frame so numbered source and cell links
+/// stay one coherent text model.
 pub fn widgetTextSpanContentFrame(widget: Widget, tokens: DesignTokens) geometry.RectF {
     var content = widget.frame.inset(widget.layout.padding);
     const gutter = @min(content.width, widgetCodeLineNumberGutterWidth(widget, tokens));
     content.x += gutter;
     content.width -= gutter;
-    return content;
+    return widgetTextSpanAlignedContentFrame(widget, content, tokens);
 }
 
 /// The ONE control height register — buttons, inputs, and select

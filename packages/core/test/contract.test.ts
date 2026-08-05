@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { transpileFile } from "../src/transpile.ts";
+import { checkFile } from "../src/frontend.ts";
 import { wyhash, wyhashHex } from "../src/wyhash.ts";
 
 /// Transpile a one-module core from a STABLE file name (core.ts in a
@@ -21,7 +21,7 @@ function contractOf(source: string): Record<string, unknown> {
   try {
     const entry = path.join(dir, "core.ts");
     fs.writeFileSync(entry, source);
-    const result = transpileFile(entry, { contractEntry: "src/core.ts" });
+    const result = checkFile(entry, { contractEntry: "src/core.ts" });
     assert.equal(result.ok, true, result.diagnostics.map((d) => d.message).join("\n") || result.typeErrors.join("\n"));
     assert.notEqual(result.contract, null);
     return JSON.parse(result.contract!) as Record<string, unknown>;

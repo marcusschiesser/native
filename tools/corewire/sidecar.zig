@@ -196,6 +196,13 @@ pub const Sidecar = struct {
     msg: Msg,
     init_returns_cmd: bool,
     update_returns_cmd: bool,
+    /// Whether initialModel/update may ALSO return the bare model (the
+    /// documented mixed idiom, `Model | [Model, Cmd<Msg>]`). Additive,
+    /// frontend-emitted facts: absent (an older document, or a
+    /// compiler's co-emitted sidecar) means the pair shape is
+    /// unconditional. The facade emitter keys its wrapper on them.
+    init_returns_bare: bool = false,
+    update_returns_bare: bool = false,
     has_subscriptions: bool,
     channels: Channels,
     abi: Abi,
@@ -467,10 +474,11 @@ const Mapper = struct {
 
     fn mapRoot(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }!Sidecar {
         const top = try self.members(value, "", &.{
-            "format",        "wire_version", "abi_version",      "compiler_version",   "entry",
-            "source_hash",   "build_id",     "types",            "model",              "model_helpers",
-            "model_unbound", "msg",          "init_returns_cmd", "update_returns_cmd", "has_subscriptions",
-            "channels",      "abi",          "integer_slots",    "deterministic",      "async_free",
+            "format",              "wire_version",      "abi_version",      "compiler_version",   "entry",
+            "source_hash",         "build_id",          "types",            "model",              "model_helpers",
+            "model_unbound",       "msg",               "init_returns_cmd", "update_returns_cmd", "init_returns_bare",
+            "update_returns_bare", "has_subscriptions", "channels",         "abi",                "integer_slots",
+            "deterministic",       "async_free",
         });
         top.warnUnknown();
 
@@ -496,6 +504,8 @@ const Mapper = struct {
             .msg = try self.mapMsg(try top.get("msg")),
             .init_returns_cmd = try self.boolean(try top.get("init_returns_cmd"), "init_returns_cmd"),
             .update_returns_cmd = try self.boolean(try top.get("update_returns_cmd"), "update_returns_cmd"),
+            .init_returns_bare = try self.optionalBoolean(top.map, "init_returns_bare", "", false),
+            .update_returns_bare = try self.optionalBoolean(top.map, "update_returns_bare", "", false),
             .has_subscriptions = try self.boolean(try top.get("has_subscriptions"), "has_subscriptions"),
             .channels = try self.mapChannels(try top.get("channels")),
             .abi = try self.mapAbi(try top.get("abi")),

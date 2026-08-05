@@ -1,13 +1,15 @@
-//! End-to-end: a `.native` MARKUP VIEW over a genuinely transpiled core
-//! (tests/ts-core/markup_fixture.ts + markup_view.native), through the
-//! first-class `TsUiApp(core)` adapter — the committed TS model is the
-//! app model and markup binds its emitted fields directly: a record
-//! array through `for each` + `key`, an optional scalar through `<if>`,
-//! a string-literal-union filter as an enum binding, bytes text, and
-//! camelCase TS fields bound by their own names — the emitted struct keeps the TS spellings.
+//! End-to-end: a `.native` MARKUP VIEW over a genuinely compiled core
+//! (tests/ts-core/markup_fixture.ts + markup_view.native, the core
+//! built by the external core compiler and reached through its
+//! generated mirror), through the first-class `TsUiApp(core)` adapter
+//! — the committed TS model is the app model and markup binds its
+//! fields directly: a record array through `for each` + `key`, an
+//! optional scalar through `<if>`, a string-literal-union filter as an
+//! enum binding, bytes text, and camelCase TS fields bound by their own
+//! names — the mirror struct keeps the TS spellings.
 //!
 //! On top of the view, the round's platform guarantees run through the
-//! transpiled app unchanged:
+//! compiled app unchanged:
 //!   - automation: headless widget verbs, the a11y snapshot, and
 //!     published screenshot artifacts (byte-identical on an unchanged
 //!     scene);
@@ -15,16 +17,12 @@
 //!     and raw pointer events on markup buttons) plus a `Cmd.now`
 //!     effect records byte-identically twice, replays with matching
 //!     state fingerprints, verified checkpoints, and verified PIXEL
-//!     screenshot marks, and never calls a host;
-//!   - process contract: two different transpiled cores run live side
-//!     by side (each staged core owns its rt kernel instance) — the
-//!     one-live-app-per-core-module contract, pinned from both sides.
+//!     screenshot marks, and never calls a host.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const native_sdk = @import("native_sdk");
 const board = @import("ts_markup_fixture");
-const status_core = @import("ts_core_fixture");
 
 const runtime_ns = native_sdk.runtime;
 const canvas = native_sdk.canvas;
@@ -245,7 +243,7 @@ fn findTextIn(widget: canvas.Widget, text: []const u8) bool {
 
 // ------------------------------------------------------- markup binding
 
-test "markup binds the transpiled model: lists, optionals, enums, and the TS field names" {
+test "markup binds the compiled core's model: lists, optionals, enums, and the TS field names" {
     const h = try Harness.create();
     defer h.destroy();
 
@@ -298,7 +296,7 @@ test "markup binds the transpiled model: lists, optionals, enums, and the TS fie
     try std.testing.expect(!h.hasText("picked"));
 }
 
-test "markup hover bindings drive the transpiled core: enter and leave with row payloads" {
+test "markup hover bindings drive the compiled core: enter and leave with row payloads" {
     const h = try Harness.create();
     defer h.destroy();
 
@@ -310,7 +308,7 @@ test "markup hover bindings drive the transpiled core: enter and leave with row 
 
     // A raw pointer move over the first row's TEXT: containment falls
     // through the plain child to the listening row, and the enter Msg
-    // carries the row's `for each` payload into the transpiled core.
+    // carries the row's `for each` payload into the compiled core.
     const first_row_text = h.findId(.text, "beta #1").?;
     try h.pointerMove(try h.aim(first_row_text), 4_000_000);
     try std.testing.expectEqual(@as(f64, 1), Bridge.model().hoveredId);
@@ -383,7 +381,7 @@ fn collectTexts(widget: canvas.Widget, out: *std.ArrayListUnmanaged(u8), allocat
     }
 }
 
-test "markup text input reaches the transpiled core and re-renders the view" {
+test "markup text input reaches the compiled core and re-renders the view" {
     const h = try Harness.create();
     defer h.destroy();
 
@@ -438,7 +436,7 @@ test "markup text input reaches the transpiled core and re-renders the view" {
     try std.testing.expect(h.findId(.text_field, "hi ther") != null);
 }
 
-test "automation set_text drives a transpiled-core text field (select-all sentinel translates)" {
+test "automation set_text drives a compiled-core text field (select-all sentinel translates)" {
     const h = try Harness.create();
     defer h.destroy();
 
@@ -459,7 +457,7 @@ test "automation set_text drives a transpiled-core text field (select-all sentin
     // `set_selection` carrying the `focus = maxInt(usize)` "to the end"
     // sentinel, and the declared-union translation must SATURATE it into
     // the core's i64 field class — @intCast here panicked "integer does
-    // not fit in destination type" on every transpiled-core text field
+    // not fit in destination type" on every compiled-core text field
     // (the live-GUI smoke's soundboard-ts search crash).
     var buffer: [96]u8 = undefined;
     const command = try std.fmt.bufPrint(&buffer, "widget-action {s} {d} set-text yo", .{ canvas_label, field });
@@ -577,7 +575,7 @@ test "the wiring channels drive the core: frame, key, appearance, and chrome" {
     try std.testing.expect(Bridge.model().zoomFromBoard);
 
     // The automation pinch verb dispatches the same real events into the
-    // transpiled core: one gesture whose single change carries scale - 1
+    // compiled core: one gesture whose single change carries scale - 1
     // (the verb's <scale> is the FINAL multiplicative zoom).
     var pinch_buffer: [96]u8 = undefined;
     const pinch = try std.fmt.bufPrint(&pinch_buffer, "widget-pinch {s} 2", .{canvas_label});
@@ -614,7 +612,7 @@ test "boot images register and launch env overrides dispatch at install" {
 
 // ----------------------------------------------------------- automation
 
-test "the automation surface drives the transpiled markup app headlessly" {
+test "the automation surface drives the compiled markup app headlessly" {
     const directory = ".zig-cache/tmp/ts-markup-automation";
     std.Io.Dir.cwd().deleteTree(std.testing.io, directory) catch {};
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, directory) catch {};
@@ -900,121 +898,4 @@ test "a recorded tooltip hover dwell replays its show and hide frames byte-ident
     try std.testing.expect(report.events_replayed > 0);
     try std.testing.expect(report.checkpoints_verified > 0);
     try std.testing.expectEqual(fingerprint, harness.runtime.sessionStateFingerprint());
-}
-
-// ------------------------------------------------- two live cores
-
-/// A minimal host stub for the status core's boot request (the markup
-/// core performs no host calls).
-const CoexistStub = struct {
-    var request_count: usize = 0;
-    var context: u8 = 0;
-
-    fn send(ctx: *anyopaque, name: []const u8, payload: []const u8) void {
-        _ = ctx;
-        _ = name;
-        _ = payload;
-    }
-
-    fn request(ctx: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
-        _ = ctx;
-        _ = name;
-        _ = key;
-        _ = payload;
-        request_count += 1;
-    }
-
-    fn cancelNotice(ctx: *anyopaque, key: u64) void {
-        _ = ctx;
-        _ = key;
-    }
-
-    fn binding() native_sdk.HostCallBinding {
-        return .{ .context = @ptrCast(&context), .send_fn = send, .request_fn = request, .cancel_fn = cancelNotice };
-    }
-};
-
-const StatusAdapter = native_sdk.TsUiApp(status_core);
-const StatusApp = StatusAdapter.App;
-
-const status_canvas_label = "ts-core-canvas";
-const status_views = [_]native_sdk.ShellView{
-    .{ .label = status_canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
-};
-const status_windows = [_]native_sdk.ShellWindow{.{
-    .label = "main",
-    .title = "TS Core",
-    .width = 400,
-    .height = 300,
-    .views = &status_views,
-}};
-const status_scene: native_sdk.ShellConfig = .{ .windows = &status_windows };
-
-fn statusView(ui: *StatusApp.Ui, model: *const status_core.Model) StatusApp.Ui.Node {
-    return ui.column(.{ .gap = 4, .padding = 8 }, .{
-        ui.text(.{}, ui.fmt("ticks {d}", .{model.ticks})),
-    });
-}
-
-fn statusCommand(name: []const u8) ?status_core.Msg {
-    if (std.mem.eql(u8, name, "core.stamp")) return .stamp;
-    if (std.mem.eql(u8, name, "core.toggle")) return .toggle;
-    return null;
-}
-
-test "two live transpiled cores coexist: each staged core owns its kernel and committed root" {
-    // The markup board app...
-    const h = try Harness.create();
-    defer h.destroy();
-
-    // ...and the status-poller app from the OTHER emitted core, live in
-    // the same process at the same time.
-    CoexistStub.request_count = 0;
-    var status_clock: native_sdk.TestClock = .{};
-    status_clock.setWallMs(90_000);
-    const status_harness = try native_sdk.TestHarness().create(std.testing.allocator, .{
-        .size = geometry.SizeF.init(400, 300),
-    });
-    defer status_harness.destroy(std.testing.allocator);
-    status_harness.null_platform.gpu_surfaces = true;
-    const status_state = try std.testing.allocator.create(StatusApp);
-    defer std.testing.allocator.destroy(status_state);
-    status_state.* = StatusAdapter.init(std.heap.page_allocator, .{}, .{
-        .name = "ts-core-coexist",
-        .scene = status_scene,
-        .canvas_label = status_canvas_label,
-        .view = statusView,
-        .on_command = statusCommand,
-    });
-    defer status_state.deinit();
-    status_state.effects.bindHostCalls(CoexistStub.binding());
-    status_state.effects.clock = status_clock.clock();
-    const status_app = status_state.app();
-    try status_harness.start(status_app);
-    try status_harness.runtime.dispatchPlatformEvent(status_app, .{ .gpu_surface_frame = .{
-        .label = status_canvas_label,
-        .size = geometry.SizeF.init(400, 300),
-        .scale_factor = 1,
-        .frame_index = 1,
-        .timestamp_ns = 1_000_000,
-    } });
-    try std.testing.expect(status_state.installed);
-    try std.testing.expectEqual(@as(usize, 1), CoexistStub.request_count);
-
-    // Interleaved dispatches: each core's committed model progresses
-    // independently — no shared frame arena, no shared heap, no shared
-    // bridge tables.
-    try h.click(h.findId(.button, "Add").?);
-    try status_harness.runtime.dispatchPlatformEvent(status_app, .{ .menu_command = .{ .name = "core.stamp", .window_id = 1 } });
-    try h.click(h.findId(.button, "Add").?);
-    try status_harness.runtime.dispatchPlatformEvent(status_app, .{ .menu_command = .{ .name = "core.toggle", .window_id = 1 } });
-
-    try std.testing.expectEqual(@as(usize, 2), Bridge.model().tasks.len);
-    try std.testing.expectEqualStrings("beta", Bridge.model().tasks[0].title);
-    try std.testing.expectEqual(@as(f64, 90_000), StatusAdapter.Host.model().stampMs);
-    try std.testing.expect(!StatusAdapter.Host.model().polling);
-
-    // And the markup app still renders its own core's state.
-    try std.testing.expect(h.hasText("beta #1"));
-    try std.testing.expect(h.hasText("gamma #2"));
 }

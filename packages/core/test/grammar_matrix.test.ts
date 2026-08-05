@@ -4,11 +4,10 @@
 // every expression/operator family, every declaration form) and pins each
 // production to exactly one verdict:
 //
-//   emits   SUPPORTED — transpiles clean, and the emitted Zig compiles
-//           (the zig half runs when a toolchain is on PATH).
-//   gate    BANNED or deferred — stops with EXACTLY the named teaching rule
-//           (NS9001 marks a genuine roadmap deferral with a tailored
-//           message, never an accidental hole).
+//   emits   SUPPORTED — checks clean; the external core compiler carries
+//           the production (compile truth lives in the SDK's ts-core e2e
+//           batteries over real archives).
+//   gate    BANNED — stops with EXACTLY the named teaching rule.
 //   tsc     rejected by the type system / strict module semantics itself —
 //           tsc's own diagnostic is the teacher (`with`, `export =`, JSX in
 //           .ts, `this` under noImplicitThis, ...).
@@ -22,15 +21,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { transpile, transpileFiles, checkOnly, ruleIds } from "./helpers.ts";
-
-const pkg = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const hasZig = spawnSync("zig", ["version"], { stdio: "ignore" }).status === 0;
+import { check, checkFiles, checkOnly, ruleIds } from "./helpers.ts";
 
 type Row =
   | { readonly verdict: "emits"; readonly src?: string; readonly files?: Record<string, string> }
@@ -1337,13 +1328,15 @@ export function f(): Pair { const out: number[] = [1]; const p: Pair = { xs: out
     src: `export function f(xs: readonly number[]): readonly number[] { const w = xs.slice(); w.copyWithin(0, 1); return w; }`,
   },
   "shape/sort-value-position": {
-    verdict: "gate",
-    id: "NS9001",
+    // A former v1-emitter deferral: the external core compiler carries
+    // the real JS semantics (sort returns the same array).
+    verdict: "emits",
     src: `export function f(xs: readonly number[]): readonly number[] { const w = xs.slice(); return w.sort((a, b) => a - b); }`,
   },
   "shape/push-value-position": {
-    verdict: "gate",
-    id: "NS9001",
+    // A former v1-emitter deferral: the external core compiler carries
+    // the real JS semantics (the push value is the new length).
+    verdict: "emits",
     src: `export function f(n: number): number { const out: number[] = []; const len = out.push(n); return len; }`,
   },
   "owned/append-write": {
@@ -1382,14 +1375,16 @@ export function f(n: number): number {
     src: `export function f(xs: number[]): number { xs[xs.length] = 1; return xs.length; }`,
   },
   "shape/append-write-compound": {
-    // The compound forms read the missing slot first (JS undefined).
-    verdict: "gate",
-    id: "NS9001",
+    // A former v1-emitter deferral: the external core compiler carries
+    // the real JS semantics (the compound form reads the missing slot
+    // first).
+    verdict: "emits",
     src: `export function f(): readonly number[] { const out = [1]; out[out.length] += 2; return out; }`,
   },
   "shape/iterating-length-change": {
-    verdict: "gate",
-    id: "NS9001",
+    // A former v1-emitter deferral: the external core compiler carries
+    // the real JS iteration semantics over a shrinking array.
+    verdict: "emits",
     src: `
 export function f(): number {
   const out: number[] = [1, 2];
@@ -1411,61 +1406,31 @@ test("mutation matrix: the enumeration and the table cover each other exactly", 
 });
 
 test("mutation matrix: every row produces exactly its classified outcome", () => {
+  const mismatches: string[] = [];
   for (const name of mutationSurface) {
     const row = mutationMatrix[name];
     assert.notEqual(row.verdict, "check");
-    const result = row.verdict !== "tsc" && row.files ? transpileFiles(row.files) : transpile((row as { src: string }).src);
+    const result = row.verdict !== "tsc" && row.files ? checkFiles(row.files) : check((row as { src: string }).src);
     assert.equal(
       result.typeErrors.length,
       0,
       `${name}: fixture must be tsc-clean\n${result.typeErrors.join("\n")}`,
     );
     if (row.verdict === "gate") {
-      assert.equal(result.ok, false, `${name}: expected ${row.id}, but it transpiled`);
+      if (result.ok) {
+        mismatches.push(`${name}: expected ${row.id}, but the check succeeded`);
+        continue;
+      }
       const ids = result.diagnostics.map((d) => d.id);
       assert.ok(ids.includes(row.id), `${name}: expected ${row.id}, got ${ids.join(", ") || "none"}`);
       const d = result.diagnostics.find((x) => x.id === row.id)!;
       assert.ok(d.message.length > d.title.length + 20, `${name}: ${row.id} message reads as a bare fallback`);
-    } else {
+    } else if (!result.ok) {
       const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");
-      assert.equal(result.ok, true, `${name}: expected clean transpile\n${details}`);
+      mismatches.push(`${name}: expected a clean check\n${details}`);
     }
   }
-});
-
-test("mutation matrix: every SUPPORTED row's Zig compiles", { skip: !hasZig, timeout: 300_000 }, () => {
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-mutation-"));
-  try {
-    fs.copyFileSync(path.join(pkg, "rt", "rt.zig"), path.join(work, "rt.zig"));
-    const imports: string[] = [];
-    let i = 0;
-    for (const name of mutationSurface) {
-      const row = mutationMatrix[name];
-      if (row.verdict !== "emits") continue;
-      const result = transpile(row.src!);
-      assert.equal(result.ok, true, `${name}: transpile failed before the zig step`);
-      const file = `m_${String(i++).padStart(3, "0")}.zig`;
-      fs.writeFileSync(path.join(work, file), result.zig!);
-      imports.push(`    // ${name}\n    refAllDecls(@import("${file}"));`);
-    }
-    const driver = [
-      `const refAllDecls = @import("std").testing.refAllDecls;`,
-      ``,
-      `test {`,
-      ...imports,
-      `}`,
-      ``,
-    ].join("\n");
-    fs.writeFileSync(path.join(work, "driver.zig"), driver);
-    try {
-      execFileSync("zig", ["test", "driver.zig"], { cwd: work, encoding: "utf8", stdio: "pipe" });
-    } catch (e) {
-      const err = e as { stderr?: string; stdout?: string };
-      assert.fail(`emitted Zig failed to compile:\n${err.stderr ?? ""}${err.stdout ?? ""}`);
-    }
-  } finally {
-    fs.rmSync(work, { recursive: true, force: true });
-  }
+  assert.deepEqual(mismatches, [], mismatches.join("\n\n"));
 });
 
 // ---------------------------------------------------------------------------
@@ -1601,10 +1566,10 @@ export function f(s: Uint8Array): number {
     src: `export function f(s: Uint8Array): number { return s.at(-1) ?? -1; }`,
   },
   "text-edge/repeat-negative-literal": {
-    // JS throws RangeError; a compile-time-knowable negative stops the
-    // build instead of shipping the guaranteed panic.
-    verdict: "gate",
-    id: "NS9001",
+    // A former v1-emitter deferral (the emitter stopped the
+    // guaranteed panic at build time); the external core compiler
+    // carries the real JS semantics — RangeError at run time.
+    verdict: "emits",
     src: `export function f(s: Uint8Array): Uint8Array { return s.repeat(-1); }`,
   },
   "text-edge/repeat-fractional-literal": {
@@ -1615,16 +1580,17 @@ export function f(s: Uint8Array): number {
     src: `export function f(s: Uint8Array): Uint8Array { return s.repeat(2.5); }`,
   },
   "text-edge/split-empty-literal-separator": {
-    // Per-code-point splitting would expose the UTF-16/UTF-8 seam.
-    verdict: "gate",
-    id: "NS9001",
+    // A former v1-emitter deferral; the external core compiler carries
+    // its own byte-text split semantics.
+    verdict: "emits",
     src: `
 import { asciiBytes } from "@native-sdk/core";
 export function f(s: Uint8Array): number { return s.split(asciiBytes("")).length; }`,
   },
   "text-edge/includes-fromIndex": {
-    verdict: "gate",
-    id: "NS9001",
+    // A former v1-emitter deferral: the fromIndex form compiles on the
+    // external lane.
+    verdict: "emits",
     src: `export function f(s: Uint8Array, b: number): boolean { return s.includes(b, 2); }`,
   },
   "text-out/charCodeAt": {
@@ -1700,62 +1666,32 @@ test("text matrix: the enumeration and the table cover each other exactly", () =
 });
 
 test("text matrix: every row produces exactly its classified outcome", () => {
+  const mismatches: string[] = [];
   for (const name of textSurface) {
     const row = textMatrix[name];
     assert.notEqual(row.verdict, "check");
     assert.notEqual(row.verdict, "tsc");
-    const result = transpile((row as { src: string }).src);
+    const result = check((row as { src: string }).src);
     assert.equal(
       result.typeErrors.length,
       0,
       `${name}: fixture must be tsc-clean\n${result.typeErrors.join("\n")}`,
     );
     if (row.verdict === "gate") {
-      assert.equal(result.ok, false, `${name}: expected ${row.id}, but it transpiled`);
+      if (result.ok) {
+        mismatches.push(`${name}: expected ${row.id}, but the check succeeded`);
+        continue;
+      }
       const ids = result.diagnostics.map((d) => d.id);
       assert.ok(ids.includes(row.id), `${name}: expected ${row.id}, got ${ids.join(", ") || "none"}`);
       const d = result.diagnostics.find((x) => x.id === row.id)!;
       assert.ok(d.message.length > d.title.length + 20, `${name}: ${row.id} message reads as a bare fallback`);
-    } else {
+    } else if (!result.ok) {
       const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");
-      assert.equal(result.ok, true, `${name}: expected clean transpile\n${details}`);
+      mismatches.push(`${name}: expected a clean check\n${details}`);
     }
   }
-});
-
-test("text matrix: every SUPPORTED row's Zig compiles", { skip: !hasZig, timeout: 300_000 }, () => {
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-text-"));
-  try {
-    fs.copyFileSync(path.join(pkg, "rt", "rt.zig"), path.join(work, "rt.zig"));
-    const imports: string[] = [];
-    let i = 0;
-    for (const name of textSurface) {
-      const row = textMatrix[name];
-      if (row.verdict !== "emits") continue;
-      const result = transpile(row.src!);
-      assert.equal(result.ok, true, `${name}: transpile failed before the zig step`);
-      const file = `t_${String(i++).padStart(3, "0")}.zig`;
-      fs.writeFileSync(path.join(work, file), result.zig!);
-      imports.push(`    // ${name}\n    refAllDecls(@import("${file}"));`);
-    }
-    const driver = [
-      `const refAllDecls = @import("std").testing.refAllDecls;`,
-      ``,
-      `test {`,
-      ...imports,
-      `}`,
-      ``,
-    ].join("\n");
-    fs.writeFileSync(path.join(work, "driver.zig"), driver);
-    try {
-      execFileSync("zig", ["test", "driver.zig"], { cwd: work, encoding: "utf8", stdio: "pipe" });
-    } catch (e) {
-      const err = e as { stderr?: string; stdout?: string };
-      assert.fail(`emitted Zig failed to compile:\n${err.stderr ?? ""}${err.stdout ?? ""}`);
-    }
-  } finally {
-    fs.rmSync(work, { recursive: true, force: true });
-  }
+  assert.deepEqual(mismatches, [], mismatches.join("\n\n"));
 });
 
 test("grammar matrix: the enumeration and the table cover each other exactly", () => {
@@ -1769,6 +1705,7 @@ test("grammar matrix: the enumeration and the table cover each other exactly", (
 });
 
 test("grammar matrix: every production produces exactly its classified outcome", () => {
+  const mismatches: string[] = [];
   for (const name of productions) {
     const row = matrix[name];
     if (row.verdict === "check") {
@@ -1776,7 +1713,7 @@ test("grammar matrix: every production produces exactly its classified outcome",
       assert.ok(ids.includes(row.id), `${name}: expected ${row.id} from the checker, got ${ids.join(", ") || "none"}`);
       continue;
     }
-    const result = row.files ? transpileFiles(row.files) : transpile(row.src!);
+    const result = row.files ? checkFiles(row.files) : check(row.src!);
     if (row.verdict === "tsc") {
       assert.ok(result.typeErrors.length > 0, `${name}: expected tsc itself to reject this`);
       continue;
@@ -1787,59 +1724,28 @@ test("grammar matrix: every production produces exactly its classified outcome",
       `${name}: fixture must be tsc-clean\n${result.typeErrors.join("\n")}`,
     );
     if (row.verdict === "gate") {
-      assert.equal(result.ok, false, `${name}: expected ${row.id}, but it transpiled`);
+      if (result.ok) {
+        mismatches.push(`${name}: expected ${row.id}, but the check succeeded`);
+        continue;
+      }
       const ids = result.diagnostics.map((d) => d.id);
       assert.ok(ids.includes(row.id), `${name}: expected ${row.id}, got ${ids.join(", ") || "none"}`);
-    } else {
+    } else if (!result.ok) {
       const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");
-      assert.equal(result.ok, true, `${name}: expected clean transpile\n${details}`);
+      mismatches.push(`${name}: expected a clean check\n${details}`);
     }
   }
+  assert.deepEqual(mismatches, [], mismatches.join("\n\n"));
 });
 
 test("grammar matrix: no gated diagnostic is a bare fallback — each names its construct", () => {
   for (const name of productions) {
     const row = matrix[name];
     if (row.verdict !== "gate") continue;
-    const result = row.files ? transpileFiles(row.files) : transpile(row.src!);
+    const result = row.files ? checkFiles(row.files) : check(row.src!);
     const d = result.diagnostics.find((x) => x.id === row.id)!;
     // Teaching contract: rule + fix + why — the message always carries a
     // site-specific lead-in longer than the bare rule title.
     assert.ok(d.message.length > d.title.length + 20, `${name}: ${row.id} message reads as a bare fallback`);
-  }
-});
-
-test("grammar matrix: every SUPPORTED production's Zig compiles", { skip: !hasZig, timeout: 300_000 }, () => {
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-grammar-"));
-  try {
-    fs.copyFileSync(path.join(pkg, "rt", "rt.zig"), path.join(work, "rt.zig"));
-    const imports: string[] = [];
-    let i = 0;
-    for (const name of productions) {
-      const row = matrix[name];
-      if (row.verdict !== "emits") continue;
-      const result = row.files ? transpileFiles(row.files) : transpile(row.src!);
-      assert.equal(result.ok, true, `${name}: transpile failed before the zig step`);
-      const file = `g_${String(i++).padStart(3, "0")}.zig`;
-      fs.writeFileSync(path.join(work, file), result.zig!);
-      imports.push(`    // ${name}\n    refAllDecls(@import("${file}"));`);
-    }
-    const driver = [
-      `const refAllDecls = @import("std").testing.refAllDecls;`,
-      ``,
-      `test {`,
-      ...imports,
-      `}`,
-      ``,
-    ].join("\n");
-    fs.writeFileSync(path.join(work, "driver.zig"), driver);
-    try {
-      execFileSync("zig", ["test", "driver.zig"], { cwd: work, encoding: "utf8", stdio: "pipe" });
-    } catch (e) {
-      const err = e as { stderr?: string; stdout?: string };
-      assert.fail(`emitted Zig failed to compile:\n${err.stderr ?? ""}${err.stdout ?? ""}`);
-    }
-  } finally {
-    fs.rmSync(work, { recursive: true, force: true });
   }
 });

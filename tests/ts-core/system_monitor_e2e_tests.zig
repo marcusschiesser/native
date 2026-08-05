@@ -1,6 +1,6 @@
 //! End-to-end proof battery for examples/system-monitor-ts — the second
 //! port: the spawn-showcase app authored in TypeScript + Native markup
-//! with ZERO hand-written Zig. The build transpiles the example's REAL
+//! with ZERO hand-written Zig. The build compiles the example's REAL
 //! core (examples/system-monitor-ts/src/core.ts) and this suite drives it
 //! through `TsUiApp` with the example's SHIPPING markup (app.native,
 //! staged beside this file) on the FAKE effects executor, so every spawn

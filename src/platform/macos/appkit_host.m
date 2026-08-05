@@ -2454,7 +2454,9 @@ int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const
 }
 
 // Platform image decoder: CGImageSource (ImageIO) handles PNG, JPEG, and
-// every other codec the OS ships — the framework bundles none. The image
+// every other raster codec the OS ships. AppKit's NSImage adds the system SVG
+// representation/rasterizer when ImageIO cannot create a CGImage directly —
+// still an in-box codec, with no framework-bundled parser. The image
 // draws into a premultiplied RGBA8 bitmap context (the only RGBA layout
 // CGBitmapContext can render into) and is un-premultiplied in place,
 // because the canvas image pipeline — the reference renderer and the
@@ -2465,10 +2467,28 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
     if (!bytes || bytes_len == 0 || !pixels) return 0;
     @autoreleasepool {
         NSData *data = [NSData dataWithBytesNoCopy:(void *)bytes length:bytes_len freeWhenDone:NO];
+        CGImageRef image = NULL;
         CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-        if (!source) return 0;
-        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
-        CFRelease(source);
+        if (source) {
+            image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+            CFRelease(source);
+        }
+        if (!image) {
+            NSImage *system_image = [[NSImage alloc] initWithData:data];
+            NSSize size = system_image ? system_image.size : NSZeroSize;
+            if (size.width > 0 && size.height > 0 && size.width <= 8192 && size.height <= 8192) {
+                // SVG is resolution-independent, so cap the proposed point
+                // extent before NSImage selects its Retina representation.
+                // A 256pt square becomes at most the registry's 512px square
+                // on macOS's 2x displays instead of materializing an
+                // attacker-declared multi-hundred-megabyte bitmap first.
+                const CGFloat max_raster_points = 256.0;
+                const CGFloat raster_scale = MIN(1.0, MIN(max_raster_points / size.width, max_raster_points / size.height));
+                NSRect proposed = NSMakeRect(0, 0, size.width * raster_scale, size.height * raster_scale);
+                CGImageRef rendered = [system_image CGImageForProposedRect:&proposed context:nil hints:nil];
+                if (rendered) image = CGImageRetain(rendered);
+            }
+        }
         if (!image) return 0;
 
         size_t width = CGImageGetWidth(image);

@@ -23,7 +23,7 @@ const mirrors = [
   // build compiles from the dependency.
   { source: 'tools/corewire', target: 'tools/corewire' },
   // The @native-sdk/core closure TypeScript app builds resolve from the
-  // installed package: the core toolchain, the SDK library modules (also the
+  // installed package: the frontend, the SDK library modules (also the
   // editor package), the external-compile staging surface and its
   // driver scripts, and the manifest + lockfile that make `npm ci` work
   // inside packages/core on the npm-installed layout. Entry-by-entry on
@@ -32,7 +32,6 @@ const mirrors = [
   { source: 'packages/core/src', target: 'packages/core/src' },
   { source: 'packages/core/sdk', target: 'packages/core/sdk' },
   { source: 'packages/core/compile-surface', target: 'packages/core/compile-surface' },
-  { source: 'packages/core/rt', target: 'packages/core/rt' },
   { source: 'packages/core/scripts', target: 'packages/core/scripts' },
   { source: 'packages/core/package.json', target: 'packages/core/package.json' },
   { source: 'packages/core/package-lock.json', target: 'packages/core/package-lock.json' },

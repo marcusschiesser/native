@@ -11,7 +11,7 @@
 //   the agent itself ran and its exit status. So `firstGreenTurn` is the first
 //   time the agent's OWN verification loop went green (the same command set the
 //   graders' build_test/transpile checks run: `native test`, `zig build test`,
-//   `native check`, the @native-sdk/core transpiler CLI, `markup check`) after
+//   `native check`, the @native-sdk/core frontend CLI, `markup check`) after
 //   the first source edit — a proxy for "the work was done", not a claim that
 //   the full graded check set (file greps, behavioral harnesses, snapshots)
 //   passed at that turn. It can read early (agent's check is weaker than the
@@ -207,7 +207,7 @@ export function isSourceFile(path: string, track: MetricsTrack): boolean {
 
 /**
  * The commands that constitute a compliance check. ts track: any invocation
- * of the @native-sdk/core transpiler CLI (typecheck + subset rules +
+ * of the @native-sdk/core frontend CLI (typecheck + subset rules
  * emission), plus the app verbs an app-workspace loop runs (`native check`
  * runs the same checker; `native test`/`native build` compile the emitted
  * core and the markup bindings). zig track: the app build/test verbs the

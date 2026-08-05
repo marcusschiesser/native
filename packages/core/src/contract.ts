@@ -220,9 +220,8 @@ class ContractEmitter {
 
   // --------------------------------------------------------------- origins
 
-  /// The declaring module of every named table type — the same walk the
-  /// emitter's type_origins table performs (emitter.ts emitTypeOrigins):
-  /// SDK modules spell their shipped staging path, core modules their
+  /// The declaring module of every named table type: SDK modules spell
+  /// their shipped staging path, core modules their
   /// entry-relative POSIX path; a private declaration carries the
   /// additive `"exported": false` marker; synthesized names stay out.
   private collectOrigins(): void {
@@ -407,7 +406,7 @@ class ContractEmitter {
   }
 
   /// The spec's effectful pair shape on update/initialModel — the
-  /// emitter's cmdReturnShape, reduced to the presence fact.
+  /// presence fact the sidecar restates as *_returns_cmd.
   private returnsCmdPair(decl: ts.FunctionDeclaration | null): boolean {
     const t = decl?.type;
     if (!t) return false;
@@ -422,6 +421,15 @@ class ContractEmitter {
       ts.isIdentifier(cmdRef.typeName) &&
       this.checkResult.cmdNames.has(cmdRef.typeName.text)
     );
+  }
+
+  /// Whether the declared return ALSO admits the bare model (the mixed
+  /// idiom, `Model | [Model, Cmd<Msg>]`) — the additive fact the facade
+  /// emitter keys its narrowing wrapper on (*_returns_bare).
+  private returnsBareModel(decl: ts.FunctionDeclaration | null): boolean {
+    const t = decl?.type;
+    if (!t || !ts.isUnionTypeNode(t)) return false;
+    return t.types.some((m) => !ts.isTupleTypeNode(m));
   }
 
   /// The `export const viewUnbound = [...]` opt-out list, split by side
@@ -586,6 +594,10 @@ class ContractEmitter {
     // same pair-shape discrimination the emitter applies.
     const initReturnsCmd = this.returnsCmdPair(this.entryExportedFunction("initialModel"));
     const updateReturnsCmd = this.returnsCmdPair(this.entryExportedFunction("update"));
+    // The mixed-idiom facts ride only when true (additive fields; a
+    // compiler's co-emitted sidecar never carries them).
+    const initReturnsBare = initReturnsCmd && this.returnsBareModel(this.entryExportedFunction("initialModel"));
+    const updateReturnsBare = updateReturnsCmd && this.returnsBareModel(this.entryExportedFunction("update"));
     const hasSubscriptions = this.entryExportedFunction("subscriptions") !== null;
 
     let abiExports =
@@ -646,6 +658,8 @@ class ContractEmitter {
       `  "msg": {\n    "name": ${js(msgName)},\n    "arms": [\n      ${msgArms}\n    ],\n    "unbound": [${msgUnbound}]\n  },\n` +
       `  "init_returns_cmd": ${boolJson(initReturnsCmd)},\n` +
       `  "update_returns_cmd": ${boolJson(updateReturnsCmd)},\n` +
+      (initReturnsBare ? '  "init_returns_bare": true,\n' : "") +
+      (updateReturnsBare ? '  "update_returns_bare": true,\n' : "") +
       `  "has_subscriptions": ${boolJson(hasSubscriptions)},\n` +
       '  "channels": {\n' +
       `    "command_msg": ${boolJson(hasCommand)},\n` +

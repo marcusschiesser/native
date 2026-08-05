@@ -1,7 +1,7 @@
 //! End-to-end proof battery for examples/ai-chat-ts — the "can I call an
 //! AI API?" answer as a real app: a chat client for an OpenAI-compatible
 //! chat-completions endpoint authored in TypeScript + Native markup with
-//! ZERO hand-written Zig. The build transpiles the example's REAL core
+//! ZERO hand-written Zig. The build compiles the example's REAL core through the external core compiler
 //! (examples/ai-chat-ts/src/core.ts + src/api.ts) and this suite drives
 //! it through `TsUiApp` with the example's SHIPPING markup (app.native,
 //! staged beside this file), so every pin here is the product path:
@@ -304,7 +304,7 @@ test "the teaching state holds until every launch variable arrives - and issues 
         try std.testing.expect(h.hasText(test_model_name));
         try h.menu("chat.send");
         try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.pendingFetchCount());
-        try std.testing.expect(core.unconfigured(Bridge.model()));
+        try std.testing.expect(Bridge.model().unconfigured());
     }
 }
 
@@ -382,7 +382,11 @@ test "a scripted conversation pins the exact request bytes, the parse, and the h
     try std.testing.expect(Bridge.model().turns[0].role == .user);
     try std.testing.expectEqualStrings("Say hi in two words", Bridge.model().turns[0].text);
     try std.testing.expect(Bridge.model().phase == .sending);
-    try std.testing.expectEqual(@as(usize, 0), core.draftText(Bridge.model()).len);
+    {
+        var draft_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer draft_arena.deinit();
+        try std.testing.expectEqual(@as(usize, 0), Bridge.model().draftText(draft_arena.allocator()).len);
+    }
     try std.testing.expect(h.hasText("waiting for the model"));
 
     // The endpoint answers; the reply parses out of choices[0] (escapes
@@ -427,7 +431,11 @@ test "the in-flight guard: a second send issues nothing and loses nothing" {
     try h.menu("chat.send");
     try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     try std.testing.expectEqual(@as(usize, 1), Bridge.model().turns.len);
-    try std.testing.expectEqualStrings("eager follow-up", core.draftText(Bridge.model()));
+    {
+        var draft_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer draft_arena.deinit();
+        try std.testing.expectEqualStrings("eager follow-up", Bridge.model().draftText(draft_arena.allocator()));
+    }
 
     // The reply lands and the guard lifts: the surviving draft sends
     // through the journaled command path.

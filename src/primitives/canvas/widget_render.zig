@@ -351,7 +351,12 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
             // inside the flat wash chrome.
             try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
         },
-        .data_cell => try emitDataCellContent(builder, paint_widget, tokens),
+        .data_cell => {
+            try emitDataCellContent(builder, paint_widget, tokens);
+            if (paint_widget.spans.len == 0 and paint_widget.children.len > 0) {
+                try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+            }
+        },
         .status_bar => try emitStatusBarWidget(builder, paint_widget, tokens),
         .segmented_control => try widget_render_controls.emitSegmentedControlWidget(builder, paint_widget, tokens),
         .checkbox => try widget_render_controls.emitCheckboxWidget(builder, paint_widget, tokens),

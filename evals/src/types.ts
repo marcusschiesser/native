@@ -10,7 +10,7 @@ export interface EvalCase {
    * Workspace shape. "native" scaffolds with `native init --frontend native`
    * (the Zig-core app template); "ts-core" scaffolds a core-only TypeScript
    * workspace (src/core.ts starter, README, the ts-core skill) graded
-   * through the @native-sdk/core transpiler; "app-dual" is a wave-2
+   * through the @native-sdk/core frontend; "app-dual" is a wave-2
    * dual-track case: ONE language-blind spec that runs on both authoring
    * tracks — the ts track scaffolds a full TypeScript app
    * (`native init --frontend native --template ts-core`), the zig track the
@@ -96,7 +96,7 @@ export interface MarkupCheckCheck extends CheckCommon {
 }
 
 /**
- * Run the @native-sdk/core transpiler on the workspace core (ts-core cases).
+ * Run the @native-sdk/core frontend on the workspace core (ts-core cases).
  * Pass = the module typechecks (tsc semantics), passes every subset rule
  * (NS1001-NS1050), and emits Zig. The diagnostics tail is kept as evidence,
  * so violation taxonomy can be read off failing runs.

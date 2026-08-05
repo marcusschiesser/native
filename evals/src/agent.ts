@@ -16,7 +16,7 @@ const ALLOWED_TOOLS = [
   "Grep",
   "Bash(zig *)",
   "Bash(native *)",
-  // ts-core cases: the agent's check loop is the @native-sdk/core transpiler run
+  // ts-core cases: the agent's check loop is the @native-sdk/core frontend check
   // through node, and the subset runs under node for behavioral pokes.
   "Bash(node *)",
   "Bash(ls *)",

@@ -1,2 +1,0 @@
-feature: **External core compiler lane (opt-in)**: a TypeScript core can now compile through the external core compiler — set `.core_compiler = "external"` in app.zon or pass `-Dcore-compiler=external`; with neither stated, the default transpiler lane is byte-for-byte unchanged.
-- **Shipped type declarations**: `@native-sdk/core` now ships generated `sdk/*.d.ts` declaration files beside its TypeScript sources, so external tooling can resolve the SDK's types without compiling them.

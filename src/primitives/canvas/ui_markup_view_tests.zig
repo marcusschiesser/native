@@ -1711,6 +1711,10 @@ pub const doc_body_source =
     \\
     \\Tracked in #12, see https://status.example.com.
     \\
+    \\| State |
+    \\| --- |
+    \\| ![Ready](https://status.example.com/ready.png) Ready |
+    \\
     \\<details>
     \\<summary>Rollout</summary>
     \\
@@ -1724,6 +1728,12 @@ pub const DocModel = struct {
     details_expanded: [2]bool = .{ false, false },
     opened_count: usize = 0,
     issue_base: []const u8 = "ghissue://",
+    images: [1]canvas.markdown.ResolvedImage = .{.{
+        .source = "https://status.example.com/ready.png",
+        .image = 71,
+        .width = 10,
+        .height = 10,
+    }},
 
     /// Arena scalar as a markdown source: composed at view time.
     pub fn banner(model: *const DocModel, arena: std.mem.Allocator) []const u8 {
@@ -1733,7 +1743,7 @@ pub const DocModel = struct {
 
 pub const doc_markup_source =
     \\<column gap="8">
-    \\  <markdown source="{body}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" issue-link-base="{issue_base}" />
+    \\  <markdown source="{body}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" issue-link-base="{issue_base}" images="{images}" />
     \\  <markdown source="{banner}" />
     \\</column>
 ;
@@ -1750,6 +1760,7 @@ pub fn handDocView(ui: *DocUi, model: *const DocModel) DocUi.Node {
             .on_details = DocMd.detailsMsg(.toggle_details),
             .details_expanded = &model.details_expanded,
             .issue_link_base = model.issue_base,
+            .images = &model.images,
         }),
         DocMd.view(ui, model.banner(ui.arena), .{}),
     });
@@ -1807,6 +1818,7 @@ test "the markdown element builds the hand-written Md.view tree and dispatches l
     // URLs autolink (trailing punctuation trimmed).
     try testing.expectEqualStrings("ghissue://12", findSpanLink(markup_tree.root, "#12").?);
     try testing.expectEqualStrings("https://status.example.com", findSpanLink(markup_tree.root, "https://status.example.com").?);
+    try testing.expectEqual(@as(canvas.ImageId, 71), findByKind(markup_tree.root, .image).?.image_id);
 
     // Details summary dispatches on-details with the block index; the body
     // is hidden while the caller-owned flag is false.

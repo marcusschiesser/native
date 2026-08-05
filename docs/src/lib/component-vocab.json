@@ -218,7 +218,7 @@
     },
     {
       "name": "markdown",
-      "doc": "Renders a markdown string (GFM subset, pipe tables included) as widgets; source is one {binding}, links dispatch on-link (bare URLs autolink), <details> blocks toggle via on-details + details-expanded, #123 refs linkify via issue-link-base."
+      "doc": "Renders a markdown string (GFM subset, pipe tables and safe presentational HTML included) as widgets; source is one {binding}, preloaded leading images map through images, links dispatch on-link (bare URLs autolink), <details> blocks toggle via on-details + details-expanded, #123 refs linkify via issue-link-base."
     },
     {
       "name": "stepper",
@@ -564,6 +564,10 @@
       {
         "name": "source",
         "doc": "markdown: one {binding} producing the markdown text (a []const u8 field or fn; arena fns work). Required."
+      },
+      {
+        "name": "images",
+        "doc": "markdown: one {binding} producing []const canvas.markdown.ResolvedImage (arena fns work). Each mapping pairs a leading image source with an image id already loaded and registered through fx.loadImage plus its decoded dimensions; views never perform image I/O."
       },
       {
         "name": "on-link",

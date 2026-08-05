@@ -32,7 +32,7 @@
 #                                                 in-dir `zig build test`)
 #   docs/**                                     -> docs `pnpm check`
 #   anything else (README, .github, packages,
-#   scripts, skills, changelog.d, ...)          -> root suites only
+#   scripts, skills, release docs, ...)         -> root suites only
 # A docs-ONLY diff runs only the docs check. The docs check is path-gated
 # in both tiers: it never runs unless docs/ changed (or --all in full).
 #

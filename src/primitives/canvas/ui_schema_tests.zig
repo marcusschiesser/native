@@ -22,7 +22,7 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // the new fingerprint ONLY for additions; renames/renumbers are
     // schema-version-bump events, not silent edits.
     try testing.expectEqual(@as(usize, 70), schema.elements.len);
-    try testing.expectEqual(@as(usize, 95), schema.attrs.len);
+    try testing.expectEqual(@as(usize, 96), schema.attrs.len);
     try testing.expectEqual(@as(usize, 14), schema.events.len);
     // The element table runs through the span composite (64), the
     // bubble-reactions composite (65), the media surface (66), the
@@ -45,9 +45,10 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // attributes pty (88) and scrollback (89), and the code language
     // (90), line-numbers (91), and editable-code (92) declarations,
     // the flat disclosure-tree hierarchy level tree-level (93), and the
-    // code-diff line sets added-lines (94) and removed-lines (95).
+    // code-diff line sets added-lines (94) and removed-lines (95), and
+    // Markdown's registered-image iterable binding images (96).
     try testing.expectEqual(
-        @as(u64, 0xf16fa9fd1d3e7f25),
+        @as(u64, 0xc0ab8db72d6e2110),
         tableFingerprint(schema.AttrInfo, &schema.attrs),
     );
     // The event table runs through the pointer-hover containment pair

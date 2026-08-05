@@ -480,6 +480,45 @@ test "preview links open through fx.spawn and details expand through the model" 
     try testing.expect(!model.details_expanded[0]);
 }
 
+test "remote images flow from markdown discovery through the resolved preview mapping" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+    const source = "https://vercel.com/api/www/avatar?projectId=preview";
+
+    try h.dispatch(.{ .edit = .clear });
+    try h.dispatch(.{ .edit = .{ .insert_text =
+        \\| Project |
+        \\| :--- |
+        \\| <a href="https://vercel.com/project"><sup><img src="https://vercel.com/api/www/avatar?projectId=preview" width="16" height="16" align="middle" alt="" /></sup></a> [native-sdk](https://example.com) |
+    } });
+
+    try testing.expectEqual(@as(usize, 1), fx.pendingImageLoadCount());
+    const request = fx.pendingImageLoadAt(0).?;
+    try testing.expectEqualStrings(source, request.url);
+    try testing.expect(findByKind(h.app_state.tree.?.root, .image) == null);
+
+    // The real executor decodes and registers the pixels before delivering
+    // this terminal. Dispatching its plain-data result directly keeps this
+    // example test focused on the model -> markup -> Markdown mapping and,
+    // in particular, proves the mapping's source slice remains model-owned.
+    try h.dispatch(.{ .image_done = .{
+        .id = request.id,
+        .outcome = .loaded,
+        .width = 32,
+        .height = 32,
+        .status = 200,
+    } });
+    const image = findByKind(h.app_state.tree.?.root, .image) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(request.id, image.image_id);
+    try testing.expectEqual(@as(f32, 16), image.layout.min_size.width);
+    try testing.expectEqual(@as(f32, 16), image.layout.min_size.height);
+
+    // Retire the still-recorded fake request and release its registry id.
+    try h.dispatch(.{ .edit = .clear });
+    try testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+}
+
 /// True when any non-editor widget carries `needle` — the textarea always
 /// holds the whole source, so it is excluded to observe the preview only.
 fn subtreeHasTextInSnapshot(snapshot: native_sdk.automation.snapshot.Input, needle: []const u8) bool {

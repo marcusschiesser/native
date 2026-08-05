@@ -782,6 +782,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     options.details_expanded = try self.boolItems(ui, scope, node, typed.binding);
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "images")) {
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .binding) return self.failNode(node, markup.markdown_images_message);
+                    options.images = try self.markdownImageItems(ui, scope, node, typed.binding);
+                    continue;
+                }
                 if (std.mem.eql(u8, attribute.name, "issue-link-base")) {
                     const typed = markup.attrTyped(attribute);
                     if (typed == .equals or typed == .invalid) {
@@ -1487,6 +1493,20 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
             }
             return self.failText(node, markup.markdown_details_expanded_message);
+        }
+
+        /// Resolve Markdown's registered source-to-image mapping through the
+        /// same bounded iterable reflection used by `for each`.
+        fn markdownImageItems(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, path: []const u8) BuildError![]const canvas.markdown.ResolvedImage {
+            @setEvalBranchQuota(scan_quota);
+            inline for (item_types, 0..) |Item, type_index| {
+                if (comptime (Item == canvas.markdown.ResolvedImage)) {
+                    if (try self.iterateItems(ui, Item, type_index, scope, path)) |items| {
+                        return items;
+                    }
+                }
+            }
+            return self.failText(node, markup.markdown_images_message);
         }
 
         // ------------------------------------------------------ templates

@@ -1,22 +1,27 @@
 ---
 name: native-ui
-description: Authoring guide for native-rendered Native SDK apps - declarative Native markup (.native) views plus Zig logic on the UiApp loop. Use when building or modifying native UI (widgets, layout, bindings, messages), writing .native files, wiring Model/Msg/update, testing markup views, or verifying a native app through the automation harness.
+description: Authoring guide for the Native markup (.native) view tier of native-rendered Native SDK apps. TypeScript cores are the default and use this skill together with ts-core; Zig cores are an explicit alternative and this guide labels their lower-level UiApp recipes. Use when building or modifying native UI (widgets, layout, bindings, messages), writing .native files, wiring views to Model/Msg/update, testing markup views, or verifying a native app through the automation harness.
 ---
 
-# Author native UI with markup + Zig
+# Author native UI with Native markup
 
-A native-rendered Native SDK app is a markup view plus Zig logic:
+A native-rendered Native SDK app is a markup view plus an app core. The primary authoring path is:
 
-- `src/<view>.native` — the entire UI: elements, layout, bindings, message dispatch.
-- `src/main.zig` — `Model` (plain struct), `Msg` (tagged union), `update(model, msg)`, and a `main` that hands them to `native_sdk.UiApp(Model, Msg)`.
+- `src/app.native` — the entire UI: elements, layout, bindings, message dispatch.
+- `src/core.ts` — `Model`, the discriminated `Msg` union, `update(model, msg)`, effects, subscriptions, and derived binding helpers.
+- `app.zon` — identity, windows, assets, permissions, and policy.
 
-The markup compiles to the same widget tree a hand-written `canvas.Ui(Msg)` builder view would produce: identical structural widget ids, identical typed handler table. Markup can never mutate state — it binds values and dispatches messages; all logic lives in Zig.
+The TypeScript core is checked and compiled ahead of time to native code; no JS runtime ships in the binary. Load `native skills get ts-core` beside this skill for every default app implementation. A Zig core (`src/main.zig`) is first-class when explicitly selected with `native init --template zig-core`; the Zig-only wiring, builder, and runtime-extension recipes below are labeled so they are not mistaken for the default.
+
+The markup compiles to the same widget tree a hand-written `canvas.Ui(Msg)` builder view would produce: identical structural widget ids, identical typed handler table. Markup can never mutate state — it binds values and dispatches messages; all logic lives in the app core, whichever core language the existing tree uses.
 
 Editors highlight `.native` markup well in HTML mode — the default scaffold writes no editor config, so add `.vscode/settings.json` with `"files.associations": {"*.native": "html"}` yourself, or scaffold with `native init --full`, which writes it.
 
-Start a new app with `native init` (zero-config: app.zon + src + assets, the CLI generates the build graph), or copy `examples/habits/` (smallest): change the name/id in app.zon and `assets/` copies verbatim — there are no build files to edit. The `native dev|test|build` verbs drive any app directory shaped this way.
+Start a new app with `native init` (zero-config: `app.zon` + `src/core.ts` + `src/app.native` + assets; the CLI generates the build graph). Use `examples/ai-chat-ts`, `examples/soundboard-ts`, and `examples/system-monitor-ts` as substantial TypeScript references. The `native check|dev|test|build` verbs drive any app directory shaped this way.
 
-## App wiring
+## App wiring (Zig cores and extensions only)
+
+A default TypeScript app writes none of this: generated wiring connects `src/core.ts`, `src/app.native`, and `app.zon`. Use the following only when the existing app has a Zig core or the task explicitly requires owned runtime wiring.
 
 ```zig
 const HabitsApp = native_sdk.UiApp(Model, Msg);
@@ -394,11 +399,15 @@ The function library is CLOSED (17 functions; adding one is a toolkit change —
 
 Bounds (taught one past): 256 bytes, 64 terms, 16 nesting levels per expression. Where expressions are allowed: text interpolation, attribute values, `if` tests, template args at use sites. Path-only by design: message tags/payloads, `for each` iterables, import paths. Both engines evaluate through ONE shared evaluator — results are bit-for-bit identical, floats included — and `native markup check` validates syntax, bounds, function names (with did-you-mean), arity, and literal types without needing the model.
 
-Anything stateful or beyond the grammar is a Zig model function you bind to (`each="visible"`, `{summaryLine}`).
+Anything stateful or beyond the grammar is a core helper you bind to (`each="visible"`, `{summaryLine}`): an exported single-model function in the default TypeScript core, or a public model method in a Zig core.
 
-Where the line sits between inline arithmetic and a model fn: inline expression arithmetic is sanctioned for ONE-OFF presentation-level derivation — `{percent(done / total)}` on the single readout that shows it is exactly what expressions are for. The moment a derivation is REUSED in a second binding, deserves a NAME, or carries meaning the model owns (a threshold, a rule, a policy), it belongs in a named model function: `{completionRate}` reads at the binding site, tests in Zig, and changes in one place.
+Where the line sits between inline arithmetic and a core helper: inline expression arithmetic is sanctioned for ONE-OFF presentation-level derivation — `{percent(done / total)}` on the single readout that shows it is exactly what expressions are for. The moment a derivation is REUSED in a second binding, deserves a NAME, or carries meaning the model owns (a threshold, a rule, a policy), it belongs in a named helper: `{completionRate}` reads at the binding site, tests in the core's language, and changes in one place.
 
 ## Binding resolution rules
+
+In a default TypeScript core, Model fields bind by their authored names and exported single-model helpers become derived bindings. Exported iterable helpers supply `for each`; item record fields continue the path. Keep TypeScript spelling exact (`tickCount` binds as `{tickCount}`), and see the `ts-core` skill for supported signatures, bytes/text, import graphs, and checker rules.
+
+The following details are for a Zig core, where bindings resolve public Model fields and methods:
 
 A path like `{h.streak}` resolves left to right, starting from the model or a `for` variable:
 
@@ -414,7 +423,7 @@ Bindings are zero-argument. A parameterized query (cards of column X) becomes on
 
 ## Derive, don't store
 
-The model stores source-of-truth state ONLY: the raw items, the current filter, the draft text. Anything the view shows that is computable from those — counts, sums, filtered views, formatted strings — is a pub method the markup binds to, never a model field. A cached derivable must be re-maintained in every `update` arm and goes stale the moment one is missed; a derived method cannot.
+The model stores source-of-truth state ONLY: the raw items, the current filter, the draft text. Anything the view shows that is computable from those — counts, sums, filtered views, formatted strings — is a derived core helper the markup binds to, never a model field. A cached derivable must be re-maintained in every `update` arm and goes stale the moment one is missed; a derived helper cannot. In the default TypeScript core, export a single-model function; the `ts-core` skill covers the permitted return shapes and byte formatting. The examples below show the equivalent Zig-core methods.
 
 ```zig
 // WRONG: derived state cached in the model, maintained by hand in update()
@@ -475,7 +484,7 @@ For `<if test>`, prefer an explicit boolean predicate method over numeric truthi
 
 ## Messages
 
-`on-press`, `on-double-press`, `on-toggle`, `on-change`, `on-submit` (enter in a text field; primary+enter in a textarea, where enter inserts a newline), `on-dismiss` (dismissible surfaces: dialog, drawer, sheet, dropdown-menu — dispatched when Escape or a click outside dismisses the surface, so the model owns the close), `on-hold` (press-and-hold, see the Pickers section), and `on-hover-enter`/`on-hover-leave` (the pointer-hover containment pair, below) take `tag` or `tag:{payload}`. The tag must be a variant of your `Msg` union; payload bindings coerce to the variant's payload type: integers, floats, enums (from tag names), `[]const u8`, bool. `on-input` is special: name a `Msg` variant whose payload is `canvas.TextInputEvent` and the runtime delivers each text edit in it. `on-scroll` (the `scroll` element only) is the same shape: name a `Msg` variant whose payload is `canvas.ScrollState` and the runtime delivers the post-scroll state — `offset`, `viewport_extent`, `content_extent`, `maxOffset()` — after every user scroll (wheel, kinetic momentum steps, keyboard, accessibility). In Zig views the constructors are `Ui.inputMsg(.tag)` / `Ui.scrollMsg(.tag)` on `on_input` / `on_scroll`. `on-reach-end` (the `scroll` element only; `on_reach_end` in Zig views, any scroll container including the windowed virtual list) is a plain Msg dispatched when a user scroll comes within one viewport of the content end — the infinite-fetch signal, fired once per approach with hysteresis (re-arms past 1.5 viewports, which appending a batch causes by growing the extent). A programmatic jump to the end fires once and NEVER re-arms while the offset stays near the end — re-arming needs a post-scroll observation at least 1.5 viewports from it.
+`on-press`, `on-double-press`, `on-toggle`, `on-change`, `on-submit` (enter in a text field; primary+enter in a textarea, where enter inserts a newline), `on-dismiss` (dismissible surfaces: dialog, drawer, sheet, dropdown-menu — dispatched when Escape or a click outside dismisses the surface, so the model owns the close), `on-hold` (press-and-hold, see the Pickers section), and `on-hover-enter`/`on-hover-leave` (the pointer-hover containment pair, below) take `tag` or `tag:{payload}`. The tag must be an arm of your `Msg` union; payload bindings coerce to the arm's payload type. In TypeScript, an arm is `{ readonly kind: "tag"; readonly field: Type }`; in Zig it is a tagged-union variant. `on-input` is special: name an arm carrying `TextInputEvent` from `@native-sdk/core/text` in TypeScript or `canvas.TextInputEvent` in Zig. `on-scroll` (the `scroll` element only) similarly carries `ScrollState` from `@native-sdk/core/events` in TypeScript or `canvas.ScrollState` in Zig. In Zig builder views the constructors are `Ui.inputMsg(.tag)` / `Ui.scrollMsg(.tag)` on `on_input` / `on_scroll`. `on-reach-end` (the `scroll` element only; `on_reach_end` in Zig views, any scroll container including the windowed virtual list) is a plain Msg dispatched when a user scroll comes within one viewport of the content end — the infinite-fetch signal, fired once per approach with hysteresis (re-arms past 1.5 viewports, which appending a batch causes by growing the extent). A programmatic jump to the end fires once and NEVER re-arms while the offset stays near the end — re-arming needs a post-scroll observation at least 1.5 viewports from it.
 
 Scroll offsets follow the same mirror discipline as text: the Msg carries the offset the runtime ALREADY applied, so store it in the model and echo it back through the scroll's `value` — the echoed source value equals the runtime offset, which the scroll reconcile rule treats as "unchanged", so rebuilds never stomp live scrolling. `on-scroll` is how long content pages or lazy-loads: keep a bounded window in the model and slide it from `offset` (near-end when `offset + viewport_extent` approaches `content_extent`).
 
@@ -487,7 +496,7 @@ Presses follow ONE rule: a click lands on the nearest pressable widget under the
 
 ### Keys: quiet list rows and the app-level fallback
 
-Keyboard focus has two registers. RING focus is the keyboard contract: Tab/Shift+Tab walk the focusables and draw the visible ring, and a ring-focused widget owns its keys in full — activation, group arrows, Home/End. QUIET focus is bookkeeping: a pointer press records which widget the user last touched, with no ring drawn (editable text kinds are the exception — a caret is a visible promise, so they show it however focus arrives). A key event resolves top to bottom, the focused widget always outranking the app: (1) the focused widget's bound handler; (2) structural consume — any key on an editable text kind (typing stays typing, checked by widget KIND, so a focused search field blocks app shortcuts without knowing they exist) and any key the widget's kind maps as a control intent; (3) only an unclaimed key_down reaches `Options.on_key`, the app-level fallback (a target-less event — nothing focused — skips straight there). The fallback is a plain function from the key event to an optional Msg:
+Keyboard focus has two registers. RING focus is the keyboard contract: Tab/Shift+Tab walk the focusables and draw the visible ring, and a ring-focused widget owns its keys in full — activation, group arrows, Home/End. QUIET focus is bookkeeping: a pointer press records which widget the user last touched, with no ring drawn (editable text kinds are the exception — a caret is a visible promise, so they show it however focus arrives). A key event resolves top to bottom, the focused widget always outranking the app: (1) the focused widget's bound handler; (2) structural consume — any key on an editable text kind (typing stays typing, checked by widget KIND, so a focused search field blocks app shortcuts without knowing they exist) and any key the widget's kind maps as a control intent; (3) only an unclaimed key_down reaches the app-level fallback (a target-less event — nothing focused — skips straight there). In a default TypeScript core, export `keyMsg(key): Msg | null`; the host wires it automatically and the `ts-core` skill specifies the `KeyEvent` shape. In a Zig core, the equivalent is `Options.on_key`, a plain function from the key event to an optional Msg:
 
 ```zig
 // options: .on_key = onKey,
@@ -510,6 +519,8 @@ The model applies every edit event and is the source of truth; the runtime keeps
 <text-field text="{draft}" placeholder="New task…" on-input="draft_edit" on-submit="add" grow="1" />
 ```
 
+In a default TypeScript core, use the byte-splice engine from `@native-sdk/core/text` (`applyTextInputEvent` over `TextEditState`); the `ts-core` skill has the complete copy/paste/selection/IME-safe pattern. The equivalent Zig-core buffer is:
+
 ```zig
 draft_buffer: canvas.TextBuffer(64) = .{},            // model field: text + selection + composition
 pub fn draft(model: *const Model) []const u8 {        // the fn the markup's text= binds
@@ -527,7 +538,9 @@ The runtime owns cmd/ctrl+C/X/V in editable text: copy writes the current select
 
 Static text is selectable too: click-drag inside one `text` leaf or `paragraph` (markdown bodies included) selects with a highlight, cmd/ctrl+C copies it, and pressing anywhere else clears it. Selection and pressing coexist inside pressable rows — dragging selects (and presses nothing), a plain click collapses the selection and lands on the row's `on-press`. Selection is per-widget by design — there is no document model ordering text across widgets, so a drag cannot span two paragraphs (copy per paragraph). The selection survives rebuilds while that widget's text bytes are unchanged, and shows up in semantics/automation snapshots as `selection=a..b` on the widget line. Clipboard access from `update` is `fx.writeClipboard` / `fx.readClipboard` on the effects channel (see Effects) — never a `pbcopy` spawn; `runtime.readClipboard(&buffer)` / `runtime.writeClipboard(text)` remain for code that holds the runtime.
 
-## Effects: subprocesses and HTTP from update
+## Effects in Zig cores: subprocesses and HTTP from update
+
+In the default TypeScript core, effects are immutable `Cmd` values returned from `update`, and recurring work is declared with `Sub`; use the `ts-core` skill for the complete vocabulary and testing loop. The imperative effects channel below is the Zig-core equivalent.
 
 `update` can take a third parameter — the effects channel — by declaring `.update_fx` instead of `.update` (existing two-argument apps are untouched; set exactly one):
 
@@ -843,7 +856,7 @@ The `.wake` platform event is how live platforms marshal worker completions onto
 >
 > After feeding, drain with `try harness.runtime.dispatchPlatformEvent(app, .wake);` — results become Msgs through the same path live platforms use.
 
-## Secondary windows: model-declared (`windows_fn` + `window_view`)
+## Secondary windows in Zig cores: model-declared (`windows_fn` + `window_view`)
 
 Windows are model state, like an anchored surface's open flag. `Options.windows_fn` returns the descriptors that should exist RIGHT NOW (presence is visibility — no `visible` flag; the platform window channel has no hide); `Options.window_view` builds each declared window's whole canvas tree by window label. The runtime reconciles after every dispatch: create the newly declared, close the no-longer-declared, rebuild every open window's view from the same model.
 
@@ -876,17 +889,35 @@ Rules that matter:
 - **Settings windows open the standard way**: the app-menu Settings item and its primary+comma shortcut (an app.zon `.shortcuts` entry mapped in `on_command`), never an in-window settings button. Ship them fixed-size (`.resizable = false`) at exactly the content's box, title them "Settings", and let changes apply live through the shared model — no Apply/OK row, no copy explaining the window.
 - Tests: after the open Msg, deliver the new window's `gpu_surface_frame` (its window id from `runtime.listWindows`) to install its tree; simulate a user close by dispatching `.window_frame_changed` with `open = false`. See `examples/system-monitor` (settings shortcut -> settings window).
 
-## Hidden titlebar: `titlebar = "hidden_inset"`/`"hidden_inset_tall"` + `window-drag` + `on_chrome`
+## Hidden titlebar in both core tiers: `titlebar` + `window-drag` + the chrome channel
 
 The modern editor-app shape — content under a transparent titlebar, the app's header as the working titlebar. Two heights: `hidden_inset` keeps the compact band (~28pt, traffic lights hug the top), `hidden_inset_tall` switches to the unified-toolbar band (~52pt, macOS vertically centers the traffic lights — the tall unified-toolbar look). Pick tall when the header replacing the titlebar is toolbar-height, so the lights center against it. Three parts, all declared:
 
-1. **app.zon**: `.titlebar = "hidden_inset"` or `"hidden_inset_tall"` on the shell window (and the matching `.titlebar = .hidden_inset`/`.hidden_inset_tall` on the `ShellWindow` in main.zig). The first shell window's declaration threads through the STARTUP window create, so the main window's chrome is right from the first frame; `zig build validate` checks the value.
+1. **app.zon**: `.titlebar = "hidden_inset"` or `"hidden_inset_tall"` on the shell window. That is the whole declaration in a default TypeScript app. An owned Zig shell also sets the matching `.titlebar = .hidden_inset`/`.hidden_inset_tall` on its `ShellWindow`. The first shell window's declaration threads through the STARTUP window create, so the main window's chrome is right from the first frame; `native validate` checks the manifest value.
 2. **The header row** gets `window-drag="true"`: its background (and plain text/icons inside) moves the window; buttons inside stay buttons; double-click zooms (macOS honors the user's titlebar double-click preference).
-3. **`Options.on_chrome`** (`fn (chrome: platform.WindowChrome) ?Msg`) delivers the chrome overlay geometry — `chrome.insets`: titlebar band height on top (compact or tall), traffic-light extent on the leading edge; `chrome.buttons`: the traffic-light cluster's frame in content coordinates (top-left origin), the vertical truth for centering. All-zero in fullscreen, on standard chrome, and on other platforms. It fires BEFORE the first view build and on changes; store the geometry in the model, pad the header with a leading `<spacer width="{chrome_leading}" />`, and with the tall band match the header's height to `insets.top` (floored at its natural height) so `cross="center"` puts its controls on the lights' centerline.
+3. **The core's chrome channel** delivers the overlay geometry — `insets`: titlebar band height on top and traffic-light extent on the leading edge; `buttons`: the traffic-light cluster's frame in content coordinates (top-left origin), the vertical truth for centering. All-zero in fullscreen, on standard chrome, and on other platforms. It fires BEFORE the first view build and on changes. Store the geometry in model fields, pad the header with a leading spacer, and with the tall band match the header's height to `insets.top` (floored at its natural height) so `cross="center"` puts its controls on the lights' centerline.
+
+In a default TypeScript core, import `ChromeInsets`/`ChromeButtons` from `@native-sdk/core/events`, add the matching Msg arm, and export the channel name from `src/core.ts`:
+
+```ts
+import { type ChromeButtons, type ChromeInsets } from "@native-sdk/core/events";
+
+export type Msg = /* ... */ | {
+  readonly kind: "chrome_changed";
+  readonly insets: ChromeInsets;
+  readonly buttons: ChromeButtons;
+  readonly tabsProjected: boolean;
+};
+export const chromeMsg = "chrome_changed";
+```
+
+Handle that arm by storing `msg.insets.left` and `Math.max(headerNaturalHeight, msg.insets.top)` in fields such as `chromeLeading`/`headerHeight`; markup binds those exact TypeScript spellings (`<spacer width="{chromeLeading}" />`). `examples/system-monitor-ts` is the complete reference. In a Zig core, the equivalent hook is `Options.on_chrome: fn (platform.WindowChrome) ?Msg`, with snake-case bindings such as `{chrome_leading}` when the Zig model uses those names.
 
 macOS-first like `resizable = false`: GTK/Win32 keep standard chrome and the whole channel is harmless there. Full retrofit: `examples/markdown-viewer` (tall band; toolbar row is the drag region and tracks the band height). Tests: the null platform records `startWindowDrag` calls (`window_drag_starts`), per-window `window_titlebar`, and serves settable `window_chrome` (insets + buttons frame).
 
-## Time: wall clock + monotonic, with a testable seam
+## Time in Zig cores: wall clock + monotonic, with a testable seam
+
+Default TypeScript cores use journaled `Cmd.now` results and `Sub.timer` subscriptions; see the `ts-core` skill. The clock facade below is for Zig cores and lower-level runtime code.
 
 Zig 0.16 puts `std.time.milliTimestamp` behind `std.Io`, which `update` never sees — do NOT call `clock_gettime` yourself. The facade owns the clocks:
 
@@ -911,7 +942,19 @@ test_clock.setWallMs(1_700_000_000_000);  // NTP-style wall jump, monotonic unto
 ```
 
 Wall answers "what time is it?" (jumps with OS clock adjustments); monotonic answers "how long did it take?". Don't subtract wall timestamps for durations.
-## Images: runtime-registered pixels + the avatar pattern
+
+## Images in both core tiers: load/register, then bind the id
+
+In a default TypeScript app, static images ship through `app.zon`'s `.assets.images` table and are registered before the first frame. Runtime images use effects-as-data: return `Cmd.imageLoad(id, { path?, url?, cachePath?, expectedBytes? }, { event })` from `update`, and store the numeric id in the model only when the result arm reports `state === "loaded"`. `Cmd.imageCancel(id)` ends an in-flight load, and `Cmd.imageUnregister(id)` releases a loaded registry slot. The `ts-core` skill specifies the result record and limits; the [Dynamic Images guide](https://native-sdk.dev/dynamic-images) is the complete TypeScript + Zig example.
+
+The view binds that model-owned id in either tier; `0` is the no-image sentinel and keeps the fallback visible:
+
+```html
+<image image="{cover}" width="120" height="80" label="Cover art" />
+<avatar image="{avatar}" label="Octocat">OC</avatar>
+```
+
+### Zig cores and extensions: direct registration
 
 Image pixels are runtime-registered resources keyed by a caller-chosen `ImageId` (`u64` in the model, effect-key style; 0 = no image). The framework bundles NO codecs — encoded bytes decode through the platform (CGImageSource / gdk-pixbuf / WIC) via `PlatformServices.decode_image_fn`. Registration lives on the effects channel (synchronous calls, not effects — no Msg follows):
 
@@ -932,11 +975,7 @@ ui.avatar(.{ .image = model.avatar_image, .semantics = .{ .label = "Octocat" } }
 ui.image(.{ .image = model.chart_image, .width = 120, .height = 80, .semantics = .{ .label = "Chart" } }),
 ```
 
-```html
-<!-- Markup avatars bind the same model id: one {binding} to the u64 ImageId
-     (a field or pub fn — never a literal); 0 renders the initials fallback. -->
-<avatar image="{avatar_image}" label="Octocat">OC</avatar>
-```
+Markup binds the same model id through a field or derived helper, never a literal. A Zig core commonly spells that field `{avatar_image}`; a TypeScript core binds its authored spelling exactly, such as `{avatar}`.
 
 Rules:
 
@@ -1022,15 +1061,16 @@ Bare source-bound highlighted content shared with Markdown fences:
 A leaf element that renders a markdown string (the GFM subset below) as ordinary widgets, wiring `native_sdk.markdown` for you — both engines implement it identically:
 
 ```html
-<markdown source="{issue_body}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" />
+<markdown source="{issue_body}" images="{markdownImages}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" />
 ```
 
 - `source` (required): one `{binding}` producing the markdown text — a `[]const u8` field, zero-arg fn, or arena-taking fn (compose the document into the build arena at view time).
+- `images` (optional): one `{binding}` producing `[]const canvas.markdown.ResolvedImage`. Give `canvas.markdown.collectImageSources` caller-owned `[]canvas.markdown.CollectedImageSource` storage, consume each canonical source through `value()` while that storage is alive, load it through `fx.loadImage`, and retain the source, successful id, and decoded dimensions in the model. Return mappings from a model or arena-taking fn. The view never performs I/O; missing mappings keep the safe alt-text fallback.
 - `on-link` (optional): a BARE Msg tag — no `:{payload}` — whose payload is the pressed link URL; declare `open_url: []const u8` in `Msg`.
 - `on-details` (optional): a bare Msg tag whose payload is the `<details>` block's document-order index; declare `toggle_details: usize`.
 - `details-expanded` (optional): one `{binding}` naming a `[]const bool` iterable (a model field, pub decl, or fn — the same sources `for each` accepts); flags are read in details-block document order. Keep a bounded `details_expanded: [8]bool` in the model and toggle it in `update`.
 - `issue-link-base` (optional): a literal URL prefix or one `{binding}` producing it; `#123` references at word boundaries become links to base ++ number (`issue-link-base="ghissue://"` links `#123` to `ghissue://123` — an app scheme your `on-link` handler intercepts, or a web base like `https://github.com/owner/repo/issues/`). Off by default: resolving a ref needs repo context.
-- No children, no text content, no other attributes (teaching errors point at misuse). Without the details wiring, `<details>` blocks render collapsed and inert; without `on-link`, links render styled but inert.
+- No children and no text content (teaching errors point at misuse). Without the details wiring, `<details>` blocks render collapsed and inert; without `on-link`, links render styled but inert.
 
 ## Pipeline composites: stepper, timeline, nav
 
@@ -1154,9 +1194,11 @@ Tests that touch files or clocks get their `Io` from `std.testing.io`. The full 
 
 `native markup check src/view.native` — instant grammar/structure validation with `file:line:column` errors, including the font-coverage tofu guard: literal text with a codepoint outside the bundled face (⌘, ✓, ⑂, dingbats, CJK) is a teaching error naming the character, because it renders as a tofu box on the reference/screenshot and mobile paths — register a font that covers it (`UiApp.Options.fonts`) and bind the text from the model (the guard skips `{bindings}`), or use a vector icon (`icon=` / `<icon name>`) or plain words. Dynamic strings get the same lesson as a Debug-build `zero_canvas_ui` diagnostic when the view builds. The accessibility lint rides the same pass: unnamed interactive controls and role misuse are errors, unnamed images and redundant labels are warnings (`--strict` promotes).
 
-The model side checks at check time too: the model-contract step (refreshed by `native test`, or run directly as `zig build model-contract` in an app that owns its build) reflects Model/Msg into `zig-out/model-contract.zon`, and `native check` (or `markup check` run in the app directory) then verifies every binding path, iterable, `key` field, message tag, payload type, and expression type against the app's real surface — did-you-mean over your actual field names, and type errors naming the field's Zig type. It also WARNS on model state and Msg tags no view uses; opt update-only names out with `pub const view_unbound = .{ "next_id" };` on Model or Msg (`--strict` turns the warnings into failures) — state consumed only by a Zig-BUILT view needs `view_unbound` too, because the markup checker cannot see Zig view reads. A stale artifact degrades to grammar-only checking with a loud note ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks"); binding paths and message tags are always re-enforced when the app builds (and on hot reload).
+The model side checks at check time too: the model-contract step (refreshed by `native test`, or run directly as `zig build model-contract` in an app that owns its build) reflects Model/Msg into `zig-out/model-contract.zon`, and `native check` (or `markup check` run in the app directory) then verifies every binding path, iterable, `key` field, message tag, payload type, and expression type against the app's real surface — did-you-mean over your actual field names, and type errors naming the core's type. It also WARNS on model state and Msg tags no view uses; a TypeScript core exports `viewUnbound = ["name"] as const`, while a Zig core declares `pub const view_unbound = .{ "name" };` (`--strict` turns the warnings into failures). State consumed only by a Zig-built view needs `view_unbound` too, because the markup checker cannot see Zig view reads. A stale artifact degrades to grammar-only checking with a loud note ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks"); binding paths and message tags are always re-enforced when the app builds (and on hot reload).
 
-## Testing pattern
+## Testing pattern (Zig cores)
+
+For the default TypeScript path, test the pure core under node (`native dev --core`) and through `native test`; use the `ts-core` skill for scripts, virtual time, effect transcripts, and generated full-loop coverage. The direct widget-tree pattern below is for Zig cores and toolkit work.
 
 Unit tests exercise the real dispatch path — no GUI needed:
 

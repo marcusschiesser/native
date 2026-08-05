@@ -6,7 +6,7 @@ const tooling = @import("tooling");
 const automation_protocol = @import("automation_protocol");
 const cli_build_info = @import("cli_build_info");
 
-const version = "0.7.2";
+const version = "0.8.1";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -579,6 +579,7 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
         // check failure.
         tooling.ts_core.selfHealEditorPackage(allocator, io, framework_root);
         try tooling.ts_core.checkCore(allocator, io, env_map, framework_root);
+        try tooling.ts_core.compilerTypecheckCore(allocator, io, env_map, framework_root);
     }
 
     var markup_files: std.ArrayList([]const u8) = .empty;

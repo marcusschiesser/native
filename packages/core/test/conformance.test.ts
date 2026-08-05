@@ -1,29 +1,29 @@
-// Conformance corpus: the transpiler's output contract is that an author who
-// passes tsc and the subset checker NEVER sees a Zig compile error. Each case
-// is a small subset-legal module exercising a type-boundary combination
-// (literal unions x comparisons x assignments x args/returns x elements x
-// integer inference). A case either EMITS — transpile-clean must imply
-// zig-build-clean — or is GATED by a named teaching rule at check time.
-//
-// The zig-build half runs as one `zig test` over every emitted module
-// (skipped when no zig toolchain is on PATH; the gating half always runs).
+// Conformance corpus: the frontend's contract is that every subset rule
+// teaches at check time with a named rule, and everything else checks
+// clean. Each case is a small subset-legal module exercising a
+// type-boundary combination (literal unions x comparisons x assignments
+// x args/returns x elements x integer inference). A case either checks
+// CLEAN — the external core compiler carries it from there (compile
+// truth lives in the SDK's ts-core e2e batteries over real archives) —
+// or is GATED by a named teaching rule at check time. Cases marked
+// `formerEmitGate` were refused by the removed TS-to-Zig emitter's own
+// re-derivations; they check clean now and ride the external compiler's
+// semantics, diagnostics, and run-time traps.
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { transpile, transpileFiles } from "./helpers.ts";
-
-const pkg = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const hasZig = spawnSync("zig", ["version"], { stdio: "ignore" }).status === 0;
+import { check, checkFiles } from "./helpers.ts";
 
 interface Case {
   readonly name: string;
-  /// Expected teaching rule; omitted means the case must emit Zig that compiles.
+  /// Expected teaching rule; omitted means the case must check clean.
   readonly gate?: string;
+  /// The rule the REMOVED TS-to-Zig emitter used to teach at emission
+  /// (its layer-3 re-derivations and v1 deferrals). The frontend now
+  /// accepts these cases — the external core compiler carries them with
+  /// its own semantics, diagnostics, and run-time traps — so the case
+  /// must check clean; the field keeps the classification readable.
+  readonly formerEmitGate?: string;
   readonly src: string;
 }
 
@@ -1105,7 +1105,7 @@ export function subscriptions(model: Model): Sub<Msg> {
   },
   {
     name: "a payload mixed with extra arguments is taught",
-    gate: "NS1026",
+    formerEmitGate: "NS1026",
     src: `
 import { Cmd } from "@native-sdk/core";
 export interface Model { readonly draft: Uint8Array; readonly count: number; }
@@ -1120,7 +1120,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a nested record payload field is taught (no wire encoding)",
-    gate: "NS1026",
+    formerEmitGate: "NS1026",
     src: `
 import { Cmd } from "@native-sdk/core";
 export interface Inner { readonly a: number; }
@@ -1136,7 +1136,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a routing callback is taught, not run (routing is data)",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, type BytesKind } from "@native-sdk/core";
 export interface Model { readonly data: Uint8Array; }
@@ -1158,7 +1158,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a non-literal routing arm is taught (decoders derive at build time)",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd } from "@native-sdk/core";
 export interface Model { readonly data: Uint8Array; readonly alt: boolean; }
@@ -1180,7 +1180,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a routing arm without a bytes payload is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, type BytesKind } from "@native-sdk/core";
 export interface Model { readonly data: Uint8Array; readonly ticks: number; }
@@ -1257,7 +1257,7 @@ function timers(model: Model): Sub<Msg> {
   },
   {
     name: "a timer target without a single number payload is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Sub, type TimestampKind } from "@native-sdk/core";
 export interface Model { readonly data: Uint8Array; }
@@ -1316,6 +1316,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       if (msg.which === 4) return [model, Cmd.clipboardWrite(model.data)];
       if (msg.which === 5) return [model, Cmd.clipboardRead({ key: "p", ok: "loaded", err: "failed" })];
       if (msg.which === 6) return [model, Cmd.delay("d", model.at + 100, "fired")];
+      if (msg.which === 7) return [model, Cmd.showNotification({ title: model.data, subtitle: asciiBytes("native-sdk"), body: asciiBytes("Done") })];
       return [model, Cmd.batch([Cmd.delay("d", 250, "fired"), Cmd.cancel("d")])];
     case "loaded": return { ...model, data: msg.body };
     case "wrote": return { ...model, saved: true };
@@ -1328,7 +1329,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a fetch ok arm that is not a {status, body} record is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type FetchedKind } from "@native-sdk/core";
 ${namedOpMsg}
@@ -1346,7 +1347,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a writeFile ok arm carrying a payload is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type EmptyKind } from "@native-sdk/core";
 ${namedOpMsg}
@@ -1364,7 +1365,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a delay target without a single number payload is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, type TimestampKind } from "@native-sdk/core";
 ${namedOpMsg}
@@ -1399,7 +1400,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a smuggled string fetch header value is taught (values are literals or bytes)",
-    gate: "NS1029",
+    formerEmitGate: "NS1029",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${namedOpMsg}
@@ -1417,7 +1418,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a non-flat headers record is taught",
-    gate: "NS1029",
+    formerEmitGate: "NS1029",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${namedOpMsg}
@@ -1435,7 +1436,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a string path smuggled past the bytes rule is taught",
-    gate: "NS1029",
+    formerEmitGate: "NS1029",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${namedOpMsg}
@@ -1453,7 +1454,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "an over-bound path literal stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${namedOpMsg}
@@ -1471,7 +1472,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "more headers than the engine accepts stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${namedOpMsg}
@@ -1489,7 +1490,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a literal delay outside the 1ms..one-year bound stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${namedOpMsg}
@@ -1634,7 +1635,7 @@ export function next(n: number): number {
   },
   {
     name: "Cmd.host argument smuggled past the types is taught",
-    gate: "NS1020",
+    formerEmitGate: "NS1020",
     src: `
 import { Cmd } from "@native-sdk/core";
 export interface Model { readonly count: number; }
@@ -1765,7 +1766,7 @@ export function pick(e: Ev): number {
   },
   {
     name: "stacked labels whose shared body reads a payload are gated",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export type Ev = { readonly kind: "a"; readonly n: number } | { readonly kind: "b"; readonly n: number };
 export function pick(e: Ev): number {
@@ -1859,7 +1860,7 @@ export function sum(xs: readonly number[]): number {
   },
   {
     name: "for...of over .entries() beyond the [i, x] pair form is taught",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function sum(xs: readonly number[]): number {
   let total = 0;
@@ -1872,7 +1873,7 @@ export function sum(xs: readonly number[]): number {
   },
   {
     name: "for...of with a let binding is taught, not emitted",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function last(xs: readonly number[]): number {
   let hit = 0;
@@ -1961,7 +1962,7 @@ export function countBig(xs: readonly number[], lim: number): number {
   },
   {
     name: "reduce without an initial value is taught (empty-array throw)",
-    gate: "NS1007",
+    formerEmitGate: "NS1007",
     src: `
 export function total(xs: readonly number[]): number {
   return xs.reduce((sum, x) => sum + x);
@@ -2001,7 +2002,7 @@ export function tripled(a: readonly number[], b: readonly number[], c: readonly 
   },
   {
     name: "indexOf on a record array is taught (JS reference identity)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export interface Task { readonly id: number; readonly done: boolean; }
 export function has(tasks: readonly Task[], t: Task): number {
@@ -2025,7 +2026,7 @@ export function commas(bytes: Uint8Array): string {
   },
   {
     name: "join on a number array is taught (float elements)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function csv(xs: readonly number[]): string {
   return xs.join(",");
@@ -2034,7 +2035,7 @@ export function csv(xs: readonly number[]): string {
   },
   {
     name: "the wrong empty test is taught in both directions (R7c)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(cursor: number | null): boolean {
   return cursor === undefined;
@@ -2043,7 +2044,7 @@ export function f(cursor: number | null): boolean {
   },
   {
     name: "=== null on a find result is taught (the miss is JS undefined)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): number {
   const hit = xs.find((x) => x > 0);
@@ -2271,7 +2272,7 @@ export function toggled(habits: readonly Habit[], id: number): readonly Habit[] 
   },
   {
     name: "toSorted without a comparator is taught (JS ToString ordering)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): readonly number[] {
   return xs.toSorted();
@@ -2324,7 +2325,7 @@ export function f(n: number): readonly number[] {
   },
   {
     name: "push in value position is taught (the JS value is the new length)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(n: number): number {
   const out: number[] = [];
@@ -2353,7 +2354,7 @@ export function update(model: Model, msg: Msg): Model {
   },
   {
     name: "push with a spread argument is taught (one element per call)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): readonly number[] {
   const out: number[] = [];
@@ -2364,7 +2365,7 @@ export function f(xs: readonly number[]): readonly number[] {
   },
   {
     name: "pushing to the array a for...of iterates is taught, not silently snapshotted",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(n: number): readonly number[] {
   const out: number[] = [];
@@ -2378,7 +2379,7 @@ export function f(n: number): readonly number[] {
   },
   {
     name: "a callback path falling off the end is taught (implicit undefined)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): readonly number[] {
   return xs.filter((x) => {
@@ -2712,7 +2713,7 @@ export function f(xs: number[]): number[] {
   },
   {
     name: "in-place sort without a comparator is taught (JS ToString ordering)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): readonly number[] {
   const copy = xs.slice();
@@ -2734,7 +2735,7 @@ export function f(xs: readonly number[]): readonly number[] {
   },
   {
     name: "sort/reverse in value position is taught (JS returns the same array)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): readonly number[] {
   const copy = xs.slice();
@@ -2744,7 +2745,7 @@ export function f(xs: readonly number[]): readonly number[] {
   },
   {
     name: "unshift in value position is taught (the JS value is the new length)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): number {
   const copy = xs.slice();
@@ -2755,7 +2756,7 @@ export function f(xs: readonly number[]): number {
   },
   {
     name: "splice with a spread argument is taught",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[], ys: readonly number[]): readonly number[] {
   const copy = xs.slice();
@@ -2776,7 +2777,7 @@ export function f(): readonly number[] {
   },
   {
     name: "a compound appending write is taught (it reads the missing slot first)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(): readonly number[] {
   const out = [1, 2];
@@ -2787,7 +2788,7 @@ export function f(): readonly number[] {
   },
   {
     name: "length-changing mutation of the array a for...of iterates is taught",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(): number {
   const out: number[] = [1, 2, 3];
@@ -2802,7 +2803,7 @@ export function f(): number {
   },
   {
     name: "length-changing mutation from inside an iterating callback is taught",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): number {
   const out: number[] = [1, 2, 3];
@@ -2900,7 +2901,7 @@ export function pick(bytes: Uint8Array, x: number): number {
   },
   {
     name: "Math methods outside the v1 set are taught by name",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function powed(x: number): number { return Math.pow(x, 2); }
 `,
@@ -2921,7 +2922,7 @@ export function guard(xs: readonly number[]): readonly number[] {
   },
   {
     name: "Number methods outside the v1 classifiers are taught by name",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function parsed(): number { return Number.parseFloat("1.5"); }
 `,
@@ -2982,7 +2983,7 @@ export function inRange(x: number): boolean { return x >= LIMITS.lo && x <= LIMI
   },
   {
     name: "an unannotated module const record is taught toward the interface annotation",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export const LIMITS = { lo: 1, hi: 9 };
 export function f(): number { return 1; }
@@ -2990,7 +2991,7 @@ export function f(): number { return 1; }
   },
   {
     name: "a spread in a module const table is a taught stop (tables are comptime data)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export interface Limits { readonly lo: number; readonly hi: number; }
 export const BASE: Limits = { lo: 1, hi: 9 };
@@ -3000,7 +3001,7 @@ export function f(): number { return 1; }
   },
   {
     name: "a table number that does not fold at compile time is a taught stop",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 function seed(): number { return 3; }
 export const TABLE: readonly number[] = [1, seed()];
@@ -3054,7 +3055,7 @@ export function frontLoaded(tasks: readonly Task[]): boolean {
   },
   {
     name: "a callback declaring the third (array) parameter is a taught stop",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): readonly number[] {
   return xs.map((x, i, all) => x + all.length);
@@ -3063,7 +3064,7 @@ export function f(xs: readonly number[]): readonly number[] {
   },
   {
     name: "a reduce callback with an index parameter is a taught stop",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): number {
   return xs.reduce((sum, x, i) => sum + x * i, 0);
@@ -3113,7 +3114,7 @@ export function countIf(xs: readonly number[], lim: number): number {
   },
   {
     name: "a while condition still may not lower statements (re-evaluated per iteration)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(xs: readonly number[]): number {
   let n = 0;
@@ -3174,7 +3175,7 @@ export function bitDefault(b: Bit): number {
   },
   {
     name: "a value-switch default that is not the last clause is a taught stop",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export type Filter = "all" | "active" | "done";
 export function f(x: Filter): number {
@@ -3189,7 +3190,7 @@ export function f(x: Filter): number {
   },
   {
     name: "case labels falling through into a value-switch default are a taught stop",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export type Filter = "all" | "active" | "done";
 export function f(x: Filter): number {
@@ -3425,7 +3426,7 @@ export function update(model: Model, msg: Msg): Model {
   },
   {
     name: "an array of unions in the model stays a loud stop (not in v1)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export type Item = { readonly kind: "a" } | { readonly kind: "b"; readonly n: number };
 export interface Model { readonly items: readonly Item[]; }
@@ -3438,7 +3439,7 @@ export function update(model: Model, msg: Msg): Model {
   },
   {
     name: "an array of byte-strings in the model stays a loud stop (not in v1)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export interface Model { readonly rows: readonly Uint8Array[]; }
 export type Msg = { readonly kind: "x" } | { readonly kind: "y" };
@@ -3742,7 +3743,7 @@ ${streamTail}
   },
   {
     name: "a dynamic showWindow label is taught (window labels are declarations)",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${streamMsg}
@@ -3760,7 +3761,7 @@ ${streamTail}
     // are 100 UTF-16 code units but 300 UTF-8 bytes, so the 255-byte
     // teaching must fire on the byte count, not on \`.length\`.
     name: "a showWindow label over 255 UTF-8 bytes is taught (100 CJK chars = 300 bytes)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${streamMsg}
@@ -3808,7 +3809,7 @@ ${streamTail}
   },
   {
     name: "a line-mode spawn exit arm without a single number payload is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type TimestampKind } from "@native-sdk/core";
 ${streamMsg}
@@ -3820,7 +3821,7 @@ ${streamTail}
   },
   {
     name: "a collect spawn exit arm that is not a { code, output } record is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type FetchedKind } from "@native-sdk/core";
 ${streamMsg}
@@ -3832,7 +3833,7 @@ ${streamTail}
   },
   {
     name: "a line arm on a collect spawn is taught (collect has no line framing)",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type SpawnCollectRoute } from "@native-sdk/core";
 ${streamMsg}
@@ -3844,7 +3845,7 @@ ${streamTail}
   },
   {
     name: "a dynamic argv value is taught (argv is an inline array literal)",
-    gate: "NS1029",
+    formerEmitGate: "NS1029",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${streamMsg}
@@ -3857,7 +3858,7 @@ ${streamTail}
   },
   {
     name: "an empty argv stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${streamMsg}
@@ -3869,7 +3870,7 @@ ${streamTail}
   },
   {
     name: "more argv elements than the engine accepts stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${streamMsg}
@@ -3881,7 +3882,7 @@ ${streamTail}
   },
   {
     name: "an argv block over the engine's byte bound stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${streamMsg}
@@ -3893,7 +3894,7 @@ ${streamTail}
   },
   {
     name: "an over-bound stdin literal stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${streamMsg}
@@ -3905,7 +3906,7 @@ ${streamTail}
   },
   {
     name: "an audio event arm whose state union misses a member is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type AudioEventKind } from "@native-sdk/core";
 export type NarrowState = "loaded" | "position" | "completed" | "failed" | "rejected";
@@ -3926,7 +3927,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "an audio event arm with a wrong field shape is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type AudioEventKind } from "@native-sdk/core";
 ${streamMsg}
@@ -3938,7 +3939,7 @@ ${streamTail}
   },
   {
     name: "an audio source without a path or url is taught (nothing could play)",
-    gate: "NS1029",
+    formerEmitGate: "NS1029",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${streamMsg}
@@ -3950,7 +3951,7 @@ ${streamTail}
   },
   {
     name: "a dynamic audio key is taught (keys are compile-time routing data)",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${streamMsg}
@@ -3962,7 +3963,7 @@ ${streamTail}
   },
   {
     name: "an audio volume literal outside 0..1 stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${streamMsg}
@@ -3974,7 +3975,7 @@ ${streamTail}
   },
   {
     name: "a negative audio seek literal stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${streamMsg}
@@ -4000,7 +4001,7 @@ ${imageTail}
   },
   {
     name: "an image result arm whose state union misses a member is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type ImageEventKind } from "@native-sdk/core";
 export type NarrowState = "loaded" | "rejected" | "decode_failed";
@@ -4019,7 +4020,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "an image result arm with a wrong field shape is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type ImageEventKind } from "@native-sdk/core";
 ${imageMsg}
@@ -4031,7 +4032,7 @@ ${imageTail}
   },
   {
     name: "an image source without a path or url is taught (nothing could load)",
-    gate: "NS1029",
+    formerEmitGate: "NS1029",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${imageMsg}
@@ -4043,7 +4044,7 @@ ${imageTail}
   },
   {
     name: "an image id literal the registry must refuse stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${imageMsg}
@@ -4070,7 +4071,7 @@ ${imageTail}
     // 2^53 aliases 2^53 + 1 in f64 — the first id the wire cannot carry
     // exactly, so the literal stops the build.
     name: "an image id literal of 2^53 stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${imageMsg}
@@ -4086,7 +4087,7 @@ ${imageTail}
     // cache would verify every download against the wrong size and
     // re-fetch on every launch. The literal stops the build.
     name: "a fractional image expectedBytes literal stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${imageMsg}
@@ -4123,7 +4124,7 @@ ${channelTail}
   },
   {
     name: "a channel event arm whose state union misses a member is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, type ChannelEventKind } from "@native-sdk/core";
 export type NarrowState = "data" | "closed";
@@ -4142,7 +4143,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a channel event arm with a wrong field shape is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, type ChannelEventKind } from "@native-sdk/core";
 ${channelMsg}
@@ -4154,7 +4155,7 @@ ${channelTail}
   },
   {
     name: "a channel key literal the engine must refuse stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${channelMsg}
@@ -4167,7 +4168,7 @@ ${channelTail}
   {
     // 2^53 aliases 2^53 + 1 in f64 — the image id gate's bound, shared.
     name: "a channel key literal of 2^53 stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${channelMsg}
@@ -4194,7 +4195,7 @@ ${imageTail}
     // The same literal gate as imageLoad: an id no load could ever park
     // under has nothing to cancel.
     name: "an imageCancel id literal the registry must refuse stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${imageMsg}
@@ -4217,7 +4218,7 @@ ${imageTail}
   },
   {
     name: "an imageCancel id literal of 2^53 stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${imageMsg}
@@ -4244,7 +4245,7 @@ ${imageTail}
     // The same literal gate as imageLoad/imageCancel: an id no load
     // could ever register under has nothing to unregister.
     name: "an imageUnregister id literal the registry must refuse stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${imageMsg}
@@ -4267,7 +4268,7 @@ ${imageTail}
   },
   {
     name: "an imageUnregister id literal of 2^53 stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${imageMsg}
@@ -4298,7 +4299,7 @@ ${videoTail}
   },
   {
     name: "a video event arm whose state union misses a member is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type VideoEventKind } from "@native-sdk/core";
 export type NarrowState = "loaded" | "position" | "completed" | "failed";
@@ -4338,7 +4339,7 @@ ${ptyTail}
     // bare literal type is not a union), so the drift case is a
     // misnamed member — the same NS1027 teaching.
     name: "a pty event arm whose state union misnames a member is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type PtyEventKind } from "@native-sdk/core";
 export type NarrowState = "output" | "done";
@@ -4358,7 +4359,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a video event arm with a wrong field shape is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type VideoEventKind } from "@native-sdk/core";
 ${videoMsg}
@@ -4370,7 +4371,7 @@ ${videoTail}
   },
   {
     name: "a video source without a path or url is taught (nothing could play)",
-    gate: "NS1029",
+    formerEmitGate: "NS1029",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${videoMsg}
@@ -4382,7 +4383,7 @@ ${videoTail}
   },
   {
     name: "a video source without a surface is taught (the frames need a texture channel)",
-    gate: "NS1029",
+    formerEmitGate: "NS1029",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${videoMsg}
@@ -4394,7 +4395,7 @@ ${videoTail}
   },
   {
     name: "a dynamic videoLoad option boolean is taught (the flags byte is build-time data)",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${videoMsg}
@@ -4406,7 +4407,7 @@ ${videoTail}
   },
   {
     name: "a dynamic video key is taught (keys are compile-time routing data)",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${videoMsg}
@@ -4418,7 +4419,7 @@ ${videoTail}
   },
   {
     name: "a video volume literal outside 0..1 stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${videoMsg}
@@ -4430,7 +4431,7 @@ ${videoTail}
   },
   {
     name: "a negative video seek literal stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${videoMsg}
@@ -4442,7 +4443,7 @@ ${videoTail}
   },
   {
     name: "a pty event arm whose reason union misses a member is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type PtyEventKind } from "@native-sdk/core";
 export type PtyState = "output" | "exit";
@@ -4462,7 +4463,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   },
   {
     name: "a pty event arm with a wrong field shape is taught",
-    gate: "NS1027",
+    formerEmitGate: "NS1027",
     src: `
 import { Cmd, asciiBytes, type PtyEventKind } from "@native-sdk/core";
 ${ptyMsg}
@@ -4474,7 +4475,7 @@ ${ptyTail}
   },
   {
     name: "a zero pty grid literal stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${ptyMsg}
@@ -4488,7 +4489,7 @@ ${ptyTail}
     // Grids are u16 at the transport: the first unrepresentable
     // dimension stops the build the way the zero does.
     name: "a pty resize dimension literal past the transport bound stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${ptyMsg}
@@ -4500,7 +4501,7 @@ ${ptyTail}
   },
   {
     name: "an empty pty argv stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd } from "@native-sdk/core";
 ${ptyMsg}
@@ -4512,7 +4513,7 @@ ${ptyTail}
   },
   {
     name: "a pty TERM literal over the engine bound stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${ptyMsg}
@@ -4526,7 +4527,7 @@ ${ptyTail}
     // Keystrokes and pastes, not bulk transfers: a compile-time-known
     // payload over the engine's per-write bound stops the build.
     name: "a pty write literal over the engine bound stops at compile time",
-    gate: "NS1030",
+    formerEmitGate: "NS1030",
     src: `
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${ptyMsg}
@@ -6718,7 +6719,7 @@ export function total(n: number): number {
   },
   {
     name: "an early break out of a switch clause is gated (Zig break binds loops, not switches)",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export type Msg =
   | { readonly kind: "a"; readonly v: number }
@@ -8495,7 +8496,7 @@ export function f(q: number | null, flag: boolean, msg: Msg): number {
     // but the emitters have no clean arm mapping for that shape and stop
     // with the fall-into-default teaching.
     name: "an empty case falling into default gates at emission",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export type Mode = "a" | "b" | "c";
 export function f(mode: Mode): number {
@@ -8699,7 +8700,7 @@ export function f(q: number | null, flag: boolean, s: string): number {
     // lowerings have no boolean-scrutinee mapping, so the shape gates at
     // emission before terminality can matter end to end.
     name: "a switch on a boolean scrutinee gates at emission",
-    gate: "NS9001",
+    formerEmitGate: "NS9001",
     src: `
 export function f(q: number | null, flag: boolean): number {
   let p: number | null = q;
@@ -10068,24 +10069,29 @@ const corpus: Case[] = [
   ...lexicalBlockFlowCases,
 ];
 
-test("corpus: gated cases teach at check time, emit cases transpile clean", () => {
+test("corpus: gated cases teach at check time, accepted cases check clean", () => {
+  const mismatches: string[] = [];
   for (const c of corpus) {
-    const result = transpile(c.src);
+    const result = check(c.src);
     assert.equal(result.typeErrors.length, 0, `${c.name}: tsc errors\n${result.typeErrors.join("\n")}`);
     if (c.gate) {
-      assert.equal(result.ok, false, `${c.name}: expected ${c.gate}, but transpile succeeded`);
+      if (result.ok) {
+        mismatches.push(`${c.name}: expected ${c.gate}, but the check succeeded`);
+        continue;
+      }
       const ids = result.diagnostics.map((d) => d.id);
-      assert.ok(ids.includes(c.gate), `${c.name}: expected ${c.gate}, got ${ids.join(", ") || "none"}`);
-    } else {
+      if (!ids.includes(c.gate)) mismatches.push(`${c.name}: expected ${c.gate}, got ${ids.join(", ") || "none"}`);
+    } else if (!result.ok) {
       const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");
-      assert.equal(result.ok, true, `${c.name}: transpile failed\n${details}`);
+      mismatches.push(`${c.name}: check failed\n${details}`);
     }
   }
+  assert.deepEqual(mismatches, [], mismatches.join("\n\n"));
 });
 
 test("multi-file corpus: gated cases teach, emit cases transpile clean", () => {
   for (const c of multiFileCases) {
-    const result = transpileFiles(c.files);
+    const result = checkFiles(c.files);
     if (c.gate) {
       assert.equal(result.ok, false, `${c.name}: expected ${c.gate}, but transpile succeeded`);
       const ids = result.diagnostics.map((d) => d.id);
@@ -10100,68 +10106,8 @@ test("multi-file corpus: gated cases teach, emit cases transpile clean", () => {
   }
 });
 
-test("private cross-file collisions take a per-module prefix in the emitted Zig", () => {
-  const c = multiFileCases.find((x) => x.name.includes("PRIVATE helpers"))!;
-  const result = transpileFiles(c.files);
-  assert.equal(result.ok, true);
-  // One `scale` keeps its name (first claim); the other gets `b_scale`.
-  assert.ok(result.zig!.includes("fn scale("), "first claimer keeps its spelling");
-  assert.ok(result.zig!.includes("fn b_scale("), `the collider takes the module prefix:\n${result.zig}`);
-  assert.ok(result.zig!.includes("b_scale(n)"), "references land on the prefixed name");
-});
-
-test("corpus: emitted Zig always compiles", { skip: !hasZig, timeout: 600_000 }, () => {
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-core-conformance-"));
-  try {
-    fs.copyFileSync(path.join(pkg, "rt", "rt.zig"), path.join(work, "rt.zig"));
-    const imports: string[] = [];
-    corpus.forEach((c, i) => {
-      if (c.gate) return;
-      const result = transpile(c.src);
-      assert.equal(result.ok, true, `${c.name}: transpile failed before the zig step`);
-      const file = `case_${String(i).padStart(2, "0")}.zig`;
-      fs.writeFileSync(path.join(work, file), result.zig!);
-      imports.push(`    // ${c.name}\n    refAllDecls(@import("${file}"));`);
-    });
-    multiFileCases.forEach((c, i) => {
-      if (c.gate) return;
-      const result = transpileFiles(c.files);
-      assert.equal(result.ok, true, `${c.name}: transpile failed before the zig step`);
-      const file = `multi_${String(i).padStart(2, "0")}.zig`;
-      fs.writeFileSync(path.join(work, file), result.zig!);
-      imports.push(`    // ${c.name}\n    refAllDecls(@import("${file}"));`);
-    });
-    const driver = [
-      `// Generated driver: reference every public decl of every emitted core so`,
-      `// the compiler semantically analyzes all of them (nothing runs).`,
-      `const refAllDecls = @import("std").testing.refAllDecls;`,
-      ``,
-      `test {`,
-      ...imports,
-      `}`,
-      ``,
-    ].join("\n");
-    fs.writeFileSync(path.join(work, "driver.zig"), driver);
-    // Both optimize modes, because they analyze differently: the wave-2
-    // release-only miscompiles (comptime-only enum literals under runtime
-    // control flow; @memcpy into a `[]const u8` parameter) surfaced only
-    // when an app's ReleaseFast build was the first release-mode analysis
-    // the emitted core ever got.
-    for (const mode of [[], ["-OReleaseFast"]] as const) {
-      try {
-        execFileSync("zig", ["test", ...mode, "driver.zig"], { cwd: work, encoding: "utf8", stdio: "pipe" });
-      } catch (e) {
-        const err = e as { stderr?: string; stdout?: string };
-        assert.fail(`emitted Zig failed to compile (${mode[0] ?? "Debug"}):\n${err.stderr ?? ""}${err.stdout ?? ""}`);
-      }
-    }
-  } finally {
-    fs.rmSync(work, { recursive: true, force: true });
-  }
-});
-
 test("NS1028: Cmd.persist still compiles but teaches the writeFile path as a warning", () => {
-  const result = transpile(`
+  const result = check(`
 import { Cmd } from "@native-sdk/core";
 export interface Model { readonly count: number; }
 export type Msg = { readonly kind: "add" } | { readonly kind: "noop" };
@@ -10180,11 +10126,10 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   const w = result.warnings.find((d) => d.id === "NS1028");
   assert.ok(w, "reports NS1028 as a warning");
   assert.ok(w.message.includes("writeFile"), "points at the writeFile path");
-  assert.ok(result.zig!.includes("rt.cmdPersist()"), "wire support stays");
 });
 
 test("NS1016 speaks in rule, fix, and why", () => {
-  const result = transpile(`
+  const result = check(`
 export function read(bytes: Uint8Array): number {
   let i = 0;
   i = 1.5;
@@ -10206,7 +10151,7 @@ export function read(bytes: Uint8Array): number {
 // arm resolves to `never`, refusing the un-cast route at type-check time.
 
 test("a narrower image state union fails ImageEventKind in tsc itself", () => {
-  const result = transpile(`
+  const result = check(`
 import { Cmd, asciiBytes } from "@native-sdk/core";
 export type NarrowState = "loaded" | "rejected" | "decode_failed";
 export interface Model { readonly w: number; readonly errs: number; }
@@ -10226,7 +10171,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 });
 
 test("the exact fifteen-member image state union still satisfies ImageEventKind in tsc", () => {
-  const result = transpile(`
+  const result = check(`
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${imageMsg}
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
@@ -10239,7 +10184,7 @@ ${imageTail}
 });
 
 test("a narrower audio state union fails AudioEventKind in tsc itself", () => {
-  const result = transpile(`
+  const result = check(`
 import { Cmd, asciiBytes } from "@native-sdk/core";
 export type NarrowState = "loaded" | "position" | "completed" | "failed" | "rejected";
 export interface Model { readonly pos: number; readonly errs: number; }
@@ -10261,7 +10206,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 });
 
 test("the exact six-member audio state union still satisfies AudioEventKind in tsc", () => {
-  const result = transpile(`
+  const result = check(`
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${streamMsg}
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
@@ -10274,7 +10219,7 @@ ${streamTail}
 });
 
 test("a narrower video state union fails VideoEventKind in tsc itself", () => {
-  const result = transpile(`
+  const result = check(`
 import { Cmd, asciiBytes } from "@native-sdk/core";
 export type NarrowState = "loaded" | "position" | "completed" | "failed";
 export interface Model { readonly pos: number; readonly errs: number; }
@@ -10296,7 +10241,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 });
 
 test("the exact five-member video state union still satisfies VideoEventKind in tsc", () => {
-  const result = transpile(`
+  const result = check(`
 import { Cmd, asciiBytes } from "@native-sdk/core";
 ${videoMsg}
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {

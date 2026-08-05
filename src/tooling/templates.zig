@@ -184,8 +184,9 @@ fn slimGitignore() []const u8 {
 
 /// The TypeScript-core zero-config scaffold - the `native init` default:
 /// core.ts (logic), app.native (view), app.zon (manifest). ZERO Zig in the
-/// tree; the build graph detects src/core.ts, transpiles it, and stages the
-/// generated wiring outside the app on every build.
+/// tree; the build graph detects src/core.ts, compiles it through the
+/// external core compiler, and stages the generated wiring outside the app
+/// on every build.
 ///
 /// The tree also carries the EDITOR surface: package.json + tsconfig.json,
 /// so stock editor TypeScript resolves `@native-sdk/core` with full
@@ -260,7 +261,7 @@ fn writeTsEditorSurface(allocator: std.mem.Allocator, io: std.Io, app_dir: std.I
 /// The app's package.json: name + the pinned `@native-sdk/core` dependency,
 /// nothing else. It exists for editors and versioning only — the `native`
 /// verbs never read it (tree detection keys on src/core.ts; the build
-/// transpiles against the SDK checkout) — and the pin is exact so the
+/// checks and compiles against the SDK checkout) — and the pin is exact so the
 /// post-publish `npm install` resolves the same content the CLI
 /// materialized.
 fn tsPackageJson(allocator: std.mem.Allocator, names: TemplateNames, sdk_version: []const u8) ![]const u8 {
@@ -339,7 +340,7 @@ fn tsGitignore() []const u8 {
 fn tsCoreStarter() []const u8 {
     return
     \\// The app core: Model, Msg, update, and the pure helpers they call -
-    \\// plain TypeScript in the app-core subset, compiled to native Zig at
+    \\// plain TypeScript in the app-core subset, compiled to native code at
     \\// build time (no JS runtime ships in the binary). The view lives in
     \\// app.native and binds this model by its own field names exactly as
     \\// written here (`tickCount` binds as `{tickCount}`).
@@ -384,9 +385,12 @@ fn tsCoreStarter() []const u8 {
     \\export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     \\  switch (msg.kind) {
     \\    case "increment":
-    \\      return { ...model, count: model.count + 1 };
+    \\      // Bounded on purpose: integer model fields carry a compile-time
+    \\      // range proof, and the literal comparison is what makes `+ 1`
+    \\      // provable.
+    \\      return { ...model, count: model.count < 1000000 ? model.count + 1 : model.count };
     \\    case "decrement":
-    \\      return { ...model, count: model.count - 1 };
+    \\      return { ...model, count: model.count > -1000000 ? model.count - 1 : model.count };
     \\    case "reset":
     \\      return { ...model, count: 0, tickCount: 0 };
     \\    case "toggle_ticking":
@@ -398,7 +402,7 @@ fn tsCoreStarter() []const u8 {
     \\    case "stamped":
     \\      return { ...model, stampedMs: msg.at };
     \\    case "tick":
-    \\      return { ...model, tickCount: model.tickCount + 1 };
+    \\      return { ...model, tickCount: model.tickCount < 1000000 ? model.tickCount + 1 : model.tickCount };
     \\  }
     \\}
     \\
@@ -499,8 +503,9 @@ fn tsSlimReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 
         \\
         \\## Requirements
         \\
-        \\Node.js 22.15+ (on the 23 line: 23.5+) on PATH (the TypeScript-to-native
-        \\transpiler runs at build time; your shipped binary carries none of it).
+        \\Node.js 22.15+ (on the 23 line: 23.5+) on PATH (the TypeScript frontend
+        \\and the core compiler run at build time; your shipped binary carries
+        \\none of it).
         \\
     );
     return out.toOwnedSlice(allocator);
@@ -1150,9 +1155,9 @@ fn nativeReadme(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
 /// real binary and asserts on the accessibility snapshot. The generated
 /// file belongs to the user, like everything init writes. A TypeScript
 /// core adds the node tier to both jobs: setup-node plus one `npm ci` in
-/// the fetched SDK's packages/core, because the @native-sdk/core
-/// transpiler runs under node at build time and needs its own installed
-/// dependency there — the same install `native build`'s teaching names.
+/// the fetched SDK's packages/core, because the @native-sdk/core frontend
+/// and the external core compiler run at build time and arrive with that
+/// one install — the same install `native build`'s teaching names.
 fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_path: []const u8, core: CoreTemplate) ![]const u8 {
     const node_setup =
         \\      - uses: actions/setup-node@v4
@@ -1160,11 +1165,11 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\          node-version: 22
         \\
     ;
-    const transpiler_install =
-        \\      - name: Install the core transpiler dependency
+    const compiler_install =
+        \\      - name: Install the core compiler dependency
         \\        # src/core.ts compiles to native code at build time: the
-        \\        # @native-sdk/core transpiler runs under node from the SDK
-        \\        # dependency and needs its dependency installed there once.
+        \\        # @native-sdk/core frontend and the external core compiler
+        \\        # run from the SDK dependency and arrive with one install.
         \\        run: npm ci --prefix "$NATIVE_SDK_PATH/packages/core"
         \\
     ;
@@ -1213,7 +1218,7 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\          fi
         \\
     );
-    if (core == .ts) try out.appendSlice(allocator, transpiler_install);
+    if (core == .ts) try out.appendSlice(allocator, compiler_install);
     try out.appendSlice(allocator,
         \\      - run: zig build test -Dplatform=null
         \\
@@ -1242,7 +1247,7 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
         \\          fi
         \\
     );
-    if (core == .ts) try out.appendSlice(allocator, transpiler_install);
+    if (core == .ts) try out.appendSlice(allocator, compiler_install);
     try out.appendSlice(allocator,
         \\      - name: Build the Native SDK CLI
         \\        run: cd "$NATIVE_SDK_PATH" && zig build
@@ -4173,8 +4178,8 @@ test "writeDefaultApp --full ts-core emits a CI workflow with the node tier" {
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "xvfb-run -a ./zig-out/bin/my-app &") != null);
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "git clone --depth 1 https://github.com/vercel-labs/native.git \"$NATIVE_SDK_PATH\"") != null);
     // Plus the node tier the TS build needs: node on PATH and the
-    // transpiler's own install inside the fetched SDK's packages/core,
-    // in BOTH jobs (each builds the app, so each transpiles the core).
+    // frontend + compiler install inside the fetched SDK's packages/core,
+    // in BOTH jobs (each builds the app, so each compiles the core).
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "actions/setup-node@v4") != null);
     const npm_ci = "npm ci --prefix \"$NATIVE_SDK_PATH/packages/core\"";
     const first = std.mem.indexOf(u8, ci_yaml_text, npm_ci).?;

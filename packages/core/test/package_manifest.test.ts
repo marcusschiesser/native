@@ -13,11 +13,11 @@
 //   - the exports map resolves ".", "./text", and "./events" to the shipped
 //     TS sources,
 //     with a `types` condition, so tsc's bundler resolution types both;
-//   - exactly one runtime dependency — the external core compiler at the
-//     exact release the repository pins (tests/compiled-core/
-//     core_compiler_pin) — and no bin: the compiler resolves from this
-//     package's own node_modules for the opt-in external lane, and the
-//     transpiler still runs from the SDK checkout with its dev install.
+//   - exactly one runtime dependency — the external core compiler,
+//     exact-pinned (this manifest is the ONE place the pin lives) — and
+//     no bin: every TypeScript-core build resolves the compiler from
+//     this package's own node_modules, and the frontend (checker +
+//     contract) still runs from the SDK checkout with its dev install.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -74,14 +74,13 @@ test("exports resolve ., ./text, and ./events to shipped sources, types included
 });
 
 test("the one runtime dependency is the exact-pinned external core compiler", () => {
-  // One dependency, exactly the release the repository's compiled-core
-  // pin names: the opt-in external lane resolves the compiler from this
-  // package's own node_modules, and an exact pin is what makes the
-  // profile's release-pinned fence table trustworthy. No bin joins it —
+  // One dependency, exact-pinned: every TypeScript-core build resolves
+  // the compiler from this package's own node_modules, and an exact pin
+  // is what makes the profile's release-pinned fence table trustworthy
+  // (this manifest is the one place the pin lives). No bin joins it —
   // installing the package must never put a toolchain on a consumer's
   // PATH.
-  const pinPath = path.join(pkg, "..", "..", "tests", "compiled-core", "core_compiler_pin");
-  const pin = fs.readFileSync(pinPath, "utf8").trim();
+  const pin = manifest.dependencies?.scriptc;
   assert.match(pin, /^\d+\.\d+\.\d+$/);
   assert.deepEqual(manifest.dependencies, { scriptc: pin });
 });

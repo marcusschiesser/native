@@ -1,13 +1,17 @@
 #!/bin/sh
 # Build one ts-core fixture's compiled-core archive + contract sidecar
-# with an external core toolchain (library mode), staging everything the
+# with the external core compiler (library mode), staging everything the
 # compile needs into a scratch tree:
 #
-#   NATIVE_SDK_CORE_COMPILER="<toolchain command>" \
-#     tests/compiled-core/build_core.sh <fixture> <workdir>
+#   tests/compiled-core/build_core.sh <fixture> <workdir>
 #
 #   <fixture>: ai-chat | soundboard | system-monitor | host-fixture | markup
 #   <workdir>: scratch directory (created; contents replaced)
+#
+# The compiler resolves from the SDK's own exact-pinned dependency
+# (packages/core/node_modules — `npm ci` there installs it);
+# NATIVE_SDK_CORE_COMPILER overrides with any toolchain command, still
+# held to the pin.
 #
 # The stage carries: the AUTHOR'S core sources verbatim except for
 # import-specifier resolution (the "@native-sdk/core*" bare specifiers
@@ -15,7 +19,7 @@
 # compiles its module graph from files, not package resolution), and the
 # GENERATED compile entry + compiler profile from the staged contract
 # artifacts (`zig build stage-core-contracts` emits both from the
-# fixture's extracted contract sidecar — corewire's --facade and
+# fixture's frontend-emitted contract sidecar — corewire's --facade and
 # --profile projections).
 #
 # Outputs in <workdir>: lib<name>.a, core.contract.json, and a
@@ -25,14 +29,26 @@ set -eu
 
 fixture="${1:?usage: build_core.sh <fixture> <workdir>}"
 work="${2:?usage: build_core.sh <fixture> <workdir>}"
-compiler="${NATIVE_SDK_CORE_COMPILER:?set NATIVE_SDK_CORE_COMPILER to the external core toolchain command}"
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 
-# The profile's determinism-fence table is RELEASE-PINNED DATA (see tools/corewire/emit_profile.zig): its ids resolve against one toolchain release's surface manifest, so the supplied command must BE that release. tests/compiled-core/core_compiler_pin is the one place the pin lives — bump it there and everything downstream follows.
-pin="$(cat "$repo/tests/compiled-core/core_compiler_pin")"
+if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
+  compiler="$NATIVE_SDK_CORE_COMPILER"
+elif [ -f "$repo/packages/core/node_modules/scriptc/dist/main.js" ]; then
+  compiler="node $repo/packages/core/node_modules/scriptc/dist/main.js"
+else
+  echo "the external core compiler is not installed — run \`npm ci --prefix $repo/packages/core\` (or point NATIVE_SDK_CORE_COMPILER at the pinned release's command)" >&2
+  exit 2
+fi
+
+# The profile's determinism-fence table is RELEASE-PINNED DATA (see tools/corewire/emit_profile.zig): its ids resolve against one toolchain release's surface manifest, so the supplied command must BE that release. packages/core/package.json's dependencies.scriptc is the ONE place the pin lives — bump it there and everything downstream follows.
+pin="$(sed -n 's/.*"scriptc": *"\([0-9][0-9.]*\)".*/\1/p' "$repo/packages/core/package.json")"
+if [ -z "$pin" ]; then
+  echo "packages/core/package.json carries no exact scriptc pin — the SDK tree is broken; reinstall or re-clone it" >&2
+  exit 2
+fi
 reported="$($compiler -v)"
 if [ "$reported" != "$pin" ]; then
-  echo "external core toolchain reports version $reported, but the profile's fence table is pinned to $pin (tests/compiled-core/core_compiler_pin) — supply that release, or bump the pin when the fence table has been re-verified against the new release's surface manifest" >&2
+  echo "external core toolchain reports version $reported, but the profile's fence table is pinned to $pin (packages/core/package.json) — supply that release, or bump the pin when the fence table has been re-verified against the new release's surface manifest" >&2
   exit 2
 fi
 
@@ -84,8 +100,7 @@ mkdir -p "$work/sdk"
 #   2. readonly-array erasure — `readonly T[]` (ReadonlyArray) sits
 #      outside the toolchain's sidecar type vocabulary today, so the
 #      TYPE-LEVEL readonly is erased on staged copies (`T[]` projects);
-#      values and behavior are untouched, and the paired battery holds
-#      the result byte-identical to the transpiler lane;
+#      values and behavior are untouched;
 #   3. Bytes-alias folding — the corpus's `type Bytes = Uint8Array`
 #      alias is tabled (not folded) by the toolchain's sidecar emitter
 #      and a tabled scalar alias refuses, so staged copies spell
@@ -122,8 +137,7 @@ for sdk_file in text.ts events.ts; do
 done
 # The stage's @native-sdk/core is the static restatement: the reference
 # module's factory VALUES verbatim, inside the toolchain's static
-# surface (no overloads, no generic value instantiation). The paired
-# battery holds every produced byte to the transpiler lane. The
+# surface (no overloads, no generic value instantiation). The
 # reference module's byte-text ambient surface also stays out: no
 # fixture calls it, and its Uint8Array augmentation collides with the
 # toolchain's own node ambient typings.

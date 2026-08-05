@@ -7,7 +7,7 @@ Native SDK is the complete toolkit for building beautiful native desktop applica
 ## Prerequisites
 
 - macOS 11 or newer, Linux, or Windows
-- Node.js 22.15+ (on the 23 line: 23.5+) for the default TypeScript scaffold — the TypeScript-to-native transpiler and the core dev loop run under it at build and dev time; the binary you ship carries no JS runtime. A Zig-core app (`--template zig-core`) does not need node.
+- Node.js 22.15+ (on the 23 line: 23.5+) for the default TypeScript scaffold — the TypeScript frontend (the checker) and the core dev loop run under it at build and dev time, and the external core compiler that builds the checked core to native code ships as an exact-pinned dependency of the CLI; the binary you ship carries no JS runtime. A Zig-core app (`--template zig-core`) does not need node.
 
 ## Get the CLI
 
@@ -65,7 +65,7 @@ This scaffolds a native-rendered app — and nothing else. There are no build fi
   </tbody>
 </table>
 
-Editor support is stock tsc — no extension, no plugin. `package.json` and `tsconfig.json` exist for editors and versioning only, and `node_modules/@native-sdk/core` is a CLI-managed copy of the SDK package: materialized at init, kept fresh by `native check`/`dev`/`build`, and replaced transparently by `npm install` once the package is published to npm. None of it is build truth — builds transpile against the SDK the CLI ships with and never read node_modules; delete it and every `native` verb still works.
+Editor support is stock tsc — no extension, no plugin. `package.json` and `tsconfig.json` exist for editors and versioning only, and `node_modules/@native-sdk/core` is a CLI-managed copy of the SDK package: materialized at init, kept fresh by `native check`/`dev`/`build`, and replaced transparently by `npm install` once the package is published to npm. None of it is build truth — builds check and compile against the SDK the CLI ships with and never read node_modules; delete it and every `native` verb still works.
 
 There is no Zig in this tree and no language flag anywhere: the build detects `src/core.ts` and wires everything (`package.json` is not a language marker). Prefer to write the core in Zig? `native init my_app --template zig-core` scaffolds the same app with `src/main.zig` (plus generated full-loop tests in `src/tests.zig`) — the tree is the truth, and the build detects whichever core it carries. Zig is the language the whole toolkit is built in, and a Zig core is first-class by choice, not a fallback. Prefer to own `build.zig` from day one? Add `--full` to either template.
 
@@ -239,7 +239,7 @@ That is the whole loop: the model holds state, messages describe what happened, 
 
 ## Edit while it runs
 
-`src/app.native` is embedded into the binary and watched while `native dev` runs — `native dev` runs a Debug build by default, which is what arms the hot-reload watcher. Edit it — change a label, add a button — and the window updates within a couple of seconds without losing the count. Parse failures keep the last good view on screen.
+`src/app.native` is embedded into the binary and watched while `native dev` runs — `native dev` runs a Debug build by default, which is what arms the hot-reload watcher. Edit it — change a label, add a button — and the window updates within a couple of seconds without losing the count. Parse failures keep the last good view on screen. A `src/core.ts` edit is different: the core rebuilds through the external core compiler and the app restarts — a few seconds per rebuild, not sub-second — so for fast logic iteration use `native dev --core` (next section).
 
 ## The fastest loop: the core under node
 
@@ -280,7 +280,7 @@ info[manifest.valid]: app.zon is valid
 checked 1 markup file, app.zon and src/core.ts (subset checker clean)
 ```
 
-The first line is honest about what a fresh tree can check: once a build has produced the model contract, the markup pass also verifies bindings, iterables, and message tags against the core's emitted `Model`/`Msg`. Markup errors come back with `file:line:column` and a teaching message (`native markup lsp` provides the same diagnostics plus completion and hover in your editor). `native test` runs the app's test suite; the Zig template additionally scaffolds `src/tests.zig` — full-loop UI tests that click buttons through typed dispatch, headless, on any machine. See [Testing](/docs/testing) for the full tiers, including driving the live app from the outside with [automation](/docs/automation).
+The first line is honest about what a fresh tree can check: once a build has produced the model contract, the markup pass also verifies bindings, iterables, and message tags against the core's `Model`/`Msg`. Markup errors come back with `file:line:column` and a teaching message (`native markup lsp` provides the same diagnostics plus completion and hover in your editor). `native test` runs the app's test suite; the Zig template additionally scaffolds `src/tests.zig` — full-loop UI tests that click buttons through typed dispatch, headless, on any machine. See [Testing](/docs/testing) for the full tiers, including driving the live app from the outside with [automation](/docs/automation).
 
 ## Build a release binary
 

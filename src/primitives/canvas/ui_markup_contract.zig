@@ -1332,6 +1332,17 @@ const Checker = struct {
                 }
                 continue;
             }
+            if (std.mem.eql(u8, attribute.name, "images")) {
+                const expression = markup.parseAttrExpression(attribute.value) orelse continue;
+                if (expression != .binding) continue;
+                const item = try self.resolveIterable(node, expression.binding, markup.markdown_images_message);
+                if (!std.mem.eql(u8, item.type_name, "ResolvedImage") and
+                    !std.mem.endsWith(u8, item.type_name, ".ResolvedImage"))
+                {
+                    return self.failAttr(node, attribute, markup.markdown_images_message);
+                }
+                continue;
+            }
             if (std.mem.eql(u8, attribute.name, "issue-link-base")) {
                 const kind = try self.attrKind(node, attribute, attribute.value);
                 try self.requireAttrKind(node, attribute, kind, &.{.string}, markup.markdown_issue_link_base_message);

@@ -169,6 +169,7 @@ pub const if_attr_docs = [_]Doc{
 
 pub const markdown_attr_docs = [_]Doc{
     .{ .name = "source", .doc = "markdown: one {binding} producing the markdown text (a []const u8 field or fn; arena fns work). Required." },
+    .{ .name = "images", .doc = "markdown: one {binding} producing []const canvas.markdown.ResolvedImage (arena fns work). Each mapping pairs a leading image source with an image id already loaded and registered through fx.loadImage plus its decoded dimensions; views never perform image I/O." },
     .{ .name = "on-link", .doc = "markdown: bare Msg tag dispatched on link press; its payload is the URL ([]const u8 variant)." },
     .{ .name = "on-details", .doc = "markdown: bare Msg tag dispatched on a <details> summary press; its payload is the block index (usize variant)." },
     .{ .name = "details-expanded", .doc = "markdown: {binding} naming a []const bool iterable of expanded flags, in details-block document order." },

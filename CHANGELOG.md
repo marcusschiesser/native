@@ -2,9 +2,51 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.7.2
+## 0.8.1
 
 <!-- release:start -->
+
+### New Features
+
+- **Safe presentational HTML in Markdown**: Markdown now lowers common GitHub-style inline and block HTML into native widgets, including links, details, aligned containers, and caller-resolved images, while scripts, styles, forms, embeds, event attributes, and unsupported or malformed markup remain inert literal text (#280).
+
+### Bug Fixes
+
+- **Reliable resolved Markdown images**: image discovery now follows renderable block starts, canonicalizes entity-encoded URLs consistently between loading and lookup, preserves aspect ratios within declared bounds, honors centered and end alignment, and ignores images inside comments, unsupported markup, code, and preformatted blocks (#281).
+- **Payload-free HTTP write requests**: `Effects.fetch` now sends an explicit zero-length body for POST, PUT, and PATCH requests without a payload, preventing debug-build crashes and emitting the required `Content-Length: 0` header (#277).
+
+### Improvements
+
+- **History-driven release notes**: release preparation now builds the complete changelog entry and contributor list from the commits since the previous release, replacing the per-change fragment workflow (#278).
+
+### Contributors
+
+- @ctate
+- @Railly
+
+<!-- release:end -->
+
+## 0.8.0
+
+### New Features
+
+- **Compiler-truth checks for TypeScript cores**: `native check` now ends with the pinned external core compiler's analyzer over the entry with the shipped SDK declarations mapped, so check and build share one compiler verdict. Type errors the frontend's own line would miss fail with the compiler's diagnostics verbatim; an analyzer that cannot reach a verdict defers to the build instead of wedging check.
+- **TypeScript cores compile through the external core compiler**: the frontend checks `src/core.ts` and emits its contract sidecar, the exact-pinned compiler builds a native archive, and the app links a generated mirror over it — no JS runtime in the binary, nothing to configure.
+- **The TS-to-Zig transpiled lane is removed** (a deliberate pre-1.0 break): `core_compiler = "transpiler"` in app.zon (and `-Dcore-compiler=transpiler`) is refused with a teaching, and `native check` runs the checker and contract only — no emitted Zig lands under `.native/check/`.
+- **The compiler is a package dependency**: it ships exact-pinned with the SDK's `packages/core` (repo checkouts install it with `npm ci` there; an npm-installed CLI carries it automatically).
+- **The core dev loop is restart-shaped**: markup hot reload and the instant `native dev --core` node loop are unchanged, and a core edit now pays a native compile measured in seconds on rebuild.
+- **TypeScript cores are desktop-only for now**: a mobile target with `src/core.ts` is taught before lane selection (the external toolchain does not target mobile yet); Zig and markup cores stay fully supported on mobile.
+- **Shipped type declarations**: `@native-sdk/core` now ships generated `sdk/*.d.ts` declaration files beside its TypeScript sources, so external tooling can resolve the SDK's types without compiling them.
+
+### Improvements
+
+- **Leaner TypeScript toolchain installs**: the unused `@typescript/typescript6` compatibility wrapper is no longer a dependency of `@native-sdk/cli` or `@native-sdk/core`. The frontend already imports its compiler directly through the exactly pinned `@typescript/old` alias, while consumer trees carrying their own wrapper remain unaffected.
+
+### Contributors
+
+- @ctate
+
+## 0.7.2
 
 ### New Features
 
@@ -29,8 +71,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 
 - @ctate
 - @oshtz
-
-<!-- release:end -->
 
 ## 0.7.1
 

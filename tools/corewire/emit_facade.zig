@@ -1092,7 +1092,21 @@ const FacadeEmitter = struct {
             \\// init_returns_cmd/update_returns_cmd flags.
             \\
         );
-        if (self.sidecar.init_returns_cmd) {
+        if (self.sidecar.init_returns_cmd and self.sidecar.init_returns_bare) {
+            self.use(.cmd_encoder);
+            // The mixed author shape (`Model | [Model, Cmd<Msg>]`, the
+            // documented idiom): the wrapper narrows — a tuple carries
+            // its command, a bare model the empty command buffer.
+            try self.print(
+                \\
+                \\export function init(): [{s}, Uint8Array] {{
+                \\  const out = nscfInitialModel();
+                \\  if (Array.isArray(out)) return [out[0], nscfCmdBytes(out[1])];
+                \\  return [out, new Uint8Array(0)];
+                \\}}
+                \\
+            , .{self.sidecar.model});
+        } else if (self.sidecar.init_returns_cmd) {
             self.use(.cmd_encoder);
             try self.print(
                 \\
@@ -1140,7 +1154,21 @@ const FacadeEmitter = struct {
             \\}
             \\
         );
-        if (self.sidecar.update_returns_cmd) {
+        if (self.sidecar.update_returns_cmd and self.sidecar.update_returns_bare) {
+            self.use(.cmd_encoder);
+            // The mixed author shape (`Model | [Model, Cmd<Msg>]`, the
+            // documented idiom): the wrapper narrows — a tuple carries
+            // its command, a bare model the empty command buffer.
+            try self.print(
+                \\
+                \\export function coreUpdate(model: {s}, msg: {s}): [{s}, Uint8Array] {{
+                \\  const out = nscfUpdate(model, msg);
+                \\  if (Array.isArray(out)) return [out[0], nscfCmdBytes(out[1])];
+                \\  return [out, new Uint8Array(0)];
+                \\}}
+                \\
+            , .{ self.sidecar.model, self.sidecar.msg.name, self.sidecar.model });
+        } else if (self.sidecar.update_returns_cmd) {
             self.use(.cmd_encoder);
             try self.print(
                 \\
@@ -1184,7 +1212,9 @@ const FacadeEmitter = struct {
             \\
         );
         if (self.sidecar.init_returns_cmd) {
-            try self.print("const nscfBootPair = nscfInitialModel();\nlet nscfCommitted: {s} = nscfBootPair[0];\n", .{self.sidecar.model});
+            // Boot through the normalized init wrapper: the boot pair's
+            // command already rides as bytes.
+            try self.print("const nscfBootPair = init();\nlet nscfCommitted: {s} = nscfBootPair[0];\n", .{self.sidecar.model});
         } else {
             try self.print("let nscfCommitted: {s} = nscfInitialModel();\n", .{self.sidecar.model});
         }
@@ -1218,7 +1248,7 @@ const FacadeEmitter = struct {
             try self.raw(
                 \\
                 \\export function boot_cmd(): Uint8Array {
-                \\  return nscfCmdBytes(nscfBootPair[1]);
+                \\  return nscfBootPair[1];
                 \\}
                 \\
             );
@@ -2627,6 +2657,12 @@ const FacadeEmitter = struct {
             \\    case "pty_kill":
             \\      nscfWU8(sink, 0x1c);
             \\      nscfWShortText(sink, cmd.key);
+            \\      return;
+            \\    case "show_notification":
+            \\      nscfWU8(sink, 0x1d);
+            \\      nscfWBytes(sink, cmd.title);
+            \\      nscfWBytes(sink, cmd.subtitle);
+            \\      nscfWBytes(sink, cmd.body);
             \\      return;
             \\    case "batch":
             \\      for (let i = 0; i < cmd.cmds.length; i++) {

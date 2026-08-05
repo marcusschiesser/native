@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Drive one external core compile for the opt-in build lane: verify the
-// toolchain release against the SDK's exact pin, run a library-mode
-// build over the staged tree, and normalize the outputs to the paths
-// the build graph declared. The compile itself co-emits the archive's
+// Drive one external core compile — the lane every TypeScript core
+// builds through: verify the toolchain release against the SDK's exact
+// pin, run a library-mode build over the staged tree, and normalize
+// the outputs to the paths the build graph declared. The compile itself co-emits the archive's
 // OWN contract sidecar — the document the mirror module generates from,
 // so the boot identity fence always pairs an archive with its own
 // compile (the fixture driver, tests/compiled-core/build_core.sh, holds
@@ -58,8 +58,7 @@ const argv0 = args.compiler
 // tools/corewire/emit_profile.zig): its ids resolve against one
 // toolchain release's surface manifest, so the supplied command must BE
 // the release the SDK pins — the exact-pinned dependency of
-// packages/core (the one place the product lane's pin lives, held equal
-// to tests/compiled-core/core_compiler_pin by the package's own tests).
+// packages/core (the ONE place the pin lives).
 const manifest = JSON.parse(fs.readFileSync(args.manifest, "utf8"));
 const pin = manifest.dependencies?.scriptc;
 if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) {

@@ -189,6 +189,7 @@ pub const SaveDialogOptions = platform.SaveDialogOptions;
 pub const MessageDialogStyle = platform.MessageDialogStyle;
 pub const MessageDialogResult = platform.MessageDialogResult;
 pub const MessageDialogOptions = platform.MessageDialogOptions;
+pub const NotificationOptions = platform.NotificationOptions;
 pub const TrayItemId = platform.TrayItemId;
 pub const TrayOptions = platform.TrayOptions;
 pub const TrayMenuItem = platform.TrayMenuItem;

@@ -1,6 +1,6 @@
-# App Model and Runtime
+# Lower-level App and Runtime
 
-Use this when editing `src/main.zig`, `src/runner.zig`, lifecycle behavior, runtime setup, or tests.
+This is the advanced Zig/runtime layer underneath the default TypeScript + Native markup app. Use it when an existing project owns `src/main.zig` or `src/runner.zig`, or when the task explicitly requires lifecycle behavior, custom runtime setup, embedding, or WebView sources. Do not add this layer for ordinary `src/core.ts` app behavior.
 
 ## `App`
 

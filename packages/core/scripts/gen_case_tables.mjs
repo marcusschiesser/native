@@ -1,16 +1,15 @@
-// Generate the Unicode simple case-mapping tables — the ONE source both
-// runtimes case-map from. Reads UnicodeData.txt (fields 12/13: Simple
-// Uppercase / Simple Lowercase — never SpecialCasing, never locale rules)
-// and emits the same compressed range tables twice:
+// Generate the Unicode simple case-mapping tables the node devhost
+// polyfill case-maps from. Reads UnicodeData.txt (fields 12/13: Simple
+// Uppercase / Simple Lowercase — never SpecialCasing, never locale
+// rules) and emits the compressed range tables:
 //
-//   rt/rt.zig            the marked GENERATED CASE TABLES region (in place)
-//   src/text_tables.ts   the whole file (the node-polyfill mirror)
+//   src/text_tables.ts   the whole file (the node-polyfill source)
 //
 // Byte-honest contract: simple case mapping is code point -> code point,
 // locale-independent, with no special casing (no ß -> SS, no context
 // forms), so `.toUpperCase()`/`.toLowerCase()` on core bytes produce the
-// same bytes under node (polyfilled from these tables) and native (rt
-// helpers over the same tables) by construction.
+// same bytes under node as in the compiled core (the e2e batteries pin
+// the native side against real archives).
 //
 // Compression: consecutive mapped code points sharing one delta collapse
 // into {lo, count, stride, delta} runs (stride 2 covers the alternating
@@ -88,21 +87,6 @@ function compressRanges(entries) {
   return out;
 }
 
-function hex(cp) {
-  return "0x" + cp.toString(16).toUpperCase();
-}
-
-function zigRanges(name, ranges) {
-  const lines = [`const ${name} = [_]CaseRange{`];
-  for (const r of ranges) {
-    lines.push(
-      `    .{ .lo = ${hex(r.lo)}, .count = ${r.count}, .stride2 = ${r.stride === 2}, .delta = ${r.delta} },`,
-    );
-  }
-  lines.push("};");
-  return lines.join("\n");
-}
-
 function tsRanges(name, ranges) {
   // Flat quadruples [lo, count, stride, delta] — the same runs, same order.
   const parts = ranges.map((r) => `${r.lo}, ${r.count}, ${r.stride}, ${r.delta}`);
@@ -111,9 +95,6 @@ function tsRanges(name, ranges) {
   lines.push("];");
   return lines.join("\n");
 }
-
-const BEGIN = "// ---- BEGIN GENERATED CASE TABLES";
-const END = "// ---- END GENERATED CASE TABLES";
 
 const text = await loadUnicodeData();
 const upper = compressRanges(collectMappings(text, 12));
@@ -128,34 +109,12 @@ const header = (comment) =>
     `${comment} ${upper.length} + ${lower.length} ranges, 8 bytes each = ${tableBytes} bytes of table data.`,
   ].join("\n");
 
-// ---------------------------------------------------------------- rt.zig
-
-const rtPath = path.join(pkg, "rt", "rt.zig");
-const rt = fs.readFileSync(rtPath, "utf8");
-const begin = rt.indexOf(BEGIN);
-const endMark = rt.indexOf(END);
-if (begin < 0 || endMark < 0) throw new Error(`rt.zig is missing the ${BEGIN} / ${END} markers`);
-const end = rt.indexOf("\n", endMark); // splice through the END marker's whole line
-const zigBlock = [
-  `${BEGIN} ----`,
-  header("//"),
-  "",
-  zigRanges("simple_upper_ranges", upper),
-  "",
-  zigRanges("simple_lower_ranges", lower),
-  `${END} ----`,
-].join("\n");
-fs.writeFileSync(rtPath, rt.slice(0, begin) + zigBlock + rt.slice(end));
-console.log(`wrote ${rtPath} (${upper.length} upper + ${lower.length} lower ranges, ${tableBytes} bytes)`);
-
 // ---------------------------------------------------------- text_tables.ts
 
 const tsPath = path.join(pkg, "src", "text_tables.ts");
 const tsOut = [
-  "// The node-side mirror of rt.zig's simple case-mapping tables: the same",
-  "// generator emits both from one UnicodeData.txt read, so the devhost",
-  "// polyfill (text_polyfill.ts) and the native rt helpers case-map from",
-  "// byte-identical data by construction.",
+  "// The devhost polyfill's simple case-mapping tables (text_polyfill.ts),",
+  "// generated from one UnicodeData.txt read.",
   header("//"),
   "",
   "// Flat quadruples [lo, count, stride, delta]: `count` mapped code points",
