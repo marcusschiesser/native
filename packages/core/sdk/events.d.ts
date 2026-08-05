@@ -66,7 +66,7 @@ export interface AudioEvent {
 export type AudioCaptureState = "started" | "readable" | "stopped" | "failed" | "rejected";
 export type AudioCaptureReason = "none" | "invalid_options" | "permission_missing" | "permission_required" | "already_recording" | "device_not_found" | "device_disconnected" | "capture_failed" | "no_audio" | "consumer_too_slow" | "discarded" | "unsupported";
 export interface AudioCaptureEvent {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly state: AudioCaptureState;
     readonly reason: AudioCaptureReason;
     readonly sampleRate: number;
@@ -78,7 +78,7 @@ export interface AudioCaptureEvent {
 export type AudioCaptureReadState = "chunk" | "empty" | "ended" | "rejected";
 export type AudioCaptureReadReason = "none" | "invalid_options" | "not_recording" | "read_in_progress";
 export interface AudioCaptureReadEvent {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly state: AudioCaptureReadState;
     readonly reason: AudioCaptureReadReason;
     readonly sequence: number;
@@ -96,7 +96,7 @@ export interface AudioCaptureReadEvent {
 }
 export type MicrophoneDeviceState = "device" | "completed" | "failed" | "rejected";
 export interface MicrophoneDeviceEvent {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly state: MicrophoneDeviceState;
     readonly id: Uint8Array;
     readonly name: Uint8Array;
@@ -107,7 +107,7 @@ export interface MicrophoneDeviceEvent {
 export type AudioCaptureAccessSource = "system_audio" | "microphone";
 export type AudioCaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
 export interface AudioCaptureAccessEvent {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly source: AudioCaptureAccessSource;
     readonly status: AudioCaptureAccessStatus;
     readonly restartRequired: boolean;

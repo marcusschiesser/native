@@ -29,7 +29,7 @@ export type AudioEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof
 export type AudioCaptureState = "started" | "readable" | "stopped" | "failed" | "rejected";
 export type AudioCaptureReason = "none" | "invalid_options" | "permission_missing" | "permission_required" | "already_recording" | "device_not_found" | "device_disconnected" | "capture_failed" | "no_audio" | "consumer_too_slow" | "discarded" | "unsupported";
 export type AudioCaptureEventArm = {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly state: AudioCaptureState;
     readonly reason: AudioCaptureReason;
     readonly sampleRate: number;
@@ -42,7 +42,7 @@ export type AudioCaptureEventKind<M extends Msgish> = M extends Msgish ? [Exclud
 export type AudioCaptureReadState = "chunk" | "empty" | "ended" | "rejected";
 export type AudioCaptureReadReason = "none" | "invalid_options" | "not_recording" | "read_in_progress";
 export type AudioCaptureReadEventArm = {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly state: AudioCaptureReadState;
     readonly reason: AudioCaptureReadReason;
     readonly sequence: number;
@@ -58,7 +58,7 @@ export type AudioCaptureReadEventArm = {
 export type AudioCaptureReadEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureReadEventArm] ? [keyof AudioCaptureReadEventArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & AudioCaptureReadEventArm ? M["kind"] : never : never : never : never;
 export type MicrophoneDeviceState = "device" | "completed" | "failed" | "rejected";
 export type MicrophoneDeviceEventArm = {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly state: MicrophoneDeviceState;
     readonly id: Uint8Array;
     readonly name: Uint8Array;
@@ -71,7 +71,7 @@ export type AudioCaptureAccessSource = "system_audio" | "microphone";
 export type AudioCaptureAccessAction = "status" | "request";
 export type AudioCaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
 export type AudioCaptureAccessEventArm = {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly source: AudioCaptureAccessSource;
     readonly status: AudioCaptureAccessStatus;
     readonly restartRequired: boolean;

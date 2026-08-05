@@ -4,13 +4,7 @@ Native SDK exposes system audio and microphone input as a reliable, pull-based P
 
 The SDK does not mix the sources or create a file. Combined capture returns separate, timestamp-aligned system and microphone bytes so the app can meter, transcribe, encode, mix, route, or store them itself.
 
-Check feature support before presenting capture UI:
-
-```zig
-const can_system = runtime.supports(.system_audio_capture);
-const can_microphone = runtime.supports(.microphone_capture);
-const can_list_microphones = runtime.supports(.microphone_device_enumeration);
-```
+Treat an `unavailable` access result or an `unsupported` capture rejection as a host capability boundary. The canonical TypeScript example declares macOS as its only platform and surfaces those results in its permission and capture status UI.
 
 <table>
   <thead>
@@ -85,7 +79,49 @@ Reliability means accepted frames are never overwritten or silently dropped. The
 
 Consumed chunks and runtime-generated readiness events participate in session journal/replay. Recording PCM-heavy sessions therefore grows the session journal in proportion to the audio the app reads.
 
-## Zig effects
+## TypeScript app flow
+
+The TypeScript bytecode ABI uses fixed event records and byte slices:
+
+```ts
+const start = Cmd.audioCaptureStart(
+  "meeting",
+  {
+    systemAudio: true,
+    microphone: "default",
+    sampleRate: 48000,
+    channels: 2,
+    excludeCurrentProcessAudio: true,
+    bufferDurationMs: 5000,
+  },
+  { event: "capture_event" },
+);
+
+const read = Cmd.audioCaptureRead("meeting", 4800, { event: "capture_read" });
+const stop = Cmd.audioCaptureStop("meeting");
+const discard = Cmd.audioCaptureDiscard("meeting");
+```
+
+The lifecycle arm contains `key`, `state`, `reason`, `sampleRate`, `channels`, `availableFrames`, `capacityFrames`, and `framesProduced`. The read arm contains `key`, `state`, `reason`, `sequence`, `frameOffset`, `frames`, `systemPcm`, `microphonePcm`, `systemGapFrames`, `microphoneGapFrames`, `remainingFrames`, and `endOfStream`. Commands take string keys, while keyed event records expose `key: Uint8Array` at the native bytecode boundary.
+
+Query both permissions and enumerate microphones from the boot command returned by `initialModel`. The canonical [`examples/audio-capture`](https://github.com/vercel-labs/native/tree/main/examples/audio-capture) app also demonstrates system-only, microphone-only, and combined starts; immediate s16le peak calculation; coalesced reads; stop-and-drain; and visible restart guidance.
+
+Keep at most one read outstanding. A second returns `rejected` / `read_in_progress`; a wrong or retired key returns `not_recording`. After a `stopped` or `failed` lifecycle event, continue reading until `endOfStream` is true.
+
+## Microphone devices
+
+```ts
+const devices = Cmd.microphoneDevices("microphones", { event: "microphone_device" });
+const changes = Sub.microphoneDevicesChanged("microphones_changed");
+```
+
+Listing emits zero or more `device` records with `id`, `name`, `isDefault`, `index`, and `total`, followed by exactly one `completed`, `failed`, or `rejected` record. The change subscription is invalidation only: list again to obtain a fresh snapshot.
+
+`default` resolves when capture starts and remains pinned for that session. A byte ID selects that exact `AVCaptureDevice.uniqueID`. A missing or disconnected selected device fails instead of silently switching.
+
+## Zig extension API
+
+TypeScript is the default for apps. The underlying Zig effects remain available for Native SDK implementation work, toolkit extensions, and existing Zig-core apps:
 
 ```zig
 pub const Msg = union(enum) {
@@ -132,43 +168,5 @@ pub fn update(model: *Model, msg: Msg, fx: *Fx) void {
     }
 }
 ```
-
-Keep at most one read outstanding. A second returns `rejected` / `read_in_progress`; a wrong or retired key returns `not_recording`.
-
-## TypeScript commands
-
-The TypeScript bytecode ABI uses fixed event records and byte slices:
-
-```ts
-const start = Cmd.audioCaptureStart(
-  "meeting",
-  {
-    systemAudio: true,
-    microphone: "default",
-    sampleRate: 48000,
-    channels: 2,
-    excludeCurrentProcessAudio: true,
-    bufferDurationMs: 5000,
-  },
-  { event: "capture_event" },
-);
-
-const read = Cmd.audioCaptureRead("meeting", 4800, { event: "capture_read" });
-const stop = Cmd.audioCaptureStop("meeting");
-const discard = Cmd.audioCaptureDiscard("meeting");
-```
-
-The lifecycle arm contains `key`, `state`, `reason`, `sampleRate`, `channels`, `availableFrames`, `capacityFrames`, and `framesProduced`. The read arm contains `key`, `state`, `reason`, `sequence`, `frameOffset`, `frames`, `systemPcm`, `microphonePcm`, `systemGapFrames`, `microphoneGapFrames`, `remainingFrames`, and `endOfStream`.
-
-## Microphone devices
-
-```ts
-const devices = Cmd.microphoneDevices("microphones", { event: "microphone_device" });
-const changes = Sub.microphoneDevicesChanged("microphones_changed");
-```
-
-Listing emits zero or more `device` records with `id`, `name`, `isDefault`, `index`, and `total`, followed by exactly one `completed`, `failed`, or `rejected` record. The change subscription is invalidation only: list again to obtain a fresh snapshot.
-
-`default` resolves when capture starts and remains pinned for that session. A byte ID selects that exact `AVCaptureDevice.uniqueID`. A missing or disconnected selected device fails instead of silently switching.
 
 Only one capture can be active per app. A duplicate start is rejected with `already_recording` without disturbing the live stream. File containers, WAV headers, mixing policy, encoders, level smoothing, source gains, video capture, and per-application filtering belong in application code or follow-up extensions. A first-party file-writer extension is tracked separately in [vercel-labs/native#263](https://github.com/vercel-labs/native/issues/263).
