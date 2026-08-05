@@ -396,7 +396,7 @@ pub const audio_key_base: u64 = 0x5453_4155_0000_0000;
 pub const audio_capture_key_base: u64 = 0x5453_4143_0000_0000;
 pub const audio_capture_read_key_base: u64 = 0x5453_4152_0000_0000;
 pub const microphone_devices_key_base: u64 = 0x5453_4D44_0000_0000;
-pub const audio_capture_access_key_base: u64 = 0x5453_4141_0000_0000;
+pub const capture_access_key_base: u64 = 0x5453_4141_0000_0000;
 
 /// The engine-key namespace of the bridge's single video playback
 /// channel ("TSVI") — the audio key's twin, except the low byte
@@ -645,7 +645,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var audio_capture_entries: [runtime_effects.max_effects]RoutedStreamEntry = @splat(.{});
         var audio_capture_read_entries: [runtime_effects.max_effects]AudioCaptureReadEntry = @splat(.{});
         var microphone_device_entries: [runtime_effects.max_effects]RoutedStreamEntry = @splat(.{});
-        var audio_capture_access_entries: [runtime_effects.max_effects]RoutedStreamEntry = @splat(.{});
+        var capture_access_entries: [runtime_effects.max_effects]RoutedStreamEntry = @splat(.{});
         var microphone_devices_changed_tag: ?u8 = null;
         var video_entry: VideoEntry = .{};
         var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
@@ -724,7 +724,7 @@ pub fn TsCoreHost(comptime core: type) type {
             audio_capture_entries = @splat(.{});
             audio_capture_read_entries = @splat(.{});
             microphone_device_entries = @splat(.{});
-            audio_capture_access_entries = @splat(.{});
+            capture_access_entries = @splat(.{});
             microphone_devices_changed_tag = null;
             video_entry = .{};
             images = @splat(.{});
@@ -1311,19 +1311,19 @@ pub fn TsCoreHost(comptime core: type) type {
                             @panic("ts core host: more pending microphone device queries than the effects table can route");
                         fx.listMicrophoneDevices(.{ .key = microphone_devices_key_base + index, .on_event = microphoneDeviceEventMsg });
                     },
-                    // audio_capture_access [op][key][event][source][action]
+                    // capture_access [op][key][event][source][action]
                     0x21 => {
                         const key = takeShortBytes(cmd, &at);
                         const event_tag = takeByte(cmd, &at);
                         const source_byte = takeByte(cmd, &at);
                         const action_byte = takeByte(cmd, &at);
-                        const index = allocRoutedStreamEntry(&audio_capture_access_entries, key, event_tag) orelse
-                            @panic("ts core host: more pending audio access queries than the effects table can route");
-                        fx.audioCaptureAccess(.{
-                            .key = audio_capture_access_key_base + index,
+                        const index = allocRoutedStreamEntry(&capture_access_entries, key, event_tag) orelse
+                            @panic("ts core host: more pending capture access queries than the effects table can route");
+                        fx.captureAccess(.{
+                            .key = capture_access_key_base + index,
                             .source = if (source_byte == 1) .microphone else .system_audio,
                             .action = if (action_byte == 1) .request else .status,
-                            .on_event = audioCaptureAccessEventMsg,
+                            .on_event = captureAccessEventMsg,
                         });
                     },
                     // audio_capture_read [op][key][event][max frames u32]
@@ -1354,7 +1354,6 @@ pub fn TsCoreHost(comptime core: type) type {
                         for (&audio_capture_entries) |*entry| {
                             if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) {
                                 fx.discardAudioCapture();
-                                entry.used = false;
                                 break;
                             }
                         }
@@ -1648,6 +1647,11 @@ pub fn TsCoreHost(comptime core: type) type {
             const tag = entry.event_tag;
             const key = entry.wireKey();
             const msg = msgFromTagAudioCapture(tag, key, event);
+            // Discard queues its synthetic stopped/discarded lifecycle
+            // event after releasing the stream. Keep the route alive until
+            // that event is delivered so an earlier queued started/readable
+            // event cannot arrive against a prematurely retired entry.
+            if (event.state == .stopped and event.reason == .discarded) entry.used = false;
             return msg;
         }
 
@@ -1681,12 +1685,12 @@ pub fn TsCoreHost(comptime core: type) type {
             return msg;
         }
 
-        fn audioCaptureAccessEventMsg(event: runtime_effects.EffectAudioCaptureAccess) Msg {
-            if (event.key < audio_capture_access_key_base) @panic("ts core host: audio access event outside bridge namespace");
-            const index = event.key - audio_capture_access_key_base;
-            if (index >= audio_capture_access_entries.len or !audio_capture_access_entries[index].used) @panic("ts core host: audio access event has no routed command");
-            const entry = &audio_capture_access_entries[index];
-            const msg = msgFromTagAudioCaptureAccess(entry.event_tag, entry.wireKey(), event);
+        fn captureAccessEventMsg(event: runtime_effects.EffectCaptureAccess) Msg {
+            if (event.key < capture_access_key_base) @panic("ts core host: capture access event outside bridge namespace");
+            const index = event.key - capture_access_key_base;
+            if (index >= capture_access_entries.len or !capture_access_entries[index].used) @panic("ts core host: capture access event has no routed command");
+            const entry = &capture_access_entries[index];
+            const msg = msgFromTagCaptureAccess(entry.event_tag, entry.wireKey(), event);
             entry.used = false;
             return msg;
         }
@@ -2804,7 +2808,7 @@ pub fn TsCoreHost(comptime core: type) type {
             @panic("ts core host: microphone device event tag outside Msg union");
         }
 
-        fn audioCaptureAccessArmShape(comptime T: type) bool {
+        fn captureAccessArmShape(comptime T: type) bool {
             const info = @typeInfo(T);
             if (info != .@"struct" or info.@"struct".fields.len != 4) return false;
             var ok = true;
@@ -2820,9 +2824,9 @@ pub fn TsCoreHost(comptime core: type) type {
             return ok;
         }
 
-        fn msgFromTagAudioCaptureAccess(tag: u8, wire_key: []const u8, event: runtime_effects.EffectAudioCaptureAccess) Msg {
+        fn msgFromTagCaptureAccess(tag: u8, wire_key: []const u8, event: runtime_effects.EffectCaptureAccess) Msg {
             inline for (msg_arms, 0..) |arm, index| if (tag == index) {
-                if (comptime audioCaptureAccessArmShape(arm.type)) {
+                if (comptime captureAccessArmShape(arm.type)) {
                     var payload: arm.type = undefined;
                     inline for (@typeInfo(arm.type).@"struct".fields) |field| {
                         if (comptime std.mem.eql(u8, field.name, "key")) {
@@ -2837,9 +2841,9 @@ pub fn TsCoreHost(comptime core: type) type {
                     }
                     return @unionInit(Msg, arm.name, payload);
                 }
-                @panic("ts core host: invalid audio capture access event arm shape");
+                @panic("ts core host: invalid capture access event arm shape");
             };
-            @panic("ts core host: audio capture access event tag outside Msg union");
+            @panic("ts core host: capture access event tag outside Msg union");
         }
 
         /// Whether an arm payload struct is the video event record: the

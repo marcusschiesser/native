@@ -4002,7 +4002,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .microphone_device => |device_event| if (self.effects.takeMicrophoneDeviceMsg(device_event)) |msg| {
                     try self.dispatch(runtime, self.canvas_window_id, msg);
                 },
-                .audio_capture_access => |access_event| if (self.effects.takeAudioCaptureAccessMsg(access_event)) |msg| {
+                .capture_access => |access_event| if (self.effects.takeCaptureAccessMsg(access_event)) |msg| {
                     try self.dispatch(runtime, self.canvas_window_id, msg);
                 },
                 .microphone_devices_changed => if (self.effects.takeMicrophoneDevicesChangedMsg()) |msg| {

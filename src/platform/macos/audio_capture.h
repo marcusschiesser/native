@@ -52,7 +52,7 @@ int native_sdk_audio_capture_start(native_sdk_audio_capture_t *capture,
                                    void *frame_context, uint64_t frame_token);
 void native_sdk_audio_capture_stop(native_sdk_audio_capture_t *capture);
 void native_sdk_audio_capture_list_microphones(native_sdk_audio_capture_t *capture);
-void native_sdk_audio_capture_access(native_sdk_audio_capture_t *capture, int source, int action);
+void native_sdk_capture_access(native_sdk_audio_capture_t *capture, int source, int action);
 void native_sdk_audio_capture_observe_microphones(native_sdk_audio_capture_t *capture, int enabled);
 
 #endif

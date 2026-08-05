@@ -58,7 +58,7 @@ const AppKitEventKind = enum(c_int) {
     audio_capture = 23,
     microphone_device = 24,
     microphone_devices_changed = 25,
-    audio_capture_access = 26,
+    capture_access = 26,
 };
 
 const AppKitEvent = extern struct {
@@ -168,9 +168,9 @@ const AppKitEvent = extern struct {
     microphone_device_is_default: c_int,
     microphone_device_index: u32,
     microphone_device_total: u32,
-    audio_capture_access_source: c_int,
-    audio_capture_access_status: c_int,
-    audio_capture_restart_required: c_int,
+    capture_access_source: c_int,
+    capture_access_status: c_int,
+    capture_access_restart_required: c_int,
 };
 
 const AppKitCallback = *const fn (context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) void;
@@ -241,7 +241,7 @@ extern fn native_sdk_appkit_audio_set_volume(host: *AppKitHost, volume: f64) c_i
 extern fn native_sdk_appkit_audio_capture_start(host: *AppKitHost, system_audio: c_int, microphone_kind: c_int, microphone_id: [*]const u8, microphone_id_len: usize, sample_rate_hz: u32, channel_count: u8, exclude_current_process_audio: c_int, frame_push: AppKitAudioCaptureFramePush, frame_context: ?*anyopaque, frame_token: u64) c_int;
 extern fn native_sdk_appkit_audio_capture_stop(host: *AppKitHost) void;
 extern fn native_sdk_appkit_microphone_devices(host: *AppKitHost) void;
-extern fn native_sdk_appkit_audio_capture_access(host: *AppKitHost, source: c_int, action: c_int) void;
+extern fn native_sdk_appkit_capture_access(host: *AppKitHost, source: c_int, action: c_int) void;
 extern fn native_sdk_appkit_observe_microphone_devices(host: *AppKitHost, enabled: c_int) void;
 extern fn native_sdk_appkit_video_load(host: *AppKitHost, path: [*]const u8, path_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_load_url(host: *AppKitHost, url: [*]const u8, url_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
@@ -793,7 +793,7 @@ pub const MacPlatform = struct {
                 .audio_capture_start_fn = audioCaptureStart,
                 .audio_capture_stop_fn = audioCaptureStop,
                 .microphone_devices_fn = microphoneDevices,
-                .audio_capture_access_fn = audioCaptureAccess,
+                .capture_access_fn = captureAccess,
                 .microphone_devices_observe_fn = observeMicrophoneDevices,
                 .video_load_fn = videoLoad,
                 .video_load_url_fn = videoLoadUrl,
@@ -1071,10 +1071,10 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .total = event.microphone_device_total,
         } }),
         .microphone_devices_changed => state.emit(.microphone_devices_changed),
-        .audio_capture_access => state.emit(.{ .audio_capture_access = .{
-            .source = if (event.audio_capture_access_source == 1) .microphone else .system_audio,
-            .status = audioCaptureAccessStatusFromInt(event.audio_capture_access_status),
-            .restart_required = event.audio_capture_restart_required != 0,
+        .capture_access => state.emit(.{ .capture_access = .{
+            .source = if (event.capture_access_source == 1) .microphone else .system_audio,
+            .status = captureAccessStatusFromInt(event.capture_access_status),
+            .restart_required = event.capture_access_restart_required != 0,
         } }),
         .widget_accessibility_action => if (widgetAccessibilityActionFromInt(event.widget_action)) |action| {
             state.emit(.{ .widget_accessibility_action = .{
@@ -1167,7 +1167,7 @@ fn microphoneDeviceStateFromInt(value: c_int) platform_mod.MicrophoneDeviceEvent
     };
 }
 
-fn audioCaptureAccessStatusFromInt(value: c_int) platform_mod.AudioCaptureAccessStatus {
+fn captureAccessStatusFromInt(value: c_int) platform_mod.CaptureAccessStatus {
     return switch (value) {
         0 => .authorized,
         1 => .not_authorized,
@@ -1715,12 +1715,12 @@ fn microphoneDevices(context: ?*anyopaque) anyerror!void {
     native_sdk_appkit_microphone_devices(self.host);
 }
 
-fn audioCaptureAccess(context: ?*anyopaque, source: platform_mod.AudioCaptureAccessSource, action: platform_mod.AudioCaptureAccessAction) anyerror!void {
+fn captureAccess(context: ?*anyopaque, source: platform_mod.CaptureAccessSource, action: platform_mod.CaptureAccessAction) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (self.web_engine != .system or !isMacOS15OrNewer()) return error.UnsupportedService;
     const permission = if (source == .system_audio) security.permission_system_audio else security.permission_microphone;
     if (!security.hasPermission(self.app_info.permissions, permission)) return error.PermissionMissing;
-    native_sdk_appkit_audio_capture_access(self.host, @intFromEnum(source), @intFromEnum(action));
+    native_sdk_appkit_capture_access(self.host, @intFromEnum(source), @intFromEnum(action));
 }
 
 fn observeMicrophoneDevices(context: ?*anyopaque, enabled: bool) anyerror!void {

@@ -104,11 +104,11 @@ export interface MicrophoneDeviceEvent {
     readonly index: number;
     readonly total: number;
 }
-export type AudioCaptureAccessSource = "system_audio" | "microphone";
-export type AudioCaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
-export interface AudioCaptureAccessEvent {
+export type CaptureAccessSource = "system_audio" | "microphone";
+export type CaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
+export interface CaptureAccessEvent {
     readonly key: Uint8Array;
-    readonly source: AudioCaptureAccessSource;
-    readonly status: AudioCaptureAccessStatus;
+    readonly source: CaptureAccessSource;
+    readonly status: CaptureAccessStatus;
     readonly restartRequired: boolean;
 }

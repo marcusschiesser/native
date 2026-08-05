@@ -2712,7 +2712,7 @@ const FacadeEmitter = struct {
             \\      nscfWShortText(sink, cmd.key);
             \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
             \\      return;
-            \\    case "audio_capture_access":
+            \\    case "capture_access":
             \\      nscfWU8(sink, 0x21);
             \\      nscfWShortText(sink, cmd.key);
             \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));

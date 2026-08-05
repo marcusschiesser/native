@@ -651,7 +651,7 @@ const AudioCaptureSessionModel = struct {
     end_of_stream: bool = false,
     microphone_records: u32 = 0,
     microphone_listing_completed: bool = false,
-    microphone_access: effects_mod.EffectAudioCaptureAccessStatus = .unavailable,
+    microphone_access: effects_mod.EffectCaptureAccessStatus = .unavailable,
     restart_required: bool = false,
     device_changes: u32 = 0,
 };
@@ -665,7 +665,7 @@ const AudioCaptureSessionMsg = union(enum) {
     capture: effects_mod.EffectAudioCapture,
     capture_read: effects_mod.EffectAudioCaptureRead,
     microphone: effects_mod.EffectMicrophoneDevice,
-    access: effects_mod.EffectAudioCaptureAccess,
+    access: effects_mod.EffectCaptureAccess,
     microphones_changed,
 };
 
@@ -693,10 +693,10 @@ fn audioCaptureSessionUpdate(model: *AudioCaptureSessionModel, msg: AudioCapture
             .key = 42,
             .on_event = AudioCaptureSessionApp.Effects.microphoneDeviceMsg(.microphone),
         }),
-        .check_access => fx.audioCaptureAccess(.{
+        .check_access => fx.captureAccess(.{
             .key = 43,
             .source = .microphone,
-            .on_event = AudioCaptureSessionApp.Effects.audioCaptureAccessMsg(.access),
+            .on_event = AudioCaptureSessionApp.Effects.captureAccessMsg(.access),
         }),
         .capture => |event| {
             model.capture_events += 1;
@@ -793,7 +793,7 @@ test "audio capture device and access platform events replay without hardware si
     try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.takeAudioCaptureStarted().?);
     const system_pcm: [3_840]u8 = @splat(0x21);
     const microphone_pcm: [3_840]u8 = @splat(0x42);
-    try std.testing.expectEqual(platform.AudioCapturePushResult.accepted, record_harness.null_platform.pushAudioCapturePair(.{
+    try std.testing.expectEqual(platform.AudioCapturePushResult.accepted, record_harness.null_platform.pushCapturedAudioChunk(.{
         .frame_offset = 0,
         .frame_count = 960,
         .system_pcm = &system_pcm,
@@ -815,7 +815,7 @@ test "audio capture device and access platform events replay without hardware si
     try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.microphoneDeviceEvent(2));
 
     try record_harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.access", .window_id = 1 } });
-    try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.takeAudioCaptureAccess().?);
+    try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.takeCaptureAccess().?);
     try record_harness.runtime.dispatchPlatformEvent(app, record_harness.null_platform.microphoneDevicesChanged().?);
     try record_harness.runtime.dispatchPlatformEvent(app, .frame_requested);
 
@@ -838,7 +838,7 @@ test "audio capture device and access platform events replay without hardware si
     try std.testing.expect(recorded_model.end_of_stream);
     try std.testing.expectEqual(@as(u32, 2), recorded_model.microphone_records);
     try std.testing.expect(recorded_model.microphone_listing_completed);
-    try std.testing.expectEqual(effects_mod.EffectAudioCaptureAccessStatus.authorized, recorded_model.microphone_access);
+    try std.testing.expectEqual(effects_mod.EffectCaptureAccessStatus.authorized, recorded_model.microphone_access);
     try std.testing.expectEqual(@as(u32, 1), recorded_model.device_changes);
 
     const replay_harness = try core.TestHarness().create(gpa, .{ .size = geometry.SizeF.init(400, 300) });

@@ -660,9 +660,9 @@ pub const EffectAudioSource = enum(u8) {
 pub const EffectAudioCaptureState = platform.AudioCaptureEventState;
 pub const EffectAudioCaptureReason = platform.AudioCaptureEventReason;
 pub const EffectMicrophoneDeviceState = platform.MicrophoneDeviceEventState;
-pub const EffectAudioCaptureAccessSource = platform.AudioCaptureAccessSource;
-pub const EffectAudioCaptureAccessAction = platform.AudioCaptureAccessAction;
-pub const EffectAudioCaptureAccessStatus = platform.AudioCaptureAccessStatus;
+pub const EffectCaptureAccessSource = platform.CaptureAccessSource;
+pub const EffectCaptureAccessAction = platform.CaptureAccessAction;
+pub const EffectCaptureAccessStatus = platform.CaptureAccessStatus;
 
 pub const EffectAudioCapture = struct {
     key: u64,
@@ -719,10 +719,10 @@ pub const EffectMicrophoneDevice = struct {
     total: u32 = 0,
 };
 
-pub const EffectAudioCaptureAccess = struct {
+pub const EffectCaptureAccess = struct {
     key: u64,
-    source: EffectAudioCaptureAccessSource,
-    status: EffectAudioCaptureAccessStatus,
+    source: EffectCaptureAccessSource,
+    status: EffectCaptureAccessStatus,
     restart_required: bool = false,
 };
 
@@ -2452,29 +2452,29 @@ const AudioCaptureRing = struct {
         if (first < byte_count) @memcpy(destination[first..byte_count], storage[0 .. byte_count - first]);
     }
 
-    fn push(ring: *AudioCaptureRing, pair: platform.AudioCaptureFramePair) platform.AudioCapturePushResult {
-        const frames: usize = pair.frame_count;
-        if (frames == 0 or pair.system_gap_frames > pair.frame_count or pair.microphone_gap_frames > pair.frame_count) return .closed;
-        if (pair.frame_offset != ring.frames_produced) return .closed;
+    fn push(ring: *AudioCaptureRing, chunk: platform.CapturedAudioChunk) platform.AudioCapturePushResult {
+        const frames: usize = chunk.frame_count;
+        if (frames == 0 or chunk.system_gap_frames > chunk.frame_count or chunk.microphone_gap_frames > chunk.frame_count) return .closed;
+        if (chunk.frame_offset != ring.frames_produced) return .closed;
         const expected_bytes = frames * ring.bytes_per_frame;
-        if ((ring.system_audio and pair.system_pcm.len != expected_bytes) or
-            (!ring.system_audio and pair.system_pcm.len != 0) or
-            (ring.microphone_audio and pair.microphone_pcm.len != expected_bytes) or
-            (!ring.microphone_audio and pair.microphone_pcm.len != 0)) return .closed;
+        if ((ring.system_audio and chunk.system_pcm.len != expected_bytes) or
+            (!ring.system_audio and chunk.system_pcm.len != 0) or
+            (ring.microphone_audio and chunk.microphone_pcm.len != expected_bytes) or
+            (!ring.microphone_audio and chunk.microphone_pcm.len != 0)) return .closed;
         if (frames > ring.capacity_frames - ring.available_frames or ring.block_len == ring.blocks.len) return .full;
         const tail_frame = (ring.frame_head + ring.available_frames) % ring.capacity_frames;
-        copyInto(ring.system_pcm, tail_frame, ring.bytes_per_frame, pair.system_pcm);
-        copyInto(ring.microphone_pcm, tail_frame, ring.bytes_per_frame, pair.microphone_pcm);
+        copyInto(ring.system_pcm, tail_frame, ring.bytes_per_frame, chunk.system_pcm);
+        copyInto(ring.microphone_pcm, tail_frame, ring.bytes_per_frame, chunk.microphone_pcm);
         const block_index = (ring.block_head + ring.block_len) % ring.blocks.len;
         ring.blocks[block_index] = .{
-            .frame_offset = pair.frame_offset,
-            .frame_count = pair.frame_count,
-            .system_gap_frames = pair.system_gap_frames,
-            .microphone_gap_frames = pair.microphone_gap_frames,
+            .frame_offset = chunk.frame_offset,
+            .frame_count = chunk.frame_count,
+            .system_gap_frames = chunk.system_gap_frames,
+            .microphone_gap_frames = chunk.microphone_gap_frames,
         };
         ring.block_len += 1;
         ring.available_frames += frames;
-        ring.frames_produced = @max(ring.frames_produced, pair.frame_offset + pair.frame_count);
+        ring.frames_produced = @max(ring.frames_produced, chunk.frame_offset + chunk.frame_count);
         return .accepted;
     }
 
@@ -2522,7 +2522,7 @@ const AudioCaptureShared = struct {
     wake: ChannelWake = .{},
 };
 
-fn audioCapturePush(context: *anyopaque, generation: u64, pair: platform.AudioCaptureFramePair) platform.AudioCapturePushResult {
+fn audioCapturePush(context: *anyopaque, generation: u64, chunk: platform.CapturedAudioChunk) platform.AudioCapturePushResult {
     const shared: *AudioCaptureShared = @ptrCast(@alignCast(context));
     var wake = false;
     shared.mutex.lock();
@@ -2532,7 +2532,7 @@ fn audioCapturePush(context: *anyopaque, generation: u64, pair: platform.AudioCa
     }
     const ring = shared.ring.?;
     const was_empty = ring.available_frames == 0;
-    const result = ring.push(pair);
+    const result = ring.push(chunk);
     if (result == .full) shared.accepting = false;
     if (result == .accepted and was_empty and !shared.readable_pending) {
         if (shared.owner) |owner| {
@@ -2700,7 +2700,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const AudioCaptureMsgFn = *const fn (event: EffectAudioCapture) Msg;
         pub const AudioCaptureReadMsgFn = *const fn (event: EffectAudioCaptureRead) Msg;
         pub const MicrophoneDeviceMsgFn = *const fn (event: EffectMicrophoneDevice) Msg;
-        pub const AudioCaptureAccessMsgFn = *const fn (event: EffectAudioCaptureAccess) Msg;
+        pub const CaptureAccessMsgFn = *const fn (event: EffectCaptureAccess) Msg;
         pub const MicrophoneDevicesChangedMsgFn = *const fn () Msg;
         pub const VideoMsgFn = *const fn (event: EffectVideo) Msg;
         pub const HostMsgFn = *const fn (result: EffectHostResult) Msg;
@@ -2815,9 +2815,9 @@ pub fn Effects(comptime Msg: type) type {
             }.make;
         }
 
-        pub fn audioCaptureAccessMsg(comptime tag: std.meta.Tag(Msg)) AudioCaptureAccessMsgFn {
+        pub fn captureAccessMsg(comptime tag: std.meta.Tag(Msg)) CaptureAccessMsgFn {
             return struct {
-                fn make(event: EffectAudioCaptureAccess) Msg {
+                fn make(event: EffectCaptureAccess) Msg {
                     return @unionInit(Msg, @tagName(tag), event);
                 }
             }.make;
@@ -3160,11 +3160,11 @@ pub fn Effects(comptime Msg: type) type {
             on_event: ?MicrophoneDeviceMsgFn = null,
         };
 
-        pub const AudioCaptureAccessOptions = struct {
+        pub const CaptureAccessOptions = struct {
             key: u64,
-            source: EffectAudioCaptureAccessSource,
-            action: EffectAudioCaptureAccessAction = .status,
-            on_event: ?AudioCaptureAccessMsgFn = null,
+            source: EffectCaptureAccessSource,
+            action: EffectCaptureAccessAction = .status,
+            on_event: ?CaptureAccessMsgFn = null,
         };
 
         pub const LoadImageOptions = struct {
@@ -3531,10 +3531,10 @@ pub fn Effects(comptime Msg: type) type {
             on_event: ?MicrophoneDeviceMsgFn = null,
         };
 
-        const AudioCaptureAccessQuery = struct {
+        const CaptureAccessQuery = struct {
             active: bool = false,
             key: u64 = 0,
-            on_event: ?AudioCaptureAccessMsgFn = null,
+            on_event: ?CaptureAccessMsgFn = null,
         };
 
         /// Playback state the automation snapshot exposes: honest — it
@@ -3844,7 +3844,7 @@ pub fn Effects(comptime Msg: type) type {
             audio_capture: struct { event: EffectAudioCapture, capture_fn: ?AudioCaptureMsgFn },
             audio_capture_read: struct { event: EffectAudioCaptureRead, read_fn: ?AudioCaptureReadMsgFn },
             microphone_device: struct { event: EffectMicrophoneDevice, device_fn: ?MicrophoneDeviceMsgFn },
-            audio_capture_access: struct { event: EffectAudioCaptureAccess, access_fn: ?AudioCaptureAccessMsgFn },
+            capture_access: struct { event: EffectCaptureAccess, access_fn: ?CaptureAccessMsgFn },
             microphone_devices_changed: struct { changed_fn: ?MicrophoneDevicesChangedMsgFn },
             /// The audio entry's shape for the video channel, staged
             /// in the non-lossy `pending_videos` (see `PendingVideo`)
@@ -3903,7 +3903,7 @@ pub fn Effects(comptime Msg: type) type {
                     // EffectAudio carries no drop counter either; the
                     // next position tick supersedes a lost one.
                     .audio => {},
-                    .audio_capture, .audio_capture_read, .microphone_device, .audio_capture_access, .microphone_devices_changed => {},
+                    .audio_capture, .audio_capture_read, .microphone_device, .capture_access, .microphone_devices_changed => {},
                     // Video events never enter the ring (they stage in
                     // the non-lossy `pending_videos`): a loop-side
                     // `.rejected`/`.failed` is its load's only
@@ -3943,7 +3943,7 @@ pub fn Effects(comptime Msg: type) type {
                     .clipboard => |entry| entry.result.dropped_before,
                     .timer => 0,
                     .audio => 0,
-                    .audio_capture, .audio_capture_read, .microphone_device, .audio_capture_access, .microphone_devices_changed => 0,
+                    .audio_capture, .audio_capture_read, .microphone_device, .capture_access, .microphone_devices_changed => 0,
                     .pty => 0,
                     .host => 0,
                     // Never in the ring; see `addDropped`.
@@ -4674,7 +4674,7 @@ pub fn Effects(comptime Msg: type) type {
         audio_capture_pending_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
         audio_capture_journal_scratch: [max_audio_capture_read_pcm_bytes * 2]u8 = undefined,
         microphone_device_query: MicrophoneDeviceQuery = .{},
-        audio_capture_access_query: AudioCaptureAccessQuery = .{},
+        capture_access_query: CaptureAccessQuery = .{},
         microphone_devices_changed_fn: ?MicrophoneDevicesChangedMsgFn = null,
         /// The single video playback channel (see `VideoChannel`).
         video: VideoChannel = .{},
@@ -4925,7 +4925,7 @@ pub fn Effects(comptime Msg: type) type {
                 }
             }
             self.microphone_device_query = .{};
-            self.audio_capture_access_query = .{};
+            self.capture_access_query = .{};
             self.microphone_devices_changed_fn = null;
             // Stop the platform video player (best effort), release the
             // media-surface claim, and clear the channel.
@@ -8536,28 +8536,28 @@ pub fn Effects(comptime Msg: type) type {
             services.microphoneDevices() catch |err| return self.finishMicrophoneDevices(if (err == error.UnsupportedService or err == error.PermissionMissing) .rejected else .failed);
         }
 
-        pub fn audioCaptureAccess(self: *Self, options: AudioCaptureAccessOptions) void {
-            if (self.audio_capture_access_query.active) {
-                self.deliverPending(.{ .audio_capture_access = .{ .event = .{
+        pub fn captureAccess(self: *Self, options: CaptureAccessOptions) void {
+            if (self.capture_access_query.active) {
+                self.deliverPending(.{ .capture_access = .{ .event = .{
                     .key = options.key,
                     .source = options.source,
                     .status = .unavailable,
                 }, .access_fn = options.on_event } });
                 return;
             }
-            self.audio_capture_access_query = .{ .active = true, .key = options.key, .on_event = options.on_event };
+            self.capture_access_query = .{ .active = true, .key = options.key, .on_event = options.on_event };
             if (self.executor == .fake) {
                 if (self.replay) return;
-                self.deliverPending(.{ .audio_capture_access = .{ .event = .{
+                self.deliverPending(.{ .capture_access = .{ .event = .{
                     .key = options.key,
                     .source = options.source,
                     .status = .authorized,
                 }, .access_fn = options.on_event } });
-                self.audio_capture_access_query = .{};
+                self.capture_access_query = .{};
                 return;
             }
-            const services = self.services orelse return self.failAudioCaptureAccess(options.source);
-            services.audioCaptureAccess(options.source, options.action) catch return self.failAudioCaptureAccess(options.source);
+            const services = self.services orelse return self.failCaptureAccess(options.source);
+            services.captureAccess(options.source, options.action) catch return self.failCaptureAccess(options.source);
         }
 
         pub fn observeMicrophoneDevices(self: *Self, on_change: ?MicrophoneDevicesChangedMsgFn) void {
@@ -8631,10 +8631,10 @@ pub fn Effects(comptime Msg: type) type {
 
         /// Deterministic fake-executor producer seam used by tests. Replay
         /// never calls it: journaled read records are the only PCM source.
-        pub fn feedAudioCaptureFrames(self: *Self, pair: platform.AudioCaptureFramePair) platform.AudioCapturePushResult {
+        pub fn feedAudioCaptureFrames(self: *Self, chunk: platform.CapturedAudioChunk) platform.AudioCapturePushResult {
             if (!self.audio_capture.active or self.replay) return .closed;
             const shared = self.audio_capture_shared orelse return .closed;
-            const result = audioCapturePush(shared, self.audio_capture.generation, pair);
+            const result = audioCapturePush(shared, self.audio_capture.generation, chunk);
             if (result == .full) {
                 self.audio_capture.accepting = false;
                 self.audio_capture.sealed = true;
@@ -8740,11 +8740,11 @@ pub fn Effects(comptime Msg: type) type {
             });
         }
 
-        pub fn takeAudioCaptureAccessMsg(self: *Self, event: platform.AudioCaptureAccessEvent) ?Msg {
-            if (!self.audio_capture_access_query.active) return null;
-            const key = self.audio_capture_access_query.key;
-            const event_fn = self.audio_capture_access_query.on_event;
-            self.audio_capture_access_query = .{};
+        pub fn takeCaptureAccessMsg(self: *Self, event: platform.CaptureAccessEvent) ?Msg {
+            if (!self.capture_access_query.active) return null;
+            const key = self.capture_access_query.key;
+            const event_fn = self.capture_access_query.on_event;
+            self.capture_access_query = .{};
             const map = event_fn orelse return null;
             return map(.{ .key = key, .source = event.source, .status = event.status, .restart_required = event.restart_required });
         }
@@ -9950,7 +9950,7 @@ pub fn Effects(comptime Msg: type) type {
                             const event_fn = entry.device_fn orelse continue;
                             return event_fn(entry.event);
                         },
-                        .audio_capture_access => |entry| {
+                        .capture_access => |entry| {
                             const event_fn = entry.access_fn orelse continue;
                             return event_fn(entry.event);
                         },
@@ -12328,11 +12328,11 @@ pub fn Effects(comptime Msg: type) type {
             }, .device_fn = on_event } });
         }
 
-        fn failAudioCaptureAccess(self: *Self, source: EffectAudioCaptureAccessSource) void {
-            const key = self.audio_capture_access_query.key;
-            const on_event = self.audio_capture_access_query.on_event;
-            self.audio_capture_access_query = .{};
-            self.deliverPending(.{ .audio_capture_access = .{ .event = .{
+        fn failCaptureAccess(self: *Self, source: EffectCaptureAccessSource) void {
+            const key = self.capture_access_query.key;
+            const on_event = self.capture_access_query.on_event;
+            self.capture_access_query = .{};
+            self.deliverPending(.{ .capture_access = .{ .event = .{
                 .key = key,
                 .source = source,
                 .status = .unavailable,

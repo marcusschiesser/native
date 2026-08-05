@@ -152,8 +152,8 @@ export function initialModel(): [Model, Command<Msg>] {
   return [
     emptyModel(),
     Cmd.batch([
-      Cmd.audioCaptureAccess("mic-access", "microphone", "status", { event: "capture_access" }),
-      Cmd.audioCaptureAccess("system-access", "system_audio", "status", { event: "capture_access" }),
+      Cmd.captureAccess("mic-access", "microphone", "status", { event: "capture_access" }),
+      Cmd.captureAccess("system-access", "system_audio", "status", { event: "capture_access" }),
       Cmd.microphoneDevices("microphones", { event: "microphone_device" }),
     ]),
   ];
@@ -204,9 +204,9 @@ export function update(model: Model, msg: Msg): [Model, Command<Msg>] {
     case "microphones_changed":
       return [{ ...model, microphones: [], deviceListState: "loading" }, Cmd.microphoneDevices("microphones", { event: "microphone_device" })];
     case "request_microphone":
-      return [model, Cmd.audioCaptureAccess("mic-access", "microphone", "request", { event: "capture_access" })];
+      return [model, Cmd.captureAccess("mic-access", "microphone", "request", { event: "capture_access" })];
     case "request_system_audio":
-      return [model, Cmd.audioCaptureAccess("system-access", "system_audio", "request", { event: "capture_access" })];
+      return [model, Cmd.captureAccess("system-access", "system_audio", "request", { event: "capture_access" })];
     case "capture_event": {
       const terminal = msg.state === "stopped" || msg.state === "failed";
       const next: Model = {

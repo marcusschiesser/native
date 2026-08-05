@@ -102,9 +102,9 @@ export type AudioCaptureReason =
 export type AudioCaptureReadState = "chunk" | "empty" | "ended" | "rejected";
 export type AudioCaptureReadReason = "none" | "invalid_options" | "not_recording" | "read_in_progress";
 export type MicrophoneDeviceState = "device" | "completed" | "failed" | "rejected";
-export type AudioCaptureAccessSource = "system_audio" | "microphone";
-export type AudioCaptureAccessAction = "status" | "request";
-export type AudioCaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
+export type CaptureAccessSource = "system_audio" | "microphone";
+export type CaptureAccessAction = "status" | "request";
+export type CaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
 export type MicrophoneSelection = "none" | "default" | Uint8Array;
 
 export interface AudioCaptureOptions {
@@ -128,7 +128,7 @@ export interface MicrophoneDevicesRoute<M extends Msgish> {
   readonly event: M["kind"];
 }
 
-export interface AudioCaptureAccessRoute<M extends Msgish> {
+export interface CaptureAccessRoute<M extends Msgish> {
   readonly event: M["kind"];
 }
 
@@ -268,11 +268,11 @@ export type CmdData =
   | { readonly op: "audio_capture_discard"; readonly key: string }
   | { readonly op: "microphone_devices"; readonly key: string; readonly eventKind: string }
   | {
-      readonly op: "audio_capture_access";
+      readonly op: "capture_access";
       readonly key: string;
       readonly eventKind: string;
       readonly source: "system_audio" | "microphone";
-      readonly action: AudioCaptureAccessAction;
+      readonly action: CaptureAccessAction;
     }
   | {
       readonly op: "video_load";
@@ -523,8 +523,8 @@ export const Cmd = {
     return { op: "microphone_devices", key, eventKind: route.event };
   },
 
-  audioCaptureAccess(key: string, source: "system_audio" | "microphone", action: AudioCaptureAccessAction, route: { readonly event: string }): CmdData {
-    return { op: "audio_capture_access", key, eventKind: route.event, source, action };
+  captureAccess(key: string, source: "system_audio" | "microphone", action: CaptureAccessAction, route: { readonly event: string }): CmdData {
+    return { op: "capture_access", key, eventKind: route.event, source, action };
   },
 
   videoLoad(key: string, source: VideoSource, route: { readonly event: string }): CmdData {

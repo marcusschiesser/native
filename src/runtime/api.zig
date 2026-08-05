@@ -334,7 +334,7 @@ pub const Event = union(enum) {
     audio_capture: platform.AudioCaptureEvent,
     microphone_device: platform.MicrophoneDeviceEvent,
     microphone_devices_changed,
-    audio_capture_access: platform.AudioCaptureAccessEvent,
+    capture_access: platform.CaptureAccessEvent,
     /// A platform video player report (load acknowledgment with
     /// dimensions, position tick, completion, failure): routed back
     /// through `Effects.takeVideoMsg` into the app's `on_event` Msg.
@@ -373,7 +373,7 @@ pub const Event = union(enum) {
             .audio_capture => "audio_capture",
             .microphone_device => "microphone_device",
             .microphone_devices_changed => "microphone_devices_changed",
-            .audio_capture_access => "audio_capture_access",
+            .capture_access => "capture_access",
             .video => "video",
             .files_dropped => "files_dropped",
             .gpu_surface_frame => "gpu_surface_frame",

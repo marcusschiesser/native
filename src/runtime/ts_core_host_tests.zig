@@ -795,7 +795,7 @@ const mini_core = struct {
                 out.device_events = model.device_events + 1;
                 return .{ .model = out, .cmd = "" };
             },
-            .capture_access => return .{ .model = model, .cmd = cmdAudioCaptureAccess("access", 89, 1, 1) },
+            .capture_access => return .{ .model = model, .cmd = cmdCaptureAccess("access", 89, 1, 1) },
             .access_evt => |event| {
                 const out = frameCreate(model.*);
                 out.access_source = event.source;
@@ -1061,7 +1061,7 @@ const mini_core = struct {
         return out;
     }
 
-    fn cmdAudioCaptureAccess(key: []const u8, event_tag: u8, source: u8, action: u8) []const u8 {
+    fn cmdCaptureAccess(key: []const u8, event_tag: u8, source: u8, action: u8) []const u8 {
         const out = rt.frameAlloc(u8, 5 + key.len);
         out[0] = 0x21;
         out[1] = @intCast(key.len);
@@ -2103,6 +2103,28 @@ test "audio capture commands route paired PCM and retain the sealed stream until
     // The final read retires the retained bridge entry. Discarding the old
     // wire key is consequently an idempotent no-op.
     Host.dispatch(fx, .discard_capture);
+}
+
+test "audio capture discard keeps its route through queued lifecycle events" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    // Start queues `.started`; discard queues `.stopped/.discarded` behind
+    // it. Both must route before the discarded stream entry retires.
+    Host.dispatch(fx, .start_capture);
+    Host.dispatch(fx, .discard_capture);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureState.stopped, Host.model().capture_state);
+    try std.testing.expectEqual(mini_core.CaptureReason.discarded, Host.model().capture_reason);
+    try std.testing.expectEqual(@as(i64, 2), Host.model().capture_events);
+
+    // The discard terminal retires the route and releases the effects
+    // stream, so the same app key can start cleanly again.
+    Host.dispatch(fx, .start_capture);
+    Host.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureState.started, Host.model().capture_state);
+    try std.testing.expectEqual(@as(i64, 3), Host.model().capture_events);
 }
 
 test "microphone listing access and changed subscription route through the TS host" {

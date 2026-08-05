@@ -41,8 +41,8 @@ App Sandbox remains opt-in. A sandboxed app that captures microphone input must 
 Starting capture never opens a system prompt. Query or request access explicitly first:
 
 ```ts
-Cmd.audioCaptureAccess("mic-access", "microphone", "status", { event: "capture_access" });
-Cmd.audioCaptureAccess("system-access", "system_audio", "request", { event: "capture_access" });
+Cmd.captureAccess("mic-access", "microphone", "status", { event: "capture_access" });
+Cmd.captureAccess("system-access", "system_audio", "request", { event: "capture_access" });
 ```
 
 System audio reports the coarse ScreenCaptureKit truth: `authorized`, `not_authorized`, or `unavailable`. Microphone access additionally reports `not_determined`, `denied`, and `restricted`. A system-audio request can return `restartRequired: true`; tell the user to restart instead of assuming the running process can already capture.

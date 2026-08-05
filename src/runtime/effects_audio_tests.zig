@@ -625,7 +625,7 @@ const CaptureMsg = union(enum) {
     capture: effects_mod.EffectAudioCapture,
     read: effects_mod.EffectAudioCaptureRead,
     device: effects_mod.EffectMicrophoneDevice,
-    access: effects_mod.EffectAudioCaptureAccess,
+    access: effects_mod.EffectCaptureAccess,
     devices_changed,
 };
 const CaptureFx = effects_mod.Effects(CaptureMsg);
@@ -694,9 +694,9 @@ test "audio capture fake lists fixed device records and reports access" {
     try std.testing.expectEqual(effects_mod.EffectMicrophoneDeviceState.completed, completed.state);
     try std.testing.expectEqual(@as(u32, 2), completed.total);
 
-    fx.audioCaptureAccess(.{ .key = 8, .source = .microphone, .action = .status, .on_event = CaptureFx.audioCaptureAccessMsg(.access) });
+    fx.captureAccess(.{ .key = 8, .source = .microphone, .action = .status, .on_event = CaptureFx.captureAccessMsg(.access) });
     const access = fx.takeMsg().?.access;
-    try std.testing.expectEqual(effects_mod.EffectAudioCaptureAccessStatus.authorized, access.status);
+    try std.testing.expectEqual(effects_mod.EffectCaptureAccessStatus.authorized, access.status);
 
     fx.observeMicrophoneDevices(CaptureFx.microphoneDevicesChangedMsg(.devices_changed));
     try std.testing.expect(fx.takeMicrophoneDevicesChangedMsg().? == .devices_changed);
@@ -715,7 +715,7 @@ test "null audio capture resolves defaults rejects missing devices and preserves
     const started_event = null_platform.takeAudioCaptureStarted().?.audio_capture;
     try std.testing.expectEqual(effects_mod.EffectAudioCaptureState.started, fx.takeAudioCaptureMsg(started_event).?.capture.state);
     const microphone_pcm: [3_840]u8 = @splat(3);
-    try std.testing.expectEqual(platform.AudioCapturePushResult.accepted, null_platform.pushAudioCapturePair(.{
+    try std.testing.expectEqual(platform.AudioCapturePushResult.accepted, null_platform.pushCapturedAudioChunk(.{
         .frame_offset = 0,
         .frame_count = 960,
         .microphone_pcm = &microphone_pcm,
@@ -811,9 +811,9 @@ test "null microphone listing access and device-change observation are determini
     try std.testing.expectEqual(effects_mod.EffectMicrophoneDeviceState.completed, completed.state);
 
     null_platform.microphone_access = .denied;
-    fx.audioCaptureAccess(.{ .key = 21, .source = .microphone, .action = .status, .on_event = CaptureFx.audioCaptureAccessMsg(.access) });
-    const access_event = null_platform.takeAudioCaptureAccess().?.audio_capture_access;
-    try std.testing.expectEqual(effects_mod.EffectAudioCaptureAccessStatus.denied, fx.takeAudioCaptureAccessMsg(access_event).?.access.status);
+    fx.captureAccess(.{ .key = 21, .source = .microphone, .action = .status, .on_event = CaptureFx.captureAccessMsg(.access) });
+    const access_event = null_platform.takeCaptureAccess().?.capture_access;
+    try std.testing.expectEqual(effects_mod.EffectCaptureAccessStatus.denied, fx.takeCaptureAccessMsg(access_event).?.access.status);
 
     fx.observeMicrophoneDevices(CaptureFx.microphoneDevicesChangedMsg(.devices_changed));
     try std.testing.expect(null_platform.microphone_devices_observing);

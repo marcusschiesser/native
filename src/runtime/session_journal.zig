@@ -188,7 +188,7 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
             "audio_capture=" ++ layout_fingerprint.describe(platform.AudioCaptureEvent) ++ "\n" ++
             "microphone_device=" ++ layout_fingerprint.describe(platform.MicrophoneDeviceEvent) ++ "\n" ++
-            "audio_capture_access=" ++ layout_fingerprint.describe(platform.AudioCaptureAccessEvent) ++ "\n" ++
+            "capture_access=" ++ layout_fingerprint.describe(platform.CaptureAccessEvent) ++ "\n" ++
             "video=" ++ layout_fingerprint.describe(platform.VideoEvent) ++ "\n" ++
             "files_dropped=" ++ layout_fingerprint.describe(platform.FileDropEvent) ++ "\n" ++
             // gpu_surface_frame journals a deliberate SUBSET of a
@@ -470,7 +470,7 @@ const EventTag = enum(u8) {
     audio_capture = 27,
     microphone_device = 28,
     microphone_devices_changed = 29,
-    audio_capture_access = 30,
+    capture_access = 30,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -649,8 +649,8 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u32, device.total);
         },
         .microphone_devices_changed => try cursor.writeEnum(EventTag.microphone_devices_changed),
-        .audio_capture_access => |access| {
-            try cursor.writeEnum(EventTag.audio_capture_access);
+        .capture_access => |access| {
+            try cursor.writeEnum(EventTag.capture_access);
             try cursor.writeEnum(access.source);
             try cursor.writeEnum(access.status);
             try cursor.writeBool(access.restart_required);
@@ -900,9 +900,9 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             .total = try cursor.readInt(u32),
         } },
         .microphone_devices_changed => .microphone_devices_changed,
-        .audio_capture_access => .{ .audio_capture_access = .{
-            .source = try cursor.readEnum(platform.AudioCaptureAccessSource),
-            .status = try cursor.readEnum(platform.AudioCaptureAccessStatus),
+        .capture_access => .{ .capture_access = .{
+            .source = try cursor.readEnum(platform.CaptureAccessSource),
+            .status = try cursor.readEnum(platform.CaptureAccessStatus),
             .restart_required = try cursor.readBool(),
         } },
         .video => blk: {
@@ -1613,14 +1613,14 @@ test "event codec round-trips every payload variant" {
     {
         const changed = try roundTripEvent(.microphone_devices_changed);
         try testing.expect(changed == .microphone_devices_changed);
-        const decoded = try roundTripEvent(.{ .audio_capture_access = .{
+        const decoded = try roundTripEvent(.{ .capture_access = .{
             .source = .system_audio,
             .status = .authorized,
             .restart_required = true,
         } });
-        try testing.expectEqual(platform.AudioCaptureAccessSource.system_audio, decoded.audio_capture_access.source);
-        try testing.expectEqual(platform.AudioCaptureAccessStatus.authorized, decoded.audio_capture_access.status);
-        try testing.expect(decoded.audio_capture_access.restart_required);
+        try testing.expectEqual(platform.CaptureAccessSource.system_audio, decoded.capture_access.source);
+        try testing.expectEqual(platform.CaptureAccessStatus.authorized, decoded.capture_access.status);
+        try testing.expect(decoded.capture_access.restart_required);
     }
     {
         const paths = [_][]const u8{ "/tmp/a.txt", "/tmp/b.txt" };

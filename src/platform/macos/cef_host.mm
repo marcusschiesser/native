@@ -2660,7 +2660,7 @@ int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, int sy
 
 void native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host) { (void)host; }
 void native_sdk_appkit_microphone_devices(native_sdk_appkit_host_t *host) { (void)host; }
-void native_sdk_appkit_audio_capture_access(native_sdk_appkit_host_t *host, int source, int action) { (void)host; (void)source; (void)action; }
+void native_sdk_appkit_capture_access(native_sdk_appkit_host_t *host, int source, int action) { (void)host; (void)source; (void)action; }
 void native_sdk_appkit_observe_microphone_devices(native_sdk_appkit_host_t *host, int enabled) { (void)host; (void)enabled; }
 
 /* Video playback lives in the system-engine AppKit host (AVFoundation).

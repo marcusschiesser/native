@@ -1522,11 +1522,11 @@ pub const AudioCaptureEvent = struct {
     frames_produced: u64 = 0,
 };
 
-/// One normalized, timestamp-aligned pair produced by a platform capture
+/// One normalized, timestamp-aligned chunk produced by a platform capture
 /// backend. Both PCM slices are signed 16-bit little-endian and cover the
 /// same `frame_count` interval. An inactive source uses an empty slice;
 /// SDK-inserted silence is counted separately from delivered zero samples.
-pub const AudioCaptureFramePair = struct {
+pub const CapturedAudioChunk = struct {
     frame_offset: u64,
     frame_count: u32,
     system_pcm: []const u8 = &.{},
@@ -1548,10 +1548,10 @@ pub const AudioCapturePushResult = enum(u8) {
 pub const AudioCaptureSink = struct {
     context: *anyopaque,
     generation: u64,
-    push_fn: *const fn (context: *anyopaque, generation: u64, pair: AudioCaptureFramePair) AudioCapturePushResult,
+    push_fn: *const fn (context: *anyopaque, generation: u64, chunk: CapturedAudioChunk) AudioCapturePushResult,
 
-    pub fn push(self: AudioCaptureSink, pair: AudioCaptureFramePair) AudioCapturePushResult {
-        return self.push_fn(self.context, self.generation, pair);
+    pub fn push(self: AudioCaptureSink, chunk: CapturedAudioChunk) AudioCapturePushResult {
+        return self.push_fn(self.context, self.generation, chunk);
     }
 };
 
@@ -1572,17 +1572,17 @@ pub const MicrophoneDeviceEvent = struct {
     total: u32 = 0,
 };
 
-pub const AudioCaptureAccessSource = enum(u8) {
+pub const CaptureAccessSource = enum(u8) {
     system_audio,
     microphone,
 };
 
-pub const AudioCaptureAccessAction = enum(u8) {
+pub const CaptureAccessAction = enum(u8) {
     status,
     request,
 };
 
-pub const AudioCaptureAccessStatus = enum(u8) {
+pub const CaptureAccessStatus = enum(u8) {
     authorized,
     not_authorized,
     not_determined,
@@ -1591,9 +1591,9 @@ pub const AudioCaptureAccessStatus = enum(u8) {
     unavailable,
 };
 
-pub const AudioCaptureAccessEvent = struct {
-    source: AudioCaptureAccessSource,
-    status: AudioCaptureAccessStatus,
+pub const CaptureAccessEvent = struct {
+    source: CaptureAccessSource,
+    status: CaptureAccessStatus,
     restart_required: bool = false,
 };
 
@@ -2403,7 +2403,7 @@ pub const Event = union(enum) {
     audio_capture: AudioCaptureEvent,
     microphone_device: MicrophoneDeviceEvent,
     microphone_devices_changed,
-    audio_capture_access: AudioCaptureAccessEvent,
+    capture_access: CaptureAccessEvent,
     /// Video player reports — the same shape, plus the stream's decoded
     /// dimensions on `.loaded`. Pixels never ride here.
     video: VideoEvent,
@@ -2438,7 +2438,7 @@ pub const Event = union(enum) {
             .audio_capture => "audio_capture",
             .microphone_device => "microphone_device",
             .microphone_devices_changed => "microphone_devices_changed",
-            .audio_capture_access => "audio_capture_access",
+            .capture_access => "capture_access",
             .video => "video",
         };
     }
@@ -2617,7 +2617,7 @@ pub const PlatformServices = struct {
     audio_capture_start_fn: ?*const fn (context: ?*anyopaque, config: AudioCaptureConfig, sink: AudioCaptureSink) anyerror!void = null,
     audio_capture_stop_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     microphone_devices_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
-    audio_capture_access_fn: ?*const fn (context: ?*anyopaque, source: AudioCaptureAccessSource, action: AudioCaptureAccessAction) anyerror!void = null,
+    capture_access_fn: ?*const fn (context: ?*anyopaque, source: CaptureAccessSource, action: CaptureAccessAction) anyerror!void = null,
     microphone_devices_observe_fn: ?*const fn (context: ?*anyopaque, enabled: bool) anyerror!void = null,
     /// Load a local video file into THE app's single video player,
     /// leaving it PAUSED at position zero (transport is a separate
@@ -3237,8 +3237,8 @@ pub const PlatformServices = struct {
         return list_fn(self.context);
     }
 
-    pub fn audioCaptureAccess(self: PlatformServices, source: AudioCaptureAccessSource, action: AudioCaptureAccessAction) anyerror!void {
-        const access_fn = self.audio_capture_access_fn orelse return error.UnsupportedService;
+    pub fn captureAccess(self: PlatformServices, source: CaptureAccessSource, action: CaptureAccessAction) anyerror!void {
+        const access_fn = self.capture_access_fn orelse return error.UnsupportedService;
         return access_fn(self.context, source, action);
     }
 

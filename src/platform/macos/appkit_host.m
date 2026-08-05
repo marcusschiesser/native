@@ -1107,10 +1107,10 @@ static void NativeSdkAudioCaptureCallback(void *context, const native_sdk_audio_
             event.kind = NATIVE_SDK_APPKIT_EVENT_MICROPHONE_DEVICES_CHANGED;
             break;
         case NATIVE_SDK_AUDIO_CAPTURE_EVENT_ACCESS:
-            event.kind = NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE_ACCESS;
-            event.audio_capture_access_source = captureEvent->access_source;
-            event.audio_capture_access_status = captureEvent->access_status;
-            event.audio_capture_restart_required = captureEvent->restart_required;
+            event.kind = NATIVE_SDK_APPKIT_EVENT_CAPTURE_ACCESS;
+            event.capture_access_source = captureEvent->access_source;
+            event.capture_access_status = captureEvent->access_status;
+            event.capture_access_restart_required = captureEvent->restart_required;
             break;
         default:
             return;
@@ -11820,9 +11820,9 @@ void native_sdk_appkit_microphone_devices(native_sdk_appkit_host_t *host) {
     native_sdk_audio_capture_list_microphones(object.audioCapture);
 }
 
-void native_sdk_appkit_audio_capture_access(native_sdk_appkit_host_t *host, int source, int action) {
+void native_sdk_appkit_capture_access(native_sdk_appkit_host_t *host, int source, int action) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
-    native_sdk_audio_capture_access(object.audioCapture, source, action);
+    native_sdk_capture_access(object.audioCapture, source, action);
 }
 
 void native_sdk_appkit_observe_microphone_devices(native_sdk_appkit_host_t *host, int enabled) {

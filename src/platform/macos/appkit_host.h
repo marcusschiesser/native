@@ -37,7 +37,7 @@ typedef enum {
     NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE = 23,
     NATIVE_SDK_APPKIT_EVENT_MICROPHONE_DEVICE = 24,
     NATIVE_SDK_APPKIT_EVENT_MICROPHONE_DEVICES_CHANGED = 25,
-    NATIVE_SDK_APPKIT_EVENT_AUDIO_CAPTURE_ACCESS = 26,
+    NATIVE_SDK_APPKIT_EVENT_CAPTURE_ACCESS = 26,
 } native_sdk_appkit_event_kind_t;
 
 /* Audio player reports (EVENT_AUDIO payloads). LOADED acknowledges a
@@ -372,9 +372,9 @@ typedef struct {
     int microphone_device_is_default;
     uint32_t microphone_device_index;
     uint32_t microphone_device_total;
-    int audio_capture_access_source;
-    int audio_capture_access_status;
-    int audio_capture_restart_required;
+    int capture_access_source;
+    int capture_access_status;
+    int capture_access_restart_required;
 } native_sdk_appkit_event_t;
 
 typedef void (*native_sdk_appkit_event_callback_t)(void *context, const native_sdk_appkit_event_t *event);
@@ -557,7 +557,7 @@ typedef int (*native_sdk_appkit_audio_capture_frame_push_t)(void *context, uint6
 int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, int system_audio, int microphone_kind, const char *microphone_id, size_t microphone_id_len, uint32_t sample_rate_hz, uint8_t channel_count, int exclude_current_process_audio, native_sdk_appkit_audio_capture_frame_push_t frame_push, void *frame_context, uint64_t frame_token);
 void native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host);
 void native_sdk_appkit_microphone_devices(native_sdk_appkit_host_t *host);
-void native_sdk_appkit_audio_capture_access(native_sdk_appkit_host_t *host, int source, int action);
+void native_sdk_appkit_capture_access(native_sdk_appkit_host_t *host, int source, int action);
 void native_sdk_appkit_observe_microphone_devices(native_sdk_appkit_host_t *host, int enabled);
 
 /* Where the video player delivers decoded frames: one tightly packed,

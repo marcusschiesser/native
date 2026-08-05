@@ -652,9 +652,9 @@ pub const NullPlatform = struct {
     microphone_devices_observing: bool = false,
     default_microphone_index: u8 = 0,
     microphone_connected: [2]bool = .{ true, true },
-    system_audio_access: types.AudioCaptureAccessStatus = .authorized,
-    microphone_access: types.AudioCaptureAccessStatus = .authorized,
-    access_pending: ?types.AudioCaptureAccessEvent = null,
+    system_audio_access: types.CaptureAccessStatus = .authorized,
+    microphone_access: types.CaptureAccessStatus = .authorized,
+    access_pending: ?types.CaptureAccessEvent = null,
     /// Whether this modeled host has a video decoder. On by default (the
     /// fake below stands in for AVFoundation); tests modelling a staged
     /// host (Windows/Linux today) set it false BEFORE `platform()` so
@@ -884,7 +884,7 @@ pub const NullPlatform = struct {
                 .audio_capture_start_fn = if (self.audio_capture) audioCaptureStart else null,
                 .audio_capture_stop_fn = if (self.audio_capture) audioCaptureStop else null,
                 .microphone_devices_fn = if (self.microphone_device_enumeration) microphoneDevices else null,
-                .audio_capture_access_fn = if (self.audio_capture) audioCaptureAccess else null,
+                .capture_access_fn = if (self.audio_capture) captureAccess else null,
                 .microphone_devices_observe_fn = if (self.microphone_device_enumeration) observeMicrophoneDevices else null,
                 .video_load_fn = if (self.video_playback) videoLoad else null,
                 .video_load_url_fn = if (self.video_playback) videoLoadUrl else null,
@@ -1748,7 +1748,7 @@ pub const NullPlatform = struct {
         self.microphone_devices_count += 1;
     }
 
-    fn audioCaptureAccess(context: ?*anyopaque, source: types.AudioCaptureAccessSource, action: types.AudioCaptureAccessAction) anyerror!void {
+    fn captureAccess(context: ?*anyopaque, source: types.CaptureAccessSource, action: types.CaptureAccessAction) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         _ = action;
         self.access_pending = .{
@@ -1785,9 +1785,9 @@ pub const NullPlatform = struct {
         } };
     }
 
-    pub fn pushAudioCapturePair(self: *NullPlatform, pair: types.AudioCaptureFramePair) types.AudioCapturePushResult {
+    pub fn pushCapturedAudioChunk(self: *NullPlatform, chunk: types.CapturedAudioChunk) types.AudioCapturePushResult {
         if (!self.capture.active) return .closed;
-        return if (self.capture.sink) |sink| sink.push(pair) else .closed;
+        return if (self.capture.sink) |sink| sink.push(chunk) else .closed;
     }
 
     pub fn microphoneDeviceEvent(self: *const NullPlatform, index: u32) Event {
@@ -1826,10 +1826,10 @@ pub const NullPlatform = struct {
         } };
     }
 
-    pub fn takeAudioCaptureAccess(self: *NullPlatform) ?Event {
+    pub fn takeCaptureAccess(self: *NullPlatform) ?Event {
         const access = self.access_pending orelse return null;
         self.access_pending = null;
-        return .{ .audio_capture_access = access };
+        return .{ .capture_access = access };
     }
 
     pub fn microphoneDevicesChanged(self: *NullPlatform) ?Event {

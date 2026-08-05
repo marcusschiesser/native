@@ -453,7 +453,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .audio_capture => |capture_event| try dispatchEvent(self, app, .{ .audio_capture = capture_event }),
                 .microphone_device => |device_event| try dispatchEvent(self, app, .{ .microphone_device = device_event }),
                 .microphone_devices_changed => try dispatchEvent(self, app, .microphone_devices_changed),
-                .audio_capture_access => |access_event| try dispatchEvent(self, app, .{ .audio_capture_access = access_event }),
+                .capture_access => |access_event| try dispatchEvent(self, app, .{ .capture_access = access_event }),
                 .video => |video_event| {
                     try dispatchEvent(self, app, .{ .video = video_event });
                 },
@@ -525,7 +525,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 .audio_capture => {},
                 .microphone_device => {},
                 .microphone_devices_changed => {},
-                .audio_capture_access => {},
+                .capture_access => {},
                 .video => {},
                 .files_dropped => {},
                 .gpu_surface_frame => {},

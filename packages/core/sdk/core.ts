@@ -461,21 +461,21 @@ export type MicrophoneDeviceEventKind<M extends Msgish> = M extends Msgish
     : never
   : never;
 
-export type AudioCaptureAccessSource = "system_audio" | "microphone";
-export type AudioCaptureAccessAction = "status" | "request";
-export type AudioCaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
-export type AudioCaptureAccessEventArm = {
+export type CaptureAccessSource = "system_audio" | "microphone";
+export type CaptureAccessAction = "status" | "request";
+export type CaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
+export type CaptureAccessEventArm = {
   readonly key: Uint8Array;
-  readonly source: AudioCaptureAccessSource;
-  readonly status: AudioCaptureAccessStatus;
+  readonly source: CaptureAccessSource;
+  readonly status: CaptureAccessStatus;
   readonly restartRequired: boolean;
 };
-export type AudioCaptureAccessEventKind<M extends Msgish> = M extends Msgish
-  ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureAccessEventArm]
-    ? [keyof AudioCaptureAccessEventArm] extends [Exclude<keyof M, "kind">]
-      ? M extends Msgish & AudioCaptureAccessEventArm
-        ? [AudioCaptureAccessSource] extends [M["source"]]
-          ? [AudioCaptureAccessStatus] extends [M["status"]] ? M["kind"] : never
+export type CaptureAccessEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof CaptureAccessEventArm]
+    ? [keyof CaptureAccessEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & CaptureAccessEventArm
+        ? [CaptureAccessSource] extends [M["source"]]
+          ? [CaptureAccessStatus] extends [M["status"]] ? M["kind"] : never
           : never
         : never
       : never
@@ -813,7 +813,7 @@ export interface AudioCaptureOptions {
 export interface AudioCaptureRoute<M extends Msgish> { readonly event: AudioCaptureEventKind<M>; }
 export interface AudioCaptureReadRoute<M extends Msgish> { readonly event: AudioCaptureReadEventKind<M>; }
 export interface MicrophoneDevicesRoute<M extends Msgish> { readonly event: MicrophoneDeviceEventKind<M>; }
-export interface AudioCaptureAccessRoute<M extends Msgish> { readonly event: AudioCaptureAccessEventKind<M>; }
+export interface CaptureAccessRoute<M extends Msgish> { readonly event: CaptureAccessEventKind<M>; }
 
 /// A `Cmd.videoLoad` source. `surface` is the model-owned media-surface id
 /// the markup binds — the texture channel the decoded frames feed. The
@@ -977,11 +977,11 @@ export type Cmd<M extends Msgish> =
   | { readonly op: "audio_capture_discard"; readonly key: string }
   | { readonly op: "microphone_devices"; readonly key: string; readonly eventKind: string }
   | {
-      readonly op: "audio_capture_access";
+      readonly op: "capture_access";
       readonly key: string;
       readonly eventKind: string;
-      readonly source: AudioCaptureAccessSource;
-      readonly action: AudioCaptureAccessAction;
+      readonly source: CaptureAccessSource;
+      readonly action: CaptureAccessAction;
     }
   | {
       readonly op: "video_load";
@@ -1300,8 +1300,8 @@ export const Cmd = {
 
   /** Read or explicitly request one TCC permission. Capture start itself
    * never opens a system prompt. */
-  audioCaptureAccess<M extends Msgish>(key: string, source: AudioCaptureAccessSource, action: AudioCaptureAccessAction, route: AudioCaptureAccessRoute<M>): Cmd<M> {
-    return { op: "audio_capture_access", key, eventKind: route.event, source, action };
+  captureAccess<M extends Msgish>(key: string, source: CaptureAccessSource, action: CaptureAccessAction, route: CaptureAccessRoute<M>): Cmd<M> {
+    return { op: "capture_access", key, eventKind: route.event, source, action };
   },
 
   /// Open (or replace — one player is the whole surface) the keyed video

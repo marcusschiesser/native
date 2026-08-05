@@ -545,7 +545,7 @@ void native_sdk_audio_capture_list_microphones(native_sdk_audio_capture_t *captu
     }
 }
 
-void native_sdk_audio_capture_access(native_sdk_audio_capture_t *capture, int source, int action) {
+void native_sdk_capture_access(native_sdk_audio_capture_t *capture, int source, int action) {
     if (!capture || !capture->object) return;
     if (@available(macOS 15.0, *)) {
         NativeSdkAudioCapture *object = (__bridge NativeSdkAudioCapture *)capture->object;
