@@ -4367,13 +4367,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             self.fonts_built_count = runtime.registeredCanvasFontCount();
         }
 
-        /// Present the planned canvas frame: GPU packet when the platform
-        /// has a packet presenter (macOS/Metal — unchanged), otherwise the
-        /// CPU reference-rendered pixel path (`presentGpuSurfacePixels`,
-        /// e.g. Linux/GTK). A platform whose packet presenter exists but
-        /// reports `UnsupportedService` at present time also falls back to
-        /// pixels; that attempt forces a full repaint because the failed
-        /// packet plan already recorded the frame's presented summary.
+        /// Present the planned canvas frame: GPU packet when the view did
+        /// not explicitly request software and the platform has a packet
+        /// presenter (macOS/Metal — unchanged), otherwise the CPU
+        /// reference-rendered pixel path (`presentGpuSurfacePixels`, e.g.
+        /// Linux/GTK). A platform whose packet presenter exists but reports
+        /// `UnsupportedService` at present time also falls back to pixels;
+        /// that attempt forces a full repaint because the failed packet plan
+        /// already recorded the frame's presented summary.
         fn presentFrame(self: *Self, runtime: *Runtime, frame_event: platform.GpuSurfaceFrameEvent, canvas_label: []const u8, force_full_repaint: bool, clear_color: canvas.Color) anyerror!void {
             // A forced frame must paint unconditionally: the installing
             // frame has no earlier glass to retain. Software-buffer
@@ -4381,7 +4382,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // a surface handoff.
             const services = runtime.options.platform.services;
             var packet_attempted = false;
-            if (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null) {
+            const packet_requested = canvas_frame.canvasGpuPacketPresentationRequested(runtime, frame_event.window_id, canvas_label);
+            if (packet_requested and (services.present_gpu_surface_packet_fn != null or services.present_gpu_surface_packet_binary_fn != null)) {
                 packet_attempted = true;
                 const packet_presented = blk: {
                     _ = runtime.presentNextCanvasGpuPacketWithScale(

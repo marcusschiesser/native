@@ -8,7 +8,8 @@ import { WindowDots } from "@/components/home/window-dots";
 import { githubUrl, siteName } from "@/lib/site";
 
 // ---------------------------------------------------------------- samples
-// Both excerpts are real source from examples/ui-inbox in this repository.
+// The markup is excerpted from examples/ui-inbox. The core excerpt shows
+// the same loop in the default TypeScript authoring language.
 
 const markupSample = `<column background="background">
   <row height="{header_height}" padding="12" gap="10" cross="center"
@@ -47,37 +48,31 @@ const markupSample = `<column background="background">
   <status-bar>{openCount} open · {doneCount} done</status-bar>
 </column>`;
 
-const zigSample = `pub const Msg = union(enum) {
-    add,
-    toggle: u32,
-    set_filter: Filter,
-    clear_done,
-    draft_edit: canvas.TextInputEvent,
-    chrome_changed: native_sdk.WindowChrome,
-};
+const tsSample = `export type Msg =
+  | { readonly kind: "add" }
+  | { readonly kind: "toggle"; readonly id: number }
+  | { readonly kind: "set_filter"; readonly filter: Filter }
+  | { readonly kind: "clear_done" }
+  | { readonly kind: "draft_edit"; readonly edit: TextInputEvent };
 
-pub fn update(model: *Model, msg: Msg) void {
-    switch (msg) {
-        .add => {
-            if (model.draftEmpty()) {
-                model.addGeneratedTask();
-            } else {
-                model.addTask(std.mem.trim(u8, model.draft(), " "));
-                model.draft_buffer.clear();
-            }
-        },
-        .toggle => |id| if (model.taskById(id)) |task| {
-            task.done = !task.done;
-        },
-        .set_filter => |filter| model.filter = filter,
-        .clear_done => model.clearDone(),
-        .draft_edit => |edit| model.draft_buffer.apply(edit),
-        .chrome_changed => |chrome| {
-            model.chrome_leading = chrome.insets.left;
-            model.header_height =
-                @max(header_natural_height, chrome.insets.top);
-        },
-    }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) {
+    case "add":
+      return addTask(model);
+    case "toggle":
+      return {
+        ...model,
+        tasks: model.tasks.map((task) =>
+          task.id === msg.id ? { ...task, done: !task.done } : task,
+        ),
+      };
+    case "set_filter":
+      return { ...model, filter: msg.filter };
+    case "clear_done":
+      return { ...model, tasks: model.tasks.filter((task) => !task.done) };
+    case "draft_edit":
+      return { ...model, draft: applyDraftEdit(model.draft, msg.edit) };
+  }
 }`;
 
 // ------------------------------------------------------------ small parts
@@ -385,14 +380,14 @@ export default function HomePage() {
           <SectionLede>
             Events produce messages, messages update state, and state renders the interface —
             simple to debug, simple to maintain, and simple for AI to generate. This is{" "}
-            <InlineCode>examples/ui-inbox</InlineCode> from the repository: the whole UI is one
-            declarative view, and one update function is the only place state changes. Mistakes in
-            a view are compile errors with line and column, and in dev you edit the view while the
-            app runs, keeping state.
+            the default authoring shape: the whole UI is one declarative view, and one TypeScript
+            update function is the only place state changes. The TypeScript is compiled to native
+            code; no JavaScript runtime ships with the app. Mistakes in a view are compile errors
+            with line and column, and in dev you edit the view while the app runs, keeping state.
           </SectionLede>
           <div className="mt-10 grid gap-6 lg:grid-cols-2">
-            <CodePane title="src/inbox.native" lang="html" code={markupSample} />
-            <CodePane title="src/main.zig" lang="zig" code={zigSample} />
+            <CodePane title="src/app.native" lang="html" code={markupSample} />
+            <CodePane title="src/core.ts" lang="ts" code={tsSample} />
           </div>
           <figure className="mt-6">
             <div className="mx-auto max-w-4xl rounded-md border border-gray-alpha-400 bg-gradient-to-b from-gray-100 to-background-200 p-6 sm:p-8 dark:from-gray-alpha-100 dark:to-background-100">
@@ -407,8 +402,8 @@ export default function HomePage() {
               </div>
             </div>
             <figcaption className="mx-auto mt-4 max-w-3xl text-center copy-14 text-gray-900">
-              Built from the source above and captured running on macOS. The pixels come from{" "}
-              {siteName}’s engine; the window and scroll physics come from the OS.
+              The <InlineCode>ui-inbox</InlineCode> reference captured running on macOS. The pixels
+              come from {siteName}’s engine; the window and scroll physics come from the OS.
             </figcaption>
           </figure>
         </div>
@@ -601,12 +596,18 @@ export default function HomePage() {
               <Muted>a real window opens — edit src/app.native while it runs</Muted>
             </Terminal>
           </div>
-          <div className="mt-8 flex items-center justify-center gap-3">
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
             <Link
               href="/docs/quick-start"
               className="inline-flex h-10 items-center justify-center rounded-md bg-gray-1000 px-4 button-14 text-background-100 transition-colors hover:bg-gray-1000/85"
             >
               Quick Start
+            </Link>
+            <Link
+              href="/docs/typescript"
+              className="inline-flex h-10 items-center justify-center rounded-md border border-gray-alpha-400 bg-background-100 px-4 button-14 text-gray-1000 transition-colors hover:bg-gray-100"
+            >
+              TypeScript Cores
             </Link>
             <Link
               href="/docs/native-ui"
@@ -628,6 +629,9 @@ export default function HomePage() {
             </Link>
             <Link href="/docs/native-ui" className="transition-colors hover:text-gray-1000">
               Native UI
+            </Link>
+            <Link href="/docs/typescript" className="transition-colors hover:text-gray-1000">
+              TypeScript
             </Link>
             <Link href="/docs/automation" className="transition-colors hover:text-gray-1000">
               Automation

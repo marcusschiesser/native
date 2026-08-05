@@ -782,6 +782,12 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     options.details_expanded = try self.boolItems(ui, scope, node, typed.binding);
                     continue;
                 }
+                if (std.mem.eql(u8, attribute.name, "images")) {
+                    const typed = markup.attrTyped(attribute);
+                    if (typed != .binding) return self.failNode(node, markup.markdown_images_message);
+                    options.images = try self.markdownImageItems(ui, scope, node, typed.binding);
+                    continue;
+                }
                 if (std.mem.eql(u8, attribute.name, "issue-link-base")) {
                     const typed = markup.attrTyped(attribute);
                     if (typed == .equals or typed == .invalid) {
@@ -807,6 +813,8 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (node.children.len != 0) return self.failNode(node.children[0], markup.code_children_message);
             var options: Ui.CodeOptions = .{};
             var source_text: ?[]const u8 = null;
+            var added_lines_storage: [canvas.code.max_diff_lines]usize = undefined;
+            var removed_lines_storage: [canvas.code.max_diff_lines]usize = undefined;
             for (node.attrs) |attribute| {
                 if (std.mem.eql(u8, attribute.name, "kind")) continue;
                 if (std.mem.eql(u8, attribute.name, "source")) {
@@ -827,6 +835,32 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
                 if (std.mem.eql(u8, attribute.name, "line-numbers")) {
                     options.line_numbers = try self.codeFlagAttr(scope, node, attribute);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "added-lines")) {
+                    const typed = markup.parseAttrExpression(attribute.value) orelse
+                        return self.failNode(node, markup.code_diff_lines_message);
+                    const spec = if (typed == .literal)
+                        typed.literal
+                    else switch (try self.evalAttrExpression(scope, node, attribute)) {
+                        .string => |text| text,
+                        else => return self.failNode(node, markup.code_diff_lines_message),
+                    };
+                    options.added_lines = canvas.code.parseLineNumberSpec(spec, &added_lines_storage) orelse
+                        return self.failNode(node, markup.code_diff_lines_message);
+                    continue;
+                }
+                if (std.mem.eql(u8, attribute.name, "removed-lines")) {
+                    const typed = markup.parseAttrExpression(attribute.value) orelse
+                        return self.failNode(node, markup.code_diff_lines_message);
+                    const spec = if (typed == .literal)
+                        typed.literal
+                    else switch (try self.evalAttrExpression(scope, node, attribute)) {
+                        .string => |text| text,
+                        else => return self.failNode(node, markup.code_diff_lines_message),
+                    };
+                    options.removed_lines = canvas.code.parseLineNumberSpec(spec, &removed_lines_storage) orelse
+                        return self.failNode(node, markup.code_diff_lines_message);
                     continue;
                 }
                 if (std.mem.eql(u8, attribute.name, "editable")) {
@@ -1459,6 +1493,20 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
             }
             return self.failText(node, markup.markdown_details_expanded_message);
+        }
+
+        /// Resolve Markdown's registered source-to-image mapping through the
+        /// same bounded iterable reflection used by `for each`.
+        fn markdownImageItems(self: *Self, ui: *Ui, scope: *Scope, node: markup.MarkupNode, path: []const u8) BuildError![]const canvas.markdown.ResolvedImage {
+            @setEvalBranchQuota(scan_quota);
+            inline for (item_types, 0..) |Item, type_index| {
+                if (comptime (Item == canvas.markdown.ResolvedImage)) {
+                    if (try self.iterateItems(ui, Item, type_index, scope, path)) |items| {
+                        return items;
+                    }
+                }
+            }
+            return self.failText(node, markup.markdown_images_message);
         }
 
         // ------------------------------------------------------ templates

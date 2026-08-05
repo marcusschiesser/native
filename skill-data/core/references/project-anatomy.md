@@ -4,13 +4,17 @@ Use this when creating, orienting in, or restructuring a Native SDK app.
 
 ## Generated project files
 
-A zero-config app ships no build files at all — just `app.zon` + `src/` (+ `assets/`); the `native dev|test|build` verbs synthesize the build graph into `.native/build/` (gitignored). `build.zig`/`build.zig.zon` appear only in apps that own their build (`native eject`, the `--full` scaffold, or an expanded example):
+A default zero-config app ships no build files at all. Its authored files are `app.zon`, `src/core.ts`, and `src/app.native` (+ `assets/`). `native check` validates the TypeScript core, markup, and manifest without generating a build graph; `native dev|test|build` compile the app to native code and synthesize the build graph into `.native/build/` (gitignored). `build.zig`/`build.zig.zon` appear only in apps that own their build (`native eject`, the `--full` scaffold, or an expanded example). A Zig core is an explicit alternative created with `--template zig-core`, not something to infer from the SDK's implementation or older examples.
+
+Files by path:
 
 - `build.zig`: Zig build graph. Expanded scaffolds expose platform selection, trace mode, debug overlay, automation, JS bridge, web engine overrides, frontend install/build/dev steps, tests, and package steps.
 - `build.zig.zon`: Zig package manifest and dependency declaration.
 - `app.zon`: app manifest read by CLI/build/package/doctor tooling.
-- `src/main.zig`: app state, `app()` method, source resolver, optional bridge dispatcher, lifecycle callbacks.
-- `src/runner.zig`: platform and runtime setup: native backend, trace sinks, panic capture, log paths, state store, security policy, builtin bridge policy, automation.
+- `src/core.ts`: the default app core — `Model`, `Msg`, `update`, pure helpers, effects (`Cmd`), and subscriptions (`Sub`).
+- `src/app.native`: the default app view — elements, layout, bindings, and typed message dispatch.
+- `src/main.zig`: present for an explicitly selected Zig core or lower-level WebView/runtime app; app state, `app()` method, source resolver, optional bridge dispatcher, lifecycle callbacks.
+- `src/runner.zig`: present when the app owns lower-level platform/runtime setup: native backend, trace sinks, panic capture, log paths, state store, security policy, builtin bridge policy, automation.
 - `assets/`: icons and other package resources.
 - `frontend/`: framework app when using Next, Vite, React, Svelte, or Vue.
 
@@ -78,7 +82,17 @@ Important manifest fields:
 
 ## Build steps to know
 
-Common generated steps:
+Common zero-config steps:
+
+```bash
+native check
+native dev
+native test
+native build
+native package --target macos
+```
+
+Equivalent/common owned-build steps:
 
 ```bash
 zig build run
@@ -101,8 +115,10 @@ zig build test-package-cef-layout -Dplatform=macos
 ## Layering rule
 
 - If changing app identity, packaging inputs, permissions, origins, windows, frontend dist/dev paths, or web engine, update `app.zon`.
+- If changing default app state, messages, transitions, effects, subscriptions, or derived bindings, update `src/core.ts` and follow the `ts-core` skill.
+- If changing the default app UI, update `src/app.native` and follow the `native-ui` skill.
 - If changing runtime services, platform setup, automation, logging, security wiring, or builtin bridge policy, update `src/runner.zig`.
-- If changing native business behavior, lifecycle callbacks, bridge handlers, or source selection, update `src/main.zig`.
+- If an existing lower-level/Zig app changes native lifecycle callbacks, bridge handlers, source selection, or Zig-core behavior, update its `src/main.zig`.
 - If changing UI, routes, CSS, or web calls, update `frontend/`.
 
-Do not put package metadata in Zig app state unless the generated project already does that. Do not bypass `app.zon` policy for convenience.
+Do not add `src/main.zig`, `src/runner.zig`, or an owned build merely to implement ordinary behavior in a default TypeScript app. Do not put package metadata in app state or bypass `app.zon` policy for convenience.

@@ -1,13 +1,13 @@
 # Native SDK soundboard-ts example
 
-The soundboard music library authored entirely in **TypeScript + Native markup** — the launch-bar port of `examples/soundboard`. Zero Zig: the logic tier is the app-core subset under `src/`, transpiled to native at build time as one module; `src/app.native` is the whole view tier and `app.zon` the manifest plus the committed cover assets. The build detects `src/core.ts` in the tree and stages the wiring itself; no JS runtime ships in the binary.
+The soundboard music library authored entirely in **TypeScript + Native markup** — the launch-bar port of `examples/soundboard`. Zero Zig: the logic tier is the app-core subset under `src/`, compiled to native code at build time; `src/app.native` is the whole view tier and `app.zon` the manifest plus the committed cover assets. The build detects `src/core.ts` in the tree and stages the wiring itself; no JS runtime ships in the binary.
 
 The core is a multi-module reference split of the app-core subset's import-graph support:
 
 - `src/core.ts` — the entry module: Model, Msg, update, subscriptions, the wiring channels, and every exported binding helper (the app's public face — markup and node both see exactly its exports).
 - `src/library.ts` — the committed music catalog tables and the pure catalog/presentation helpers over them.
 - `src/player.ts` — the pure playback state machine (track starts, queue advance, the launch-override stream rule); type-imports `Model` from the entry (the legal back-edge shape).
-- `@native-sdk/core/text` — the SDK's byte-splice text engine, transpiled in for the search field's caret/selection/IME fidelity.
+- `@native-sdk/core/text` — the SDK's byte-splice text engine, compiled in for the search field's caret/selection/IME fidelity.
 
 Everything the Zig soundboard's core does is here: the committed music catalog (the same `music_manifest.zon` data, flattened into rodata tables), REAL audio playback through `Cmd.audioPlay` with the engine's source cascade (prepared local file first, the hosted URL as the streaming fallback, size-verified against the manifest's per-track bytes and cached under the platform caches directory), play/pause/prev/next with album wrap, scrub-to-seek on the transport slider, the play-next queue with its context-menu entry, Copy Title onto the clipboard, live search over albums/artists/titles through the full byte-splice text engine, the duration rule (the platform player's estimate never replaces the manifest's measured total), the never-rewind rendered clock, the honest degraded states (stream notice, buffering line, and the local-only assets notice under an empty `NATIVE_SDK_MUSIC_URL_BASE`), registered album covers, the width-adaptive album grid, and the media-key fallback.
 

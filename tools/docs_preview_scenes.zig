@@ -172,6 +172,7 @@ pub const scenes = [_]Scene{
     .{ .name = "skeleton", .height = 200, .build = stateless(buildSkeleton) },
     .{ .name = "spinner", .height = 140, .build = stateless(buildSpinner) },
     .{ .name = "code", .height = 300, .build = stateless(buildCode) },
+    .{ .name = "code-diff", .height = 220, .build = stateless(buildCodeDiff) },
     .{ .name = "markdown", .height = 440, .build = stateless(buildMarkdown) },
     .{ .name = "media-surface", .height = 280, .build = stateless(buildMediaSurface) },
     .{ .name = "video", .height = 300, .build = stateless(buildVideo) },
@@ -1069,6 +1070,15 @@ const code_sample =
     \\</Accordion>
 ;
 
+const code_diff_sample =
+    \\module.exports = {
+    \\  experimental: {
+    \\    appDir: true,
+    \\  },
+    \\  appDir: true,
+    \\}
+;
+
 fn buildCode(ui: *Ui) Node {
     return tileStart(ui, .{
         ui.code(.{
@@ -1077,6 +1087,19 @@ fn buildCode(ui: *Ui) Node {
             .wrap = false,
             .width = 496,
         }, code_sample),
+    });
+}
+
+fn buildCodeDiff(ui: *Ui) Node {
+    return tileStart(ui, .{
+        ui.code(.{
+            .language = .javascript,
+            .line_numbers = true,
+            .added_lines = &.{5},
+            .removed_lines = &.{ 2, 3, 4 },
+            .wrap = false,
+            .width = 496,
+        }, code_diff_sample),
     });
 }
 

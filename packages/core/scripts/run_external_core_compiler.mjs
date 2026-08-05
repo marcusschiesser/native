@@ -1,0 +1,108 @@
+#!/usr/bin/env node
+// Drive one external core compile — the lane every TypeScript core
+// builds through: verify the toolchain release against the SDK's exact
+// pin, run a library-mode build over the staged tree, and normalize
+// the outputs to the paths the build graph declared. The compile itself co-emits the archive's
+// OWN contract sidecar — the document the mirror module generates from,
+// so the boot identity fence always pairs an archive with its own
+// compile (the fixture driver, tests/compiled-core/build_core.sh, holds
+// the same rule).
+//
+//   node run_external_core_compiler.mjs --stage <dir> --name <symbol name>
+//     --manifest <packages/core/package.json> --out-archive <file>
+//     --out-sidecar <file> (--compiler <cmd> | --compiler-js <main.js>)
+
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+function parseArgs(argv) {
+  const args = {};
+  for (let i = 2; i < argv.length; i += 2) {
+    const key = argv[i];
+    const value = argv[i + 1];
+    if (!key.startsWith("--") || value === undefined) {
+      console.error("usage: run_external_core_compiler.mjs --stage <dir> --name <n> --manifest <package.json> --out-archive <file> --out-sidecar <file> (--compiler <cmd> | --compiler-js <main.js>)");
+      process.exit(2);
+    }
+    args[key.slice(2)] = value;
+  }
+  for (const required of ["stage", "name", "manifest", "out-archive", "out-sidecar"]) {
+    if (!(required in args)) {
+      console.error(`run_external_core_compiler.mjs: missing --${required}`);
+      process.exit(2);
+    }
+  }
+  if (!args.compiler && !args["compiler-js"]) {
+    console.error("run_external_core_compiler.mjs: supply --compiler <cmd> or --compiler-js <main.js>");
+    process.exit(2);
+  }
+  return args;
+}
+
+const args = parseArgs(process.argv);
+// Every path argument resolves against the INVOCATION's cwd up front:
+// the compile itself runs from a scratch directory.
+for (const key of ["stage", "manifest", "out-archive", "out-sidecar", "compiler-js"]) {
+  if (key in args) args[key] = path.resolve(args[key]);
+}
+// --compiler is a COMMAND: a bare executable path (possibly containing
+// spaces) or an interpreter plus script ("node .../main.js"). A path
+// that exists is taken whole; anything else splits on whitespace.
+const argv0 = args.compiler
+  ? (fs.existsSync(args.compiler) ? [args.compiler] : args.compiler.split(/\s+/))
+  : [process.execPath, args["compiler-js"]];
+
+// The profile's determinism-fence table is RELEASE-PINNED DATA (see
+// tools/corewire/emit_profile.zig): its ids resolve against one
+// toolchain release's surface manifest, so the supplied command must BE
+// the release the SDK pins — the exact-pinned dependency of
+// packages/core (the ONE place the pin lives).
+const manifest = JSON.parse(fs.readFileSync(args.manifest, "utf8"));
+const pin = manifest.dependencies?.scriptc;
+if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) {
+  console.error("the SDK's packages/core/package.json carries no exact external core compiler pin — the SDK tree is broken; reinstall or re-clone it");
+  process.exit(2);
+}
+const versionProbe = spawnSync(argv0[0], [...argv0.slice(1), "-v"], { encoding: "utf8" });
+const reported = (versionProbe.stdout ?? "").trim();
+if (versionProbe.status !== 0 || reported.length === 0) {
+  console.error(`the external core compiler did not report a version (${argv0.join(" ")} -v failed) — run \`npm ci --prefix <sdk>/packages/core\` to install the pinned release, or point NATIVE_SDK_CORE_COMPILER at a working command`);
+  process.exit(2);
+}
+if (reported !== pin) {
+  console.error(`external core toolchain reports version ${reported}, but the profile's fence table is pinned to ${pin} — supply that release (npm ci --prefix <sdk>/packages/core installs it), or bump the pin when the fence table has been re-verified against the new release's surface manifest`);
+  process.exit(2);
+}
+
+// The compile runs in its own scratch copy: the staged tree is a build
+// output another step owns, and the toolchain writes beside its entry.
+const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-external-core-"));
+try {
+  fs.cpSync(args.stage, work, { recursive: true });
+  const build = spawnSync(argv0[0], [...argv0.slice(1), "build", "--lib", "--profile", "profile.json", "-o", args.name], {
+    cwd: work,
+    stdio: "inherit",
+  });
+  if (build.status !== 0) process.exit(build.status ?? 1);
+
+  // The toolchain writes the ar archive at the bare -o name (some
+  // releases add .lib.a); the link input needs a recognized extension.
+  const produced = [`${args.name}.lib.a`, args.name].find((name) => fs.existsSync(path.join(work, name)));
+  if (!produced) {
+    console.error(`the external core compile produced no archive (expected ${args.name}.lib.a or ${args.name})`);
+    process.exit(1);
+  }
+  const sidecar = path.join(work, "core.contract.json");
+  if (!fs.existsSync(sidecar)) {
+    console.error("the external core compile emitted no core.contract.json beside the archive — the co-emitted sidecar is the mirror's contract; the compile is incomplete");
+    process.exit(1);
+  }
+  fs.mkdirSync(path.dirname(args["out-archive"]), { recursive: true });
+  fs.mkdirSync(path.dirname(args["out-sidecar"]), { recursive: true });
+  fs.copyFileSync(path.join(work, produced), args["out-archive"]);
+  fs.copyFileSync(sidecar, args["out-sidecar"]);
+} finally {
+  fs.rmSync(work, { recursive: true, force: true });
+}

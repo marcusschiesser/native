@@ -145,6 +145,56 @@ pub fn languageFromFence(opening: []const u8) Language {
     return languageFromName(info[0..end]);
 }
 
+/// Diff annotations share the read-only code paragraph's bounded logical
+/// line model. A fixed ceiling keeps line metadata inline on the widget and
+/// makes malformed markup fail before it can silently decorate the wrong
+/// source row.
+pub const max_diff_lines: usize = 128;
+
+/// Parse a one-based comma/range list such as `2-4, 7`. Results are unique
+/// and retain author order. Empty text means no annotated lines; zero,
+/// descending ranges, values above `max_diff_lines`, and malformed pieces
+/// are rejected.
+pub fn parseLineNumberSpec(spec_raw: []const u8, storage: *[max_diff_lines]usize) ?[]const usize {
+    const spec = std.mem.trim(u8, spec_raw, " \t\r\n");
+    if (spec.len == 0) return storage[0..0];
+
+    var len: usize = 0;
+    var pieces = std.mem.splitScalar(u8, spec, ',');
+    while (pieces.next()) |piece_raw| {
+        const piece = std.mem.trim(u8, piece_raw, " \t\r\n");
+        if (piece.len == 0) return null;
+
+        const dash = std.mem.indexOfScalar(u8, piece, '-');
+        const first_text = std.mem.trim(u8, if (dash) |index| piece[0..index] else piece, " \t");
+        const last_text = if (dash) |index| std.mem.trim(u8, piece[index + 1 ..], " \t") else first_text;
+        if (first_text.len == 0 or last_text.len == 0) return null;
+        if (dash) |index| {
+            if (std.mem.indexOfScalar(u8, piece[index + 1 ..], '-') != null) return null;
+        }
+
+        const first = std.fmt.parseInt(usize, first_text, 10) catch return null;
+        const last = std.fmt.parseInt(usize, last_text, 10) catch return null;
+        if (first == 0 or last < first or last > max_diff_lines) return null;
+
+        var line = first;
+        while (line <= last) : (line += 1) {
+            var duplicate = false;
+            for (storage[0..len]) |existing| {
+                if (existing == line) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            if (len == storage.len) return null;
+            storage[len] = line;
+            len += 1;
+        }
+    }
+    return storage[0..len];
+}
+
 fn wordInList(word: []const u8, list: []const u8, ignore_case: bool) bool {
     var words = std.mem.tokenizeScalar(u8, list, ' ');
     while (words.next()) |candidate| {

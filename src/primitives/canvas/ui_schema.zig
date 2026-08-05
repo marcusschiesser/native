@@ -571,6 +571,14 @@ pub const attrs = [_]AttrInfo{
     // hierarchy without manufacturing nested layout containers. Zero (the
     // default when absent) keeps structural widget nesting as the source.
     .{ .code = 93, .name = "tree-level", .class = .whole, .group = .option, .field = "tree_level" },
+    // Code diff metadata follows Geist Code Block's added/removed line
+    // declarations. Values are one-based comma/range text specs so markup
+    // can state compact runs (`2-4, 7`) without putting +/- bytes in source.
+    .{ .code = 94, .name = "added-lines", .class = .text, .group = .composite },
+    .{ .code = 95, .name = "removed-lines", .class = .text, .group = .composite },
+    // Markdown's caller-owned source -> registered ImageId mapping. The
+    // markdown rule hook scopes and type-checks the iterable binding.
+    .{ .code = 96, .name = "images", .class = .binding_only, .group = .composite },
 };
 
 // ----------------------------------------------------------------- events

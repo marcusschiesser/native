@@ -1139,10 +1139,12 @@ pub const ControlVisualTokens = struct {
     /// `active_background`, then to the state-formula washes — so a
     /// theme that wants press and on-state to differ states both.
     pressed_background: ?Color = null,
-    /// Disabled fill and ink. Null keeps the half-strength wash
-    /// register (`StateTokens.disabled_alpha` over the rest colors);
-    /// themes whose disabled treatment is a color SWAP (a flat gray
-    /// chip under gray text) state the pair here.
+    /// Disabled fill and ink. Null keeps the house treatment:
+    /// the rest color at `StateTokens.disabled_alpha`, except that a
+    /// filled primary precomposites its knockout ink over the page at
+    /// that strength so the label does not double-fade through the
+    /// already-muted fill. Themes whose disabled treatment is a color
+    /// SWAP (a flat gray chip under gray text) state the pair here.
     disabled_background: ?Color = null,
     disabled_foreground: ?Color = null,
     foreground: ?Color = null,
@@ -1162,6 +1164,11 @@ pub const ControlTokens = struct {
     button_outline: ControlVisualTokens = .{},
     button_ghost: ControlVisualTokens = .{},
     button_destructive: ControlVisualTokens = .{},
+    /// Shared disabled edge for the button variants that retain an
+    /// outline. Filled variants drop their implicit edge so their disabled
+    /// body alone defines the silhouette; ghost remains borderless. Null
+    /// keeps the house opacity wash.
+    button_disabled_border: ?Color = null,
     toggle_button: ControlVisualTokens = .{},
     accordion: ControlVisualTokens = .{},
     alert: ControlVisualTokens = .{},
@@ -1548,6 +1555,7 @@ pub const ControlTokenOverrides = struct {
     button_outline: ControlVisualTokenOverrides = .{},
     button_ghost: ControlVisualTokenOverrides = .{},
     button_destructive: ControlVisualTokenOverrides = .{},
+    button_disabled_border: ?Color = null,
     toggle_button: ControlVisualTokenOverrides = .{},
     accordion: ControlVisualTokenOverrides = .{},
     alert: ControlVisualTokenOverrides = .{},
@@ -1596,6 +1604,7 @@ pub const ControlTokenOverrides = struct {
         next.button_outline = self.button_outline.apply(next.button_outline);
         next.button_ghost = self.button_ghost.apply(next.button_ghost);
         next.button_destructive = self.button_destructive.apply(next.button_destructive);
+        if (self.button_disabled_border) |button_disabled_border| next.button_disabled_border = button_disabled_border;
         next.toggle_button = self.toggle_button.apply(next.toggle_button);
         next.accordion = self.accordion.apply(next.accordion);
         next.alert = self.alert.apply(next.alert);

@@ -936,6 +936,80 @@ test "gpu surface nonblank transition invalidates the runtime" {
     try std.testing.expect(!harness.runtime.invalidated);
 }
 
+test "gpu surface backend transition invalidates the runtime" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-backend-transition", .source = platform.WebViewSource.html("<h1>GPU</h1>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = context;
+            _ = runtime;
+            _ = event_value;
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 640, 360),
+    });
+
+    // A fallback completion changes an observable snapshot fact even when
+    // nonblank and latency state stay unchanged.
+    harness.runtime.invalidated = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 16,
+        .nonblank = false,
+        .backend = .software,
+    } });
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expectEqual(platform.GpuSurfaceBackend.software, (try harness.runtime.gpuSurfaceFrame(1, "canvas")).backend);
+
+    // The same presenter on the next timer completion is steady state and
+    // must not turn snapshot publication into a per-frame loop.
+    harness.runtime.invalidated = false;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 32,
+        .nonblank = false,
+        .backend = .software,
+    } });
+    try std.testing.expect(!harness.runtime.invalidated);
+
+    // Recovery to the packet presenter is the same observable transition
+    // in the opposite direction.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = 1,
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .scale_factor = 1,
+        .frame_index = 3,
+        .timestamp_ns = 48,
+        .nonblank = false,
+        .backend = .direct2d,
+    } });
+    try std.testing.expect(harness.runtime.invalidated);
+    try std.testing.expectEqual(platform.GpuSurfaceBackend.direct2d, (try harness.runtime.gpuSurfaceFrame(1, "canvas")).backend);
+}
+
 test "a handler error degrades: dispatch continues, the error ring records it, snapshots publish it" {
     // One erroring update arm used to exit the whole app
     // (the platform callback saw the error, set `failed`, and stopped

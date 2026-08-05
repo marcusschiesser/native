@@ -351,7 +351,12 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
             // inside the flat wash chrome.
             try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
         },
-        .data_cell => try emitDataCellContent(builder, paint_widget, tokens),
+        .data_cell => {
+            try emitDataCellContent(builder, paint_widget, tokens);
+            if (paint_widget.spans.len == 0 and paint_widget.children.len > 0) {
+                try emitWidgetClippedChildren(builder, paint_widget, tokens, depth);
+            }
+        },
         .status_bar => try emitStatusBarWidget(builder, paint_widget, tokens),
         .segmented_control => try widget_render_controls.emitSegmentedControlWidget(builder, paint_widget, tokens),
         .checkbox => try widget_render_controls.emitCheckboxWidget(builder, paint_widget, tokens),
@@ -1141,6 +1146,7 @@ fn emitCodeEditorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
             .fill = colorFill(tokens.colors.surface_subtle),
         });
     }
+    try emitVisibleCodeTextSpansWidget(builder, widget, tokens, widget.frame, .{});
     if (selection_range) |range| {
         if (!range.isCollapsed(widget.text.len)) {
             try widget_render_controls.emitWidgetTextSelectionRects(
@@ -1156,7 +1162,6 @@ fn emitCodeEditorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
             );
         }
     }
-    try emitVisibleCodeTextSpansWidget(builder, widget, tokens, widget.frame, .{});
     if (selection_range) |range| {
         if (!range.isCollapsed(widget.text.len)) {
             try emitCodeEditorSelectedGlyphs(
@@ -1204,7 +1209,7 @@ fn emitCodeEditorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens)
     // duplicate the retained line-number command IDs and place a second set
     // of markers at logical-line rather than visual-row positions.
     if (widget.text_no_wrap) {
-        try emitVisibleEditableCodeLineNumberGutter(builder, widget, tokens, widget.frame, active_row);
+        try emitVisibleEditableCodeGutter(builder, widget, tokens, widget.frame, active_row);
     }
     try builder.popClip();
 }
@@ -1309,7 +1314,7 @@ fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
         &runs,
     );
 
-    try emitCodeLineNumberGutter(builder, widget, widget.spans, tokens, content, widget.frame, layout_options, null);
+    try emitCodeLineDecorations(builder, widget, widget.spans, tokens, content, widget.frame, layout_options, null, true);
     // Span background highlights (intra-line diff emphasis): one
     // full-line-height rect per run, the same geometry selection rects
     // use, painted before selection and glyphs. Edge-snapped rects of
@@ -1538,7 +1543,7 @@ fn emitVisibleCodeTextSpansWidget(
     if (!budget.hasCommand(builder)) return;
 
     if (paint.selection_ordinal == null) {
-        try emitCodeLineNumberGutter(builder, widget, spans, tokens, content, visible_bounds, layout_options, &budget);
+        try emitCodeLineDecorations(builder, widget, spans, tokens, content, visible_bounds, layout_options, &budget, true);
         try emitStaticTextSelectionBounded(builder, widget, tokens, budget.command_ceiling);
     }
     if (!budget.hasCommand(builder) or budget.remainingText() == 0) return;
@@ -1634,7 +1639,7 @@ fn emitVisibleWrappedEditableCodeLines(
     if (paint.selection_ordinal == null) {
         var gutter_content = content;
         gutter_content.x += widget.value_x;
-        try emitCodeLineNumberGutter(
+        try emitCodeLineDecorations(
             builder,
             widget,
             widget.spans,
@@ -1643,6 +1648,7 @@ fn emitVisibleWrappedEditableCodeLines(
             visible_bounds,
             layout_options,
             &budget,
+            true,
         );
     }
     if (!budget.hasCommand(builder) or budget.remainingText() == 0) return;
@@ -1822,6 +1828,19 @@ fn emitVisibleEditableCodeLines(
 
     var budget = CodeEmissionBudget.init(builder);
     if (!budget.hasCommand(builder)) return;
+    if (paint.selection_ordinal == null) {
+        try emitCodeLineDecorations(
+            builder,
+            widget,
+            widget.spans,
+            tokens,
+            content,
+            visible_bounds,
+            layout_options,
+            &budget,
+            false,
+        );
+    }
     var line_runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
 
     while (line_start <= widget.text.len and logical_line <= last_line) : (logical_line += 1) {
@@ -1898,17 +1917,19 @@ fn emitVisibleEditableCodeLines(
 }
 
 /// The editable no-wrap code path scrolls source glyphs beneath a pinned
-/// line-number gutter. Paint that gutter last so source, selection, IME
-/// decoration, and the caret all disappear cleanly behind its opaque
-/// surface instead of clashing with the anchored markers.
-fn emitVisibleEditableCodeLineNumberGutter(
+/// number/diff-marker gutter. Paint that gutter last so source, selection,
+/// IME decoration, and the caret all disappear cleanly behind its opaque
+/// surface instead of clashing with the anchored decorations.
+fn emitVisibleEditableCodeGutter(
     builder: *Builder,
     widget: Widget,
     tokens: DesignTokens,
     visible_bounds: geometry.RectF,
     active_row: ?geometry.RectF,
 ) Error!void {
-    if (widget.code_line_number_digits == 0) return;
+    const has_diff = widget.hasCodeDiff();
+    const line_number_digits = widget.codeLineNumberDigits();
+    if (line_number_digits == 0 and !has_diff) return;
 
     var content = widget_metrics.widgetTextSpanContentFrame(widget, tokens);
     content.y -= widget.value;
@@ -1972,32 +1993,70 @@ fn emitVisibleEditableCodeLineNumberGutter(
         const line_top = content.y + @as(f32, @floatFromInt(logical_line)) * line_height;
         const marker_bounds = geometry.RectF.init(padded.x, line_top, marker_width, line_height);
         if (marker_bounds.intersects(visible_bounds)) {
-            var marker_buffer: [20]u8 = undefined;
-            const marker_formatted = std.fmt.bufPrint(
-                &marker_buffer,
-                "{d}",
-                .{logical_line + 1},
-            ) catch "";
-            const marker_text = builder.allocTextBytes(marker_formatted) catch "";
-            if (marker_text.len > 0) {
+            const one_based_line = logical_line + 1;
+            if (codeDiffKind(widget, one_based_line)) |kind| {
+                const diff_gutter = geometry.RectF.intersection(
+                    gutter_bounds,
+                    geometry.RectF.init(gutter_bounds.x, line_top, gutter_bounds.width, line_height),
+                );
+                if (!diff_gutter.isEmpty()) {
+                    try builder.fillRect(.{
+                        .id = codeDiffGutterBackgroundCommandId(widget.id, one_based_line),
+                        .rect = pixelSnapGeometryRect(tokens, diff_gutter),
+                        .fill = colorFill(codeDiffBackground(tokens, kind)),
+                    });
+                }
+                const marker = switch (kind) {
+                    .added => "+",
+                    .removed => "-",
+                };
                 try builder.drawText(.{
-                    .id = codeLineNumberCommandId(widget.id, logical_line + 1),
+                    .id = codeDiffMarkerCommandId(widget.id, one_based_line),
                     .font_id = tokens.typography.mono_font_id,
                     .size = layout_options.size,
                     .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(
                         padded.x,
                         line_top + layout_options.size,
                     )),
-                    .color = tokens.colors.text_muted,
-                    .text = marker_text,
+                    .color = codeDiffForeground(tokens, kind),
+                    .text = marker,
                     .text_layout = .{
                         .max_width = marker_width,
                         .line_height = line_height,
                         .wrap = .none,
-                        .alignment = .end,
+                        .alignment = .start,
                         .measure = tokens.text_measure,
                     },
                 });
+            }
+            if (line_number_digits != 0) {
+                var marker_buffer: [20]u8 = undefined;
+                const marker_formatted = std.fmt.bufPrint(
+                    &marker_buffer,
+                    "{d}",
+                    .{one_based_line},
+                ) catch "";
+                const marker_text = builder.allocTextBytes(marker_formatted) catch "";
+                if (marker_text.len > 0) {
+                    try builder.drawText(.{
+                        .id = codeLineNumberCommandId(widget.id, one_based_line),
+                        .font_id = tokens.typography.mono_font_id,
+                        .size = layout_options.size,
+                        .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(
+                            padded.x,
+                            line_top + layout_options.size,
+                        )),
+                        .color = tokens.colors.text_muted,
+                        .text = marker_text,
+                        .text_layout = .{
+                            .max_width = marker_width,
+                            .line_height = line_height,
+                            .wrap = .none,
+                            .alignment = .end,
+                            .measure = tokens.text_measure,
+                        },
+                    });
+                }
             }
         }
 
@@ -2006,11 +2065,49 @@ fn emitVisibleEditableCodeLineNumberGutter(
     }
 }
 
-/// Muted logical-line markers for one coherent code paragraph. Each
-/// logical line is measured independently with the same monospace layout
-/// options; summing those wrapped extents places the next marker on the
-/// exact first visual line occupied by its source.
-fn emitCodeLineNumberGutter(
+const CodeDiffKind = enum { added, removed };
+
+fn codeDiffKind(widget: Widget, logical_line: usize) ?CodeDiffKind {
+    if (logical_line == 0 or logical_line > code_model.max_diff_lines) return null;
+    const lines = widget.codeDiffLines() orelse return null;
+    const shift: u7 = @intCast(logical_line - 1);
+    const bit = @as(u128, 1) << shift;
+    if (lines.added & bit != 0) return .added;
+    if (lines.removed & bit != 0) return .removed;
+    return null;
+}
+
+fn codeDiffBackground(tokens: DesignTokens, kind: CodeDiffKind) Color {
+    // Geist publishes these as component states rather than general-purpose
+    // surface roles. Both built-in packs share the exact pair; background
+    // luminance keeps custom light/dark palettes on the matching register.
+    const background = tokens.colors.background;
+    const dark = background.r * 0.2126 + background.g * 0.7152 + background.b * 0.0722 < 0.5;
+    return if (dark)
+        switch (kind) {
+            .added => Color.rgb8(18, 54, 27),
+            .removed => Color.rgb8(86, 26, 30),
+        }
+    else switch (kind) {
+        .added => Color.rgb8(218, 246, 218),
+        .removed => Color.rgb8(255, 230, 230),
+    };
+}
+
+fn codeDiffForeground(tokens: DesignTokens, kind: CodeDiffKind) Color {
+    return canvas.colorTokenValue(tokens.colors, switch (kind) {
+        .added => .syntax_literal,
+        .removed => .syntax_property,
+    });
+}
+
+/// Geist-style diff washes/markers plus muted logical-line numbers for one
+/// coherent code paragraph. Each logical line is measured independently
+/// with the same monospace layout options; summing wrapped extents keeps the
+/// next marker paired with its source. `draw_gutter=false` is the first pass
+/// of a horizontally scrolling editor: it paints the wash before source,
+/// while the pinned gutter redraws its marker and number last.
+fn emitCodeLineDecorations(
     builder: *Builder,
     widget: Widget,
     spans: []const text_spans_model.TextSpan,
@@ -2019,8 +2116,11 @@ fn emitCodeLineNumberGutter(
     visible_bounds: geometry.RectF,
     layout_options: text_spans_model.TextSpanLayoutOptions,
     budget: ?*CodeEmissionBudget,
+    draw_gutter: bool,
 ) Error!void {
-    if (widget.code_line_number_digits == 0) return;
+    const has_diff = widget.hasCodeDiff();
+    const line_number_digits = widget.codeLineNumberDigits();
+    if (!has_diff and (line_number_digits == 0 or !draw_gutter)) return;
     const line_height = text_spans_model.textSpanLineHeight(spans, layout_options);
     if (line_height <= 0 or !std.math.isFinite(line_height)) return;
 
@@ -2036,48 +2136,8 @@ fn emitCodeLineNumberGutter(
         if (line_start == widget.text.len and widget.text.len > 0 and !widget.code_editor) break;
         const newline = std.mem.indexOfScalarPos(u8, widget.text, line_start, '\n');
         const line_end = newline orelse widget.text.len;
-        const baseline = content.y + layout_options.size +
-            @as(f32, @floatFromInt(visual_line)) * line_height;
-        const marker_bounds = geometry.RectF.init(
-            padded.x,
-            baseline - layout_options.size,
-            marker_width,
-            line_height,
-        );
-        if (marker_bounds.intersects(visible_bounds)) {
-            var marker_buffer: [20]u8 = undefined;
-            const marker_formatted = std.fmt.bufPrint(
-                &marker_buffer,
-                "{d}",
-                .{logical_line},
-            ) catch "";
-            const marker_text = builder.allocTextBytes(marker_formatted) catch "";
-            if (budget) |admission| {
-                if (!admission.hasCommand(builder)) return;
-                if (marker_text.len > admission.remainingText()) return;
-            }
-            try builder.drawText(.{
-                .id = codeLineNumberCommandId(widget.id, logical_line),
-                .font_id = tokens.typography.mono_font_id,
-                .size = layout_options.size,
-                .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(padded.x, baseline)),
-                .color = tokens.colors.text_muted,
-                .text = marker_text,
-                .text_layout = .{
-                    .max_width = marker_width,
-                    .line_height = line_height,
-                    .wrap = .none,
-                    .alignment = .end,
-                    .measure = tokens.text_measure,
-                },
-            });
-            if (budget) |admission| admission.chargeText(marker_text.len);
-        }
-
         const line = widget.text[line_start..line_end];
-        if (line.len == 0) {
-            visual_line += 1;
-        } else {
+        const visual_count = if (line.len == 0) 1 else blk: {
             const line_spans = [_]text_spans_model.TextSpan{.{
                 .text = line,
                 .monospace = true,
@@ -2088,8 +2148,91 @@ fn emitCodeLineNumberGutter(
                 layout_options,
                 &line_runs,
             );
-            visual_line += @max(1, line_layout.line_count);
+            break :blk @max(1, line_layout.line_count);
+        };
+        const baseline = content.y + layout_options.size +
+            @as(f32, @floatFromInt(visual_line)) * line_height;
+        const row_bounds = geometry.RectF.init(
+            widget.frame.x,
+            baseline - layout_options.size,
+            widget.frame.width,
+            @as(f32, @floatFromInt(visual_count)) * line_height,
+        );
+        const diff_kind = codeDiffKind(widget, logical_line);
+        if (diff_kind) |kind| {
+            const visible_row = geometry.RectF.intersection(row_bounds, visible_bounds);
+            if (!visible_row.isEmpty()) {
+                if (budget) |admission| if (!admission.hasCommand(builder)) return;
+                try builder.fillRect(.{
+                    .id = codeDiffBackgroundCommandId(widget.id, logical_line),
+                    .rect = pixelSnapGeometryRect(tokens, visible_row),
+                    .fill = colorFill(codeDiffBackground(tokens, kind)),
+                });
+            }
         }
+        const marker_bounds = geometry.RectF.init(
+            padded.x,
+            baseline - layout_options.size,
+            marker_width,
+            line_height,
+        );
+        if (draw_gutter and marker_bounds.intersects(visible_bounds)) {
+            if (diff_kind) |kind| {
+                if (budget) |admission| {
+                    if (!admission.hasCommand(builder) or admission.remainingText() == 0) return;
+                }
+                const marker = switch (kind) {
+                    .added => "+",
+                    .removed => "-",
+                };
+                try builder.drawText(.{
+                    .id = codeDiffMarkerCommandId(widget.id, logical_line),
+                    .font_id = tokens.typography.mono_font_id,
+                    .size = layout_options.size,
+                    .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(padded.x, baseline)),
+                    .color = codeDiffForeground(tokens, kind),
+                    .text = marker,
+                    .text_layout = .{
+                        .max_width = marker_width,
+                        .line_height = line_height,
+                        .wrap = .none,
+                        .alignment = .start,
+                        .measure = tokens.text_measure,
+                    },
+                });
+                if (budget) |admission| admission.chargeText(marker.len);
+            }
+            if (line_number_digits != 0) {
+                var marker_buffer: [20]u8 = undefined;
+                const marker_formatted = std.fmt.bufPrint(
+                    &marker_buffer,
+                    "{d}",
+                    .{logical_line},
+                ) catch "";
+                const marker_text = builder.allocTextBytes(marker_formatted) catch "";
+                if (budget) |admission| {
+                    if (!admission.hasCommand(builder)) return;
+                    if (marker_text.len > admission.remainingText()) return;
+                }
+                try builder.drawText(.{
+                    .id = codeLineNumberCommandId(widget.id, logical_line),
+                    .font_id = tokens.typography.mono_font_id,
+                    .size = layout_options.size,
+                    .origin = pixelSnapTextPoint(tokens, geometry.PointF.init(padded.x, baseline)),
+                    .color = tokens.colors.text_muted,
+                    .text = marker_text,
+                    .text_layout = .{
+                        .max_width = marker_width,
+                        .line_height = line_height,
+                        .wrap = .none,
+                        .alignment = .end,
+                        .measure = tokens.text_measure,
+                    },
+                });
+                if (budget) |admission| admission.chargeText(marker_text.len);
+            }
+        }
+        visual_line += visual_count;
         if (newline == null) break;
         line_start = line_end + 1;
     }
@@ -2169,6 +2312,18 @@ fn codeLineNumberCommandId(widget_id: ObjectId, logical_line: usize) ObjectId {
 
 fn codeLineNumberGutterCommandId(widget_id: ObjectId) ObjectId {
     return textSpanCommandId(0x5eed_59a2_0000_0015, widget_id, 0);
+}
+
+fn codeDiffBackgroundCommandId(widget_id: ObjectId, logical_line: usize) ObjectId {
+    return textSpanCommandId(0x5eed_59a2_0000_0019, widget_id, logical_line);
+}
+
+fn codeDiffGutterBackgroundCommandId(widget_id: ObjectId, logical_line: usize) ObjectId {
+    return textSpanCommandId(0x5eed_59a2_0000_001b, widget_id, logical_line);
+}
+
+fn codeDiffMarkerCommandId(widget_id: ObjectId, logical_line: usize) ObjectId {
+    return textSpanCommandId(0x5eed_59a2_0000_001a, widget_id, logical_line);
 }
 
 fn codeEditorActiveRowCommandId(widget_id: ObjectId, ordinal: usize) ObjectId {

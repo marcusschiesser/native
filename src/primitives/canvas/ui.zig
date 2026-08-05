@@ -2321,6 +2321,12 @@ pub fn Ui(comptime Msg: type) type {
             /// Prefix each logical source line with a muted, monospace
             /// number. Off by default.
             line_numbers: bool = false,
+            /// One-based logical source lines rendered with Geist Code
+            /// Block's green added-line wash and a renderer-owned `+`.
+            added_lines: []const usize = &.{},
+            /// One-based logical source lines rendered with Geist Code
+            /// Block's red removed-line wash and a renderer-owned `-`.
+            removed_lines: []const usize = &.{},
             /// Word-wrap long source lines. `false` keeps logical lines
             /// intact inside one horizontal scroll region.
             wrap: bool = true,
@@ -2343,6 +2349,20 @@ pub fn Ui(comptime Msg: type) type {
             const terminal_editor_line = options.editable and source.len > 0 and source[source.len - 1] == '\n';
             const numbered = options.line_numbers and line_count - @intFromBool(terminal_editor_line) <=
                 (if (options.editable) max_editable_code_lines else max_code_lines);
+            const added_lines = self.codeLineMask(options.added_lines);
+            const removed_lines = self.codeLineMask(options.removed_lines);
+            if (added_lines & removed_lines != 0) self.failed = true;
+            // Read-only presentation stays one bounded paragraph only up to
+            // the same logical-line ceiling as its renderer-owned numbers.
+            // Longer sources keep every byte and omit diff decoration.
+            const diff_bounded = options.editable or line_count <= max_code_lines;
+            const displayed_added_lines = if (diff_bounded) added_lines else 0;
+            const displayed_removed_lines = if (diff_bounded) removed_lines else 0;
+            const decorated = displayed_added_lines != 0 or displayed_removed_lines != 0;
+            const diff_lines: ?canvas.CodeDiffLines = if (decorated) .{
+                .added = displayed_added_lines,
+                .removed = displayed_removed_lines,
+            } else null;
             if (options.editable) {
                 const retained = if (options.wrap) blk: {
                     // Wrapped editor geometry still uses the bounded span
@@ -2388,13 +2408,20 @@ pub fn Ui(comptime Msg: type) type {
                     @intCast(decimalDigits(line_count))
                 else
                     0;
+                if (diff_lines) |lines| editor.widget.setCodeDiffLines(lines);
                 editor.widget.code_editor = true;
                 editor.widget.code_language = options.language;
                 editor.widget.layout.clip_content = true;
                 return editor;
             }
-            const content = if (numbered)
-                self.numberedCodeParagraph(source, options.language, options.wrap, line_count)
+            const content = if (numbered or decorated)
+                self.decoratedCodeParagraph(
+                    source,
+                    options.language,
+                    options.wrap,
+                    if (numbered) @intCast(decimalDigits(line_count)) else 0,
+                    diff_lines,
+                )
             else
                 self.codeParagraphChunks(source, options.language, options.wrap);
             const body = if (options.wrap)
@@ -2440,17 +2467,32 @@ pub fn Ui(comptime Msg: type) type {
         /// owns its muted gutter, so marker digits never enter retained
         /// text or clipboard bytes; it derives each marker baseline from
         /// this paragraph's real wrapped layout.
-        fn numberedCodeParagraph(
+        fn decoratedCodeParagraph(
             self: *Self,
             source: []const u8,
             language: code_model.Language,
             wrap: bool,
-            line_count: usize,
+            line_number_digits: u8,
+            diff_lines: ?canvas.CodeDiffLines,
         ) Node {
             var state: code_model.HighlightState = .{};
             var source_node = self.codeParagraphWithState(source, language, wrap, 1, &state, null);
-            source_node.widget.code_line_number_digits = @intCast(decimalDigits(line_count));
+            source_node.widget.code_line_number_digits = line_number_digits;
+            if (diff_lines) |lines| source_node.widget.setCodeDiffLines(lines);
             return source_node;
+        }
+
+        fn codeLineMask(self: *Self, lines: []const usize) u128 {
+            var mask: u128 = 0;
+            for (lines) |line| {
+                if (line == 0 or line > code_model.max_diff_lines) {
+                    self.failed = true;
+                    continue;
+                }
+                const shift: u7 = @intCast(line - 1);
+                mask |= @as(u128, 1) << shift;
+            }
+            return mask;
         }
 
         /// Keep ordinary code in one text widget so static selection and copy
@@ -2521,7 +2563,7 @@ pub fn Ui(comptime Msg: type) type {
                     budget,
                 );
                 chunks[chunk_index].static_text_group_fingerprint = group_fingerprint;
-                chunks[chunk_index].widget.static_text_group_offset = chunk_start;
+                chunks[chunk_index].widget.static_text_group_offset = @intCast(chunk_start);
                 chunk_index += 1;
                 chunk_start = chunk_end;
             }

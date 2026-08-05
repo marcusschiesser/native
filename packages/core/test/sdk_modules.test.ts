@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { transpileFile } from "../src/transpile.ts";
+import { checkFile } from "../src/frontend.ts";
 import { sdkLibraryModules } from "../src/typed_ast.ts";
 
 const pkg = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -32,7 +32,7 @@ test("every shipped SDK library module is registered", () => {
 
 test("every SDK library module transpiles standalone (tsc-clean, subset-clean, emitted)", () => {
   for (const [name, file] of sdkLibraryModules) {
-    const result = transpileFile(file);
+    const result = checkFile(file);
     assert.equal(result.typeErrors.length, 0, `${name}: tsc errors\n${result.typeErrors.join("\n")}`);
     const details = result.diagnostics.map((d) => `${d.id} ${d.message}`).join("\n");
     assert.equal(result.ok, true, `${name}: transpile failed\n${details}`);

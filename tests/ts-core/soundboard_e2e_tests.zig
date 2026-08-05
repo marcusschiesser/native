@@ -1,6 +1,6 @@
 //! End-to-end proof battery for examples/soundboard-ts — the launch-gate
 //! port: a soundboard-complexity app authored in TypeScript + Native
-//! markup with ZERO hand-written Zig. The build transpiles the example's
+//! markup with ZERO hand-written Zig. The build compiles the example's
 //! REAL core (examples/soundboard-ts/src/core.ts) and this suite drives
 //! it through `TsUiApp` with the example's SHIPPING markup
 //! (app.native, staged beside this file), so every pin here is the
@@ -564,7 +564,7 @@ test "Escape clears the search field and the TS core hears it" {
     // runtime-local editor operation — the field emptied on screen while
     // the core's search mirror kept the stale term and the list stayed
     // filtered. The keyboard derivation now stamps the clear it applies
-    // onto the dispatched event, so the transpiled core hears it through
+    // onto the dispatched event, so the compiled core hears it through
     // the same on-input channel every keystroke uses.
     const h = try Harness.create();
     defer h.destroy();
@@ -764,14 +764,13 @@ test "dispatch at the rendered-clock cadence stays far under the frame budget" {
 
     // The core alone (update + commit + command walk + subscription
     // reconcile), without the runtime pipeline around it - the cost the
-    // transpiled tier adds per tick.
+    // TypeScript tier adds per tick. Every dispatch crosses the C ABI
+    // into the compiled core and decodes the committed-model snapshot
+    // through the mirror (the wire codec is the tier's real per-tick
+    // price), so the pin is microseconds-class, not the sub-microsecond
+    // number an in-process core would post.
     const fx = &h.app_state.effects;
-    // The core-only budget describes ONE core's dispatch. Under the
-    // paired-lanes module every dispatch runs the transpiled core AND the
-    // compiled archive and byte-compares them at each seam, so that
-    // configuration gets half the frame budget instead; the single-lane
-    // run of this suite keeps the strict microseconds-class pin.
-    const core_budget_ns: u64 = if (@hasDecl(core, "paired_lanes")) 8_000_000 else 1_000_000;
+    const core_budget_ns: u64 = 1_000_000;
     var per_core_dispatch_ns: u64 = std.math.maxInt(u64);
     for (0..perf_attempts) |_| {
         const core_start_ns = runtime_ns.monotonicNanoseconds();
@@ -787,8 +786,9 @@ test "dispatch at the rendered-clock cadence stays far under the frame budget" {
     // Every whole-pipeline dispatch (update + commit + effects + the full
     // 68-row markup rebuild) must fit ONE 60Hz frame budget even in a
     // Debug build on loaded CI hardware; the core alone must be
-    // microseconds. Measured on an M-class laptop (Debug): ~3.3ms whole
-    // pipeline, ~450ns core-only.
+    // microseconds. Measured on an M-class laptop (Debug): ~3.7ms whole
+    // pipeline, ~5.3us core-only (the C ABI crossing plus the
+    // committed-model snapshot decode dominate the core-only number).
     if (per_dispatch_ns >= 16_000_000 or per_core_dispatch_ns >= core_budget_ns) {
         std.debug.print("dispatch budget exceeded: whole-pipeline {d}ns (budget 16000000), core-only {d}ns (budget {d}), best of {d} attempts\n", .{ per_dispatch_ns, per_core_dispatch_ns, core_budget_ns, perf_attempts });
     }
@@ -896,7 +896,7 @@ test "a search narrowed below the column count keeps natural tile size" {
         .frame_index = 2,
         .timestamp_ns = 2_000_000,
     } });
-    const full_tile = core.gridTileWidth(Bridge.model());
+    const full_tile = Bridge.model().gridTileWidth();
 
     // Search down to ONE matching album: the grid narrows to one shown
     // column and its exact one-tile width, so the lone cover keeps the
@@ -1177,8 +1177,8 @@ test "render parity screenshots (env-gated)" {
 
     const sizes = [_]geometry.SizeF{ geometry.SizeF.init(1080, 720), geometry.SizeF.init(1400, 800) };
     const cover_stems = [_][]const u8{
-        "exit-signs",      "blue-season", "second-nature",  "no-good-way-out",
-        "glass-flowers",   "night-bloom", "motion-picture", "channel-surfing",
+        "exit-signs",    "blue-season", "second-nature",  "no-good-way-out",
+        "glass-flowers", "night-bloom", "motion-picture", "channel-surfing",
     };
     for (sizes, 0..) |size, size_index| {
         const h = try Harness.create();

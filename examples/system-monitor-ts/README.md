@@ -1,13 +1,13 @@
 # Native SDK system monitor example (TypeScript)
 
-The live CPU / memory / process monitor authored entirely in **TypeScript + Native markup** — the spawn-showcase port of `examples/system-monitor`. Zero Zig: the logic tier is the app-core subset under `src/`, transpiled to native at build time as one module; `src/app.native` is the whole view tier and `app.zon` the manifest. The build detects `src/core.ts` in the tree and stages the wiring itself; no JS runtime ships in the binary.
+The live CPU / memory / process monitor authored entirely in **TypeScript + Native markup** — the spawn-showcase port of `examples/system-monitor`. Zero Zig: the logic tier is the app-core subset under `src/`, compiled to native code at build time; `src/app.native` is the whole view tier and `app.zon` the manifest. The build detects `src/core.ts` in the tree and stages the wiring itself; no JS runtime ships in the binary.
 
 The core is a multi-module reference split of the app-core subset's import-graph support:
 
 - `src/core.ts` — the entry module: Model, Msg, update, subscriptions, the chromeMsg channel, and every exported binding helper (the app's public face — markup and node both see exactly its exports).
 - `src/parsers.ts` — the pure byte parsers over the sampler tools' output (`ps`, `vm_stat`, `/proc/meminfo`, the probes), the integer number tier (`intDiv`), and the byte/format helpers.
 - `src/table.ts` — the process table's search/sort/row-formatting machinery; type-imports `Model` from the entry (the legal back-edge shape).
-- `@native-sdk/core/text` — the SDK's byte-splice text engine, transpiled in for the filter field's caret/selection/IME fidelity.
+- `@native-sdk/core/text` — the SDK's byte-splice text engine, compiled in for the filter field's caret/selection/IME fidelity.
 
 Everything the Zig monitor's core does is here: the 2 s sampling cadence as a declarative `Sub.timer` that exists exactly while sampling is live, collect-mode `Cmd.spawn` for the OS's own commands (`ps axo pid=,pcpu=,pmem=,rss=,etime=,comm=` shared across platforms, `vm_stat` or `/proc/meminfo` for memory, a boot host-info probe), pure byte parsers over the collected stdout (fixture-proven against the Zig example's committed real captures), skipped-tick accounting (a tick that lands mid-spawn is counted, never overlapped), the exact top-128-by-CPU row selection with the full count and CPU sum still covering every process, uptime from pid 1's elapsed time, 60-sample NaN-padded sparkline windows drawn by markup `<chart>` elements, the search/sort/filter table on the real table register with controlled scroll, the confirmed SIGTERM context-menu action (`/bin/kill -TERM <pid>` — no SIGKILL anywhere), Copy Name onto the clipboard, the journaled `Cmd.now` sample timestamp, the honest no-sampler empty state, and the tall hidden-inset titlebar header driven by the `chromeMsg` channel.
 

@@ -347,10 +347,13 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
                 app_mod.addLibraryPath(b.path(b.fmt("{s}/Release", .{cef_dir})));
             },
         }
+        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/gpu_surface_renderer.cpp"), .flags = &.{"-std=c++17"} });
         app_mod.linkSystemLibrary("c", .{});
         app_mod.linkSystemLibrary("c++", .{});
         app_mod.linkSystemLibrary("user32", .{});
         app_mod.linkSystemLibrary("gdi32", .{});
+        app_mod.linkSystemLibrary("d2d1", .{});
+        app_mod.linkSystemLibrary("dwrite", .{});
         app_mod.linkSystemLibrary("imm32", .{});
         app_mod.linkSystemLibrary("comctl32", .{});
         app_mod.linkSystemLibrary("ole32", .{});

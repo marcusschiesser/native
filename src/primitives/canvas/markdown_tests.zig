@@ -56,6 +56,22 @@ fn findKind(widget: canvas.Widget, kind: canvas.WidgetKind) ?canvas.Widget {
     return null;
 }
 
+fn findImageId(widget: canvas.Widget, image_id: canvas.ImageId) ?canvas.Widget {
+    if (widget.kind == .image and widget.image_id == image_id) return widget;
+    for (widget.children) |child| {
+        if (findImageId(child, image_id)) |found| return found;
+    }
+    return null;
+}
+
+fn findCellContainingImage(widget: canvas.Widget, image_id: canvas.ImageId) ?canvas.Widget {
+    if (widget.kind == .data_cell and findImageId(widget, image_id) != null) return widget;
+    for (widget.children) |child| {
+        if (findCellContainingImage(child, image_id)) |found| return found;
+    }
+    return null;
+}
+
 fn appendParagraphText(widget: canvas.Widget, out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator) !void {
     if (widget.kind == .text and widget.spans.len > 0) {
         try out.appendSlice(allocator, widget.text);
@@ -72,6 +88,16 @@ fn hasSpan(widget: canvas.Widget, text: []const u8, color: ?canvas.TextSpanColor
         if (hasSpan(child, text, color)) return true;
     }
     return false;
+}
+
+fn findSpan(widget: canvas.Widget, text: []const u8) ?canvas.TextSpan {
+    for (widget.spans) |span| {
+        if (std.mem.eql(u8, span.text, text)) return span;
+    }
+    for (widget.children) |child| {
+        if (findSpan(child, text)) |span| return span;
+    }
+    return null;
 }
 
 fn allSpansMonospace(widget: canvas.Widget) bool {
@@ -106,6 +132,19 @@ fn findKindLabel(widget: canvas.Widget, kind: canvas.WidgetKind, label: []const 
         if (findKindLabel(child, kind, label)) |found| return found;
     }
     return null;
+}
+
+fn countKindLabel(widget: canvas.Widget, kind: canvas.WidgetKind, label: []const u8) usize {
+    var count: usize = if (widget.kind == kind and
+        (std.mem.eql(u8, widget.semantics.label, label) or std.mem.eql(u8, widget.text, label))) 1 else 0;
+    for (widget.children) |child| count += countKindLabel(child, kind, label);
+    return count;
+}
+
+fn countRole(widget: canvas.Widget, role: canvas.WidgetRole) usize {
+    var count: usize = if (widget.semantics.role == role) 1 else 0;
+    for (widget.children) |child| count += countRole(child, role);
+    return count;
 }
 
 fn findRowWithDirectParagraph(widget: canvas.Widget, fragment: []const u8) ?canvas.Widget {
@@ -154,6 +193,464 @@ test "markdown maps headings, paragraphs, and inline styles onto spans" {
     try testing.expectEqual(canvas.WidgetRole.link, link_child.semantics.role);
     const msg = tree.msgForPointer(link_child.id, .up).?;
     try testing.expectEqualStrings("https://example.com", msg.open_url);
+}
+
+test "safe GitHub-style inline HTML maps onto native spans" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\Plain <strong>bold <em>and italic</em></strong>, <code>code</code>, <del>gone</del>, <ins>new</ins>, <mark>marked</mark>, and <small>small</small>.
+        \\<A HREF=https://example.com/a/b>a link</A>.<BR />Next <IMG src="ignored.png" onerror="boom()" alt='diagram'> &amp; &#x2713;.
+    , .{ .on_link = Ui.linkMsg(.open_url) });
+
+    const paragraph = findParagraphContaining(tree.root, "Plain").?;
+    try testing.expectEqualStrings(
+        "Plain bold and italic, code, gone, new, marked, and small. a link.\nNext diagram & ✓.",
+        paragraph.text,
+    );
+
+    try testing.expectEqual(canvas.TextSpanWeight.bold, findSpan(paragraph, "bold ").?.weight);
+    const nested = findSpan(paragraph, "and italic").?;
+    try testing.expectEqual(canvas.TextSpanWeight.bold, nested.weight);
+    try testing.expect(nested.italic);
+    try testing.expect(findSpan(paragraph, "code").?.monospace);
+    try testing.expect(findSpan(paragraph, "gone").?.strikethrough);
+    try testing.expect(findSpan(paragraph, "new").?.underline);
+    try testing.expectEqual(canvas.TextSpanColor.surface_pressed, findSpan(paragraph, "marked").?.background.?);
+    try testing.expectEqual(@as(f32, 0.875), findSpan(paragraph, "small").?.scale);
+
+    const link = findSpan(paragraph, "a link").?;
+    try testing.expectEqualStrings("https://example.com/a/b", link.link);
+    const link_widget = findRoleLabel(tree.root, .link, "a link").?;
+    const msg = tree.msgForPointer(link_widget.id, .up).?;
+    try testing.expectEqualStrings("https://example.com/a/b", msg.open_url);
+}
+
+test "safe HTML decodes entities in link and image attributes" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<a href="https://example.com/search?a=1&amp;b=2">query</a> <img alt="A &amp; B">.
+    , .{ .on_link = Ui.linkMsg(.open_url) });
+
+    const paragraph = findParagraphContaining(tree.root, "query").?;
+    try testing.expectEqualStrings("query A & B.", paragraph.text);
+    const link = findSpan(paragraph, "query").?;
+    try testing.expectEqualStrings("https://example.com/search?a=1&b=2", link.link);
+    const link_widget = findRoleLabel(tree.root, .link, "query").?;
+    const msg = tree.msgForPointer(link_widget.id, .up).?;
+    try testing.expectEqualStrings("https://example.com/search?a=1&b=2", msg.open_url);
+}
+
+test "empty HTML anchors do not create accessibility links" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\Before<a href="https://empty.example"><sup><img alt="" /></sup></a>After.
+        \\<a href="https://diagram.example"><img alt="diagram" /></a>
+    , .{ .on_link = Ui.linkMsg(.open_url) });
+
+    try testing.expectEqual(@as(usize, 1), countRole(tree.root, .link));
+    try testing.expect(findRoleLabel(tree.root, .link, "") == null);
+    const diagram = findRoleLabel(tree.root, .link, "diagram").?;
+    try testing.expectEqualStrings("https://diagram.example", tree.msgForPointer(diagram.id, .up).?.open_url);
+}
+
+test "link reference definitions stay hidden without resolving references" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\[vc]: #hash:payload
+        \\   [docs]: <https://example.com/a b> "A title"
+        \\The update leaves [vc] and [docs][] literal.
+        \\
+        \\Paragraph text
+        \\[not-interrupting]: /url
+        \\
+        \\[broken]:
+        \\[junk]: /url trailing words
+        \\[joined-title]: <https://example.com>"title"
+        \\    [too-indented]: /url
+    , .{});
+
+    try testing.expect(findParagraphContaining(tree.root, "#hash:payload") == null);
+    try testing.expect(findParagraphContaining(tree.root, "A title") == null);
+    try testing.expectEqualStrings(
+        "The update leaves [vc] and [docs][] literal.",
+        findParagraphContaining(tree.root, "The update").?.text,
+    );
+    try testing.expectEqualStrings(
+        "Paragraph text [not-interrupting]: /url",
+        findParagraphContaining(tree.root, "Paragraph text").?.text,
+    );
+    try testing.expect(findParagraphContaining(tree.root, "[broken]:") != null);
+    try testing.expect(findParagraphContaining(tree.root, "[junk]: /url trailing words") != null);
+    try testing.expect(findParagraphContaining(tree.root, "[joined-title]") != null);
+    try testing.expect(findParagraphContaining(tree.root, "[too-indented]: /url") != null);
+}
+
+test "Vercel deployment comments hide metadata and retain table links" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\[vc]: #H4enDGKDtR2Lb2lsv4EbfoqtEIHUz0WJNjyO4zsNHm8=:eyJpc01vbm9yZXBvIjp0cnVlLCJ0eXBlIjoiZ2l0aHViIn0=
+        \\The latest updates on your projects. Learn more about [Vercel for GitHub](https://vercel.link/github-learn-more).
+        \\
+        \\| Project | Deployment | Actions | Updated (UTC) |
+        \\| :--- | :----- | :------ | :------ |
+        \\| <a href="https://vercel.com/vercel-labs/native-sdk"><sup><img src="avatar" width="16" height="16" alt="" /></sup></a> [native-sdk](https://vercel.com/vercel-labs/native-sdk) | ![Ready](ready.svg) [Ready](https://vercel.com/deployment) | [Preview](https://preview.example) | Aug 4, 2026 8:14pm |
+    , .{ .on_link = Ui.linkMsg(.open_url) });
+
+    try testing.expect(findParagraphContaining(tree.root, "[vc]") == null);
+    try testing.expectEqualStrings(
+        "The latest updates on your projects. Learn more about Vercel for GitHub.",
+        findParagraphContaining(tree.root, "The latest updates").?.text,
+    );
+    try testing.expectEqual(@as(usize, 1), countKind(tree.root, .table));
+    try testing.expectEqual(@as(usize, 4), countRole(tree.root, .link));
+    try testing.expect(findRoleLabel(tree.root, .link, "") == null);
+    try testing.expect(findRoleLabel(tree.root, .link, "Vercel for GitHub") != null);
+    try testing.expect(findRoleLabel(tree.root, .link, "native-sdk") != null);
+    try testing.expect(findRoleLabel(tree.root, .link, "Ready") != null);
+    try testing.expect(findRoleLabel(tree.root, .link, "Preview") != null);
+}
+
+test "GitHub-style HTML blocks lower onto native document structure" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<div align="center">
+        \\<h2>Centered <em>heading</em></h2>
+        \\<p>Copy <strong>here</strong>.</p>
+        \\</div>
+        \\<h3>
+        \\Multiline heading
+        \\</h3>
+        \\
+        \\<blockquote>Quoted <code>value</code>.</blockquote>
+        \\<blockquote>
+        \\Nested <strong>quote</strong>.
+        \\</blockquote>
+        \\<hr class="ignored">
+        \\<ul>
+        \\<li>First</li>
+        \\<li>Second <b>bold</b></li>
+        \\</ul>
+        \\<pre>
+        \\<code>
+        \\const answer = 42;
+        \\</code>
+        \\</pre>
+    , .{});
+
+    const heading = findParagraphContaining(tree.root, "Centered heading").?;
+    try testing.expectEqual(canvas.TextAlign.center, heading.text_alignment);
+    try testing.expectEqual(markdown.heading_scales[1], findSpan(heading, "Centered ").?.scale);
+    const heading_emphasis = findSpan(heading, "heading").?;
+    try testing.expectEqual(canvas.TextSpanWeight.bold, heading_emphasis.weight);
+    try testing.expect(heading_emphasis.italic);
+
+    const centered_copy = findParagraphContaining(tree.root, "Copy here.").?;
+    try testing.expectEqual(canvas.TextAlign.center, centered_copy.text_alignment);
+    try testing.expectEqual(canvas.TextSpanWeight.bold, findSpan(centered_copy, "here").?.weight);
+
+    const multiline_heading = findParagraphContaining(tree.root, "Multiline heading").?;
+    try testing.expectEqual(canvas.TextSpanWeight.bold, multiline_heading.spans[0].weight);
+    try testing.expectEqual(markdown.heading_scales[2], multiline_heading.spans[0].scale);
+
+    const quote = findParagraphContaining(tree.root, "Quoted value.").?;
+    try testing.expectEqual(canvas.TextAlign.start, quote.text_alignment);
+    try testing.expect(findSpan(quote, "value").?.monospace);
+    try testing.expectEqual(canvas.TextSpanWeight.bold, findSpan(tree.root, "quote").?.weight);
+    try testing.expectEqual(@as(usize, 3), countKind(tree.root, .separator));
+    try testing.expect(findRowWithDirectParagraph(tree.root, "First") != null);
+    try testing.expect(findRowWithDirectParagraph(tree.root, "Second bold") != null);
+    const preformatted = findParagraphContaining(tree.root, "const answer = 42;").?;
+    try testing.expect(allSpansMonospace(preformatted));
+}
+
+test "HTML block closers may follow content without absorbing later blocks" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<div align="center">
+        \\Centered</div>
+        \\
+        \\Outside
+        \\<blockquote>
+        \\Quoted</blockquote>After quote
+        \\<pre>
+        \\<code>&lt;tag&gt; &amp; &#x2713;</code></pre>After pre
+    , .{});
+
+    try testing.expectEqual(@as(usize, 6), tree.root.children.len);
+    try testing.expectEqual(canvas.TextAlign.center, tree.root.children[0].text_alignment);
+    try testing.expectEqualStrings("Outside", tree.root.children[1].text);
+    try testing.expectEqual(canvas.TextAlign.start, tree.root.children[1].text_alignment);
+    try testing.expect(findParagraphContaining(tree.root.children[2], "Quoted") != null);
+    try testing.expectEqualStrings("After quote", tree.root.children[3].text);
+    try testing.expect(findParagraphContaining(tree.root.children[4], "<tag> & ✓") != null);
+    try testing.expectEqualStrings("After pre", tree.root.children[5].text);
+}
+
+test "multiline HTML blocks keep semantics when content follows the opener" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<blockquote>First line
+        \\Second line</blockquote>After quote
+        \\<pre><code>first
+        \\second</code></pre>After pre
+    , .{});
+
+    try testing.expectEqual(@as(usize, 4), tree.root.children.len);
+    try testing.expectEqual(@as(usize, 1), countKind(tree.root.children[0], .separator));
+    try testing.expect(findParagraphContaining(tree.root.children[0], "First line Second line") != null);
+    try testing.expectEqualStrings("After quote", tree.root.children[1].text);
+    const code = findParagraphContaining(tree.root.children[2], "first\nsecond").?;
+    try testing.expect(allSpansMonospace(code));
+    try testing.expectEqualStrings("After pre", tree.root.children[3].text);
+}
+
+test "multiline HTML list items retain their native marker" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<ul>
+        \\<li>
+        \\First <strong>bold</strong>
+        \\</li>
+        \\</ul>
+    , .{});
+
+    const item = findRowWithDirectParagraph(tree.root, "First bold").?;
+    try testing.expect(findKindLabel(item, .text, "•") != null);
+    try testing.expectEqual(canvas.TextSpanWeight.bold, findSpan(item, "bold").?.weight);
+}
+
+test "multiline HTML headings honor align" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<h2 align="center">
+        \\Heading
+        \\</h2>
+        \\Outside
+    , .{});
+
+    const heading = findParagraphContaining(tree.root, "Heading").?;
+    const outside = findParagraphContaining(tree.root, "Outside").?;
+    try testing.expectEqual(canvas.TextAlign.center, heading.text_alignment);
+    try testing.expectEqual(markdown.heading_scales[1], heading.spans[0].scale);
+    try testing.expectEqual(canvas.TextAlign.start, outside.text_alignment);
+}
+
+test "HTML blockquotes contain malformed child presentation scopes" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<blockquote>
+        \\<div align="center">
+        \\Inside
+        \\</blockquote>
+        \\Outside
+    , .{});
+
+    const inside = findParagraphContaining(tree.root.children[0], "Inside").?;
+    const outside = findParagraphContaining(tree.root.children[1], "Outside").?;
+    try testing.expectEqual(canvas.TextAlign.center, inside.text_alignment);
+    try testing.expectEqual(canvas.TextAlign.start, outside.text_alignment);
+}
+
+test "self-closing HTML wrappers do not leak block presentation" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<div align="center" />
+        \\Plain
+        \\<h1 />
+        \\Still plain
+    , .{});
+
+    const plain = findParagraphContaining(tree.root, "Plain").?;
+    const still_plain = findParagraphContaining(tree.root, "Still plain").?;
+    try testing.expectEqual(canvas.TextAlign.start, plain.text_alignment);
+    try testing.expectEqual(canvas.TextAlign.start, still_plain.text_alignment);
+    try testing.expectEqual(canvas.TextSpanWeight.regular, plain.spans[0].weight);
+    try testing.expectEqual(canvas.TextSpanWeight.regular, still_plain.spans[0].weight);
+    try testing.expectEqual(@as(f32, 0), plain.spans[0].scale);
+    try testing.expectEqual(@as(f32, 0), still_plain.spans[0].scale);
+}
+
+test "HTML comments hide content while unsupported and malformed tags stay literal" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\Visible <!-- hidden **secret** --> text. <script><strong>alert</strong>&amp;</script> <span onclick="boom()">safe</span>.
+        \\
+        \\Malformed <strong never closes.
+    , .{});
+
+    const visible = findParagraphContaining(tree.root, "Visible").?;
+    try testing.expect(std.mem.indexOf(u8, visible.text, "hidden") == null);
+    try testing.expect(std.mem.indexOf(u8, visible.text, "secret") == null);
+    try testing.expect(std.mem.indexOf(u8, visible.text, "<script><strong>alert</strong>&amp;</script>") != null);
+    try testing.expect(std.mem.indexOf(u8, visible.text, "onclick") == null);
+    try testing.expect(std.mem.indexOf(u8, visible.text, "safe") != null);
+
+    const malformed = findParagraphContaining(tree.root, "Malformed").?;
+    try testing.expect(std.mem.indexOf(u8, malformed.text, "<strong never closes.") != null);
+}
+
+test "multiline unsupported HTML stays opaque across block boundaries" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<div align="center">
+        \\<script>
+        \\raw script text
+        \\
+        \\<strong>alert</strong> &amp;
+        \\</div>
+        \\</script>
+        \\Still centered
+        \\</div>
+        \\Outside
+    , .{});
+
+    const script = findParagraphContaining(tree.root, "<script>").?;
+    try testing.expect(std.mem.indexOf(u8, script.text, "<strong>alert</strong> &amp;") != null);
+    try testing.expect(std.mem.startsWith(u8, script.spans[0].text, "<script>"));
+    try testing.expect(std.mem.indexOf(u8, script.spans[0].text, "<strong>alert</strong> &amp;") != null);
+    try testing.expectEqual(canvas.TextSpanWeight.regular, script.spans[0].weight);
+
+    const centered = findParagraphContaining(tree.root, "Still centered").?;
+    const outside = findParagraphContaining(tree.root, "Outside").?;
+    try testing.expectEqual(canvas.TextAlign.center, centered.text_alignment);
+    try testing.expectEqual(canvas.TextAlign.start, outside.text_alignment);
+}
+
+test "HTML element bodies truncate at the markdown paragraph budget" {
+    var source_buffer: [markdown.max_markdown_paragraph_bytes + 256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&source_buffer);
+    try stream.writeAll("<p>");
+    for (0..markdown.max_markdown_paragraph_bytes + 128) |_| try stream.writeAll("x");
+    try stream.writeAll("</p>After");
+
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(stream.buffered(), .{});
+    try testing.expectEqual(@as(usize, 2), tree.root.children.len);
+    try testing.expectEqual(markdown.max_markdown_paragraph_bytes, tree.root.children[0].text.len);
+    try testing.expectEqualStrings("After", tree.root.children[1].text);
+}
+
+test "multiline HTML comments stay hidden across blank lines" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\Before
+        \\<!-- hidden
+        \\
+        \\still hidden -->
+        \\After
+    , .{});
+
+    try testing.expectEqual(@as(usize, 2), tree.root.children.len);
+    try testing.expectEqualStrings("Before", tree.root.children[0].text);
+    try testing.expectEqualStrings("After", tree.root.children[1].text);
+}
+
+test "unclosed safe HTML blocks and inline tags remain literal" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<h2>Unclosed heading
+        \\
+        \\- following item
+        \\
+        \\Malformed <strong title="**">never closes and stray </em>.
+        \\
+        \\</h3>
+    , .{});
+
+    const heading = findParagraphContaining(tree.root, "Unclosed heading").?;
+    try testing.expectEqualStrings("<h2>Unclosed heading", heading.text);
+    try testing.expectEqual(canvas.TextSpanWeight.regular, heading.spans[0].weight);
+    try testing.expectEqual(@as(f32, 0), heading.spans[0].scale);
+    try testing.expect(findRowWithDirectParagraph(tree.root, "following item") != null);
+
+    const malformed = findParagraphContaining(tree.root, "Malformed").?;
+    try testing.expectEqualStrings(
+        "Malformed <strong title=\"**\">never closes and stray </em>.",
+        malformed.text,
+    );
+    for (malformed.spans) |span| try testing.expectEqual(canvas.TextSpanWeight.regular, span.weight);
+    try testing.expectEqualStrings("</h3>", findParagraphContaining(tree.root, "</h3>").?.text);
+}
+
+test "HTML wrapper closers inside Markdown code spans stay literal" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<div align="center">
+        \\Use `</div>` literally.
+        \\
+        \\Still centered.
+        \\</div>
+        \\Outside.
+    , .{});
+
+    const code_line = findParagraphContaining(tree.root, "Use </div> literally.").?;
+    const centered = findParagraphContaining(tree.root, "Still centered.").?;
+    const outside = findParagraphContaining(tree.root, "Outside.").?;
+    try testing.expect(findSpan(code_line, "</div>").?.monospace);
+    try testing.expectEqual(canvas.TextAlign.center, code_line.text_alignment);
+    try testing.expectEqual(canvas.TextAlign.center, centered.text_alignment);
+    try testing.expectEqual(canvas.TextAlign.start, outside.text_alignment);
+}
+
+test "multiline comments stay opaque while collecting HTML blocks" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<blockquote>
+        \\Before.
+        \\<!-- hidden
+        \\</blockquote>
+        \\still hidden -->
+        \\After.
+        \\</blockquote>
+        \\Outside.
+    , .{});
+
+    try testing.expectEqual(@as(usize, 2), tree.root.children.len);
+    try testing.expect(findParagraphContaining(tree.root.children[0], "Before.") != null);
+    try testing.expect(findParagraphContaining(tree.root.children[0], "After.") != null);
+    try testing.expect(findParagraphContaining(tree.root.children[0], "hidden") == null);
+    try testing.expectEqualStrings("Outside.", tree.root.children[1].text);
+}
+
+test "HTML ordered and definition lists retain their native semantics" {
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\<ol>
+        \\<li>First</li>
+        \\<li>Second</li>
+        \\</ol>
+        \\<ol><li>Compact one</li><li>Compact two</li></ol>
+        \\<dl>
+        \\<dt>Term</dt>
+        \\<dd>Definition</dd>
+        \\</dl>
+    , .{});
+
+    try testing.expectEqual(@as(usize, 2), countKindLabel(tree.root, .text, "1."));
+    try testing.expectEqual(@as(usize, 2), countKindLabel(tree.root, .text, "2."));
+    try testing.expectEqual(@as(usize, 0), countKindLabel(tree.root, .text, "•"));
+    try testing.expectEqual(canvas.TextSpanWeight.bold, findSpan(tree.root, "Term").?.weight);
+    try testing.expect(findParagraphContaining(tree.root, "Definition") != null);
 }
 
 test "markdown maps lists, task lists, code fences, quotes, and rules" {
@@ -324,6 +821,30 @@ test "details blocks are caller-controlled collapsibles" {
     try testing.expectEqual(@as(?bool, true), open_header.state.expanded);
 }
 
+test "details summaries lower safe inline HTML" {
+    const source =
+        \\<details>
+        \\<summary><strong>More</strong> &amp; <a href="https://example.com">docs</a></summary>
+        \\Body.
+        \\</details>
+    ;
+
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(source, .{
+        .on_link = Ui.linkMsg(.open_url),
+        .on_details = Md.detailsMsg(.toggle_details),
+    });
+
+    const summary = findParagraphContaining(tree.root, "More & docs").?;
+    try testing.expectEqual(canvas.TextSpanWeight.bold, findSpan(summary, "More").?.weight);
+    try testing.expectEqualStrings("https://example.com", findSpan(summary, "docs").?.link);
+
+    const header = findKindLabel(tree.root, .list_item, "▸ More & docs").?;
+    const toggle = tree.msgForPointer(header.id, .up).?;
+    try testing.expectEqual(@as(usize, 0), toggle.toggle_details);
+}
+
 test "malformed markdown degrades to literal text and never fails" {
     var doc = TestDoc.init();
     defer doc.deinit();
@@ -396,6 +917,259 @@ test "pipe tables map onto table/data_row/data_cell with alignment and header st
     try testing.expectEqual(canvas.WidgetRole.link, hotspot.semantics.role);
     const msg = tree.msgForPointer(hotspot.id, .up).?;
     try testing.expectEqualStrings("https://example.com/logs", msg.open_url);
+}
+
+test "resolved leading table images render as native image leaves with alt fallback" {
+    const avatar_url = "https://vercel.com/api/www/avatar?projectId=project&teamId=team&s=32";
+    const ready_url = "https://vercel.com/static/status/ready.svg";
+    const images = [_]markdown.ResolvedImage{
+        .{ .source = avatar_url, .image = 41, .width = 32, .height = 32 },
+        .{ .source = ready_url, .image = 42, .width = 10, .height = 10 },
+    };
+
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\| Project | Deployment |
+        \\| :--- | :--- |
+        \\| <a href="https://vercel.com/vercel-labs/native-sdk"><sup><img src="https://vercel.com/api/www/avatar?projectId=project&teamId=team&s=32" width="16" height="16" align="middle" alt="" /></sup></a> [native-sdk](https://vercel.com/vercel-labs/native-sdk) | ![Ready](https://vercel.com/static/status/ready.svg) [Ready](https://vercel.com/deploy) |
+    , .{ .on_link = Ui.linkMsg(.open_url), .images = &images });
+
+    try testing.expectEqual(@as(usize, 2), countKind(tree.root, .image));
+    const avatar = findImageId(tree.root, 41).?;
+    try testing.expectEqual(@as(f32, 16), avatar.layout.min_size.width);
+    try testing.expectEqual(@as(f32, 16), avatar.layout.min_size.height);
+    try testing.expectEqual(canvas.WidgetRole.link, avatar.semantics.role);
+    try testing.expectEqualStrings("https://vercel.com/vercel-labs/native-sdk", tree.msgForPointer(avatar.id, .up).?.open_url);
+
+    const ready = findImageId(tree.root, 42).?;
+    try testing.expectEqual(@as(f32, 10), ready.layout.min_size.width);
+    try testing.expectEqual(@as(f32, 10), ready.layout.min_size.height);
+    try testing.expectEqual(canvas.WidgetRole.image, ready.semantics.role);
+    try testing.expectEqualStrings("Ready", ready.semantics.label);
+    try testing.expect(findParagraphContaining(tree.root, "native-sdk") != null);
+    try testing.expect(findParagraphContaining(tree.root, "Ready") != null);
+
+    var fallback_doc = TestDoc.init();
+    defer fallback_doc.deinit();
+    const fallback = try fallback_doc.build(
+        \\| Deployment |
+        \\| --- |
+        \\| ![Ready](https://vercel.com/static/status/ready.svg) |
+    , .{});
+    try testing.expectEqual(@as(usize, 0), countKind(fallback.root, .image));
+    try testing.expect(findCellContaining(fallback.root, "Ready") != null);
+}
+
+test "entity-normalized discovered image sources match resolved HTML images" {
+    const source =
+        \\<img src="https://example.com/avatar?a=1&amp;b=2" alt="Avatar" />
+    ;
+    var collected_storage: [1]markdown.CollectedImageSource = undefined;
+    const collected = markdown.collectImageSources(source, &collected_storage);
+    try testing.expectEqual(@as(usize, 1), collected.len);
+    try testing.expectEqualStrings("https://example.com/avatar?a=1&b=2", collected[0].value());
+
+    const images = [_]markdown.ResolvedImage{.{
+        .source = collected[0].value(),
+        .image = 75,
+        .width = 32,
+        .height = 32,
+    }};
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(source, .{ .images = &images });
+    try testing.expect(findImageId(tree.root, 75) != null);
+}
+
+test "table text cells vertically center beside resolved images" {
+    const source = "https://example.com/tall.png";
+    const images = [_]markdown.ResolvedImage{
+        .{ .source = source, .image = 76, .width = 40, .height = 40 },
+    };
+
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\| Project | Action |
+        \\| --- | --- |
+        \\| ![Logo](https://example.com/tall.png) Native | [Preview](https://example.com) |
+    , .{ .on_link = Ui.linkMsg(.open_url), .images = &images });
+
+    const image = findImageId(tree.root, 76).?;
+    const preview = findRoleLabel(tree.root, .link, "Preview").?;
+    var nodes: [64]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTreeWithTokens(
+        tree.root,
+        geometry.RectF.init(0, 0, 360, 160),
+        .{},
+        &nodes,
+    );
+    const image_frame = layout.findById(image.id).?.frame;
+    const preview_frame = layout.findById(preview.id).?.frame;
+    try testing.expectApproxEqAbs(
+        image_frame.y + image_frame.height * 0.5,
+        preview_frame.y + preview_frame.height * 0.5,
+        0.01,
+    );
+}
+
+test "resolved image composites honor center and end alignment" {
+    const source = "https://example.com/centered.png";
+    const images = [_]markdown.ResolvedImage{
+        .{ .source = source, .image = 78, .width = 40, .height = 20 },
+        .{ .source = source, .image = 79, .width = 40, .height = 20 },
+        .{ .source = source, .image = 81, .width = 40, .height = 20 },
+    };
+
+    var paragraph_doc = TestDoc.init();
+    defer paragraph_doc.deinit();
+    const paragraph_tree = try paragraph_doc.build(
+        \\<p align="center"><img src="https://example.com/centered.png" alt="Centered" /></p>
+    , .{ .images = images[0..1] });
+    const paragraph_image = findImageId(paragraph_tree.root, 78).?;
+    var paragraph_nodes: [32]canvas.WidgetLayoutNode = undefined;
+    const paragraph_layout = try canvas.layoutWidgetTreeWithTokens(
+        paragraph_tree.root,
+        geometry.RectF.init(0, 0, 400, 100),
+        .{},
+        &paragraph_nodes,
+    );
+    const paragraph_frame = paragraph_layout.findById(paragraph_image.id).?.frame;
+    try testing.expectApproxEqAbs(@as(f32, 200), paragraph_frame.x + paragraph_frame.width * 0.5, 0.01);
+
+    var table_doc = TestDoc.init();
+    defer table_doc.deinit();
+    const table_tree = try table_doc.build(
+        \\| Centered |
+        \\| :---: |
+        \\| ![Centered](https://example.com/centered.png) |
+    , .{ .images = images[1..2] });
+    const table_image = findImageId(table_tree.root, 79).?;
+    const table_cell = findCellContainingImage(table_tree.root, 79).?;
+    var table_nodes: [32]canvas.WidgetLayoutNode = undefined;
+    const table_layout = try canvas.layoutWidgetTreeWithTokens(
+        table_tree.root,
+        geometry.RectF.init(0, 0, 400, 120),
+        .{},
+        &table_nodes,
+    );
+    const image_frame = table_layout.findById(table_image.id).?.frame;
+    const cell_frame = table_layout.findById(table_cell.id).?.frame;
+    try testing.expectApproxEqAbs(
+        cell_frame.x + cell_frame.width * 0.5,
+        image_frame.x + image_frame.width * 0.5,
+        0.01,
+    );
+
+    var end_doc = TestDoc.init();
+    defer end_doc.deinit();
+    const end_tree = try end_doc.build(
+        \\<p align="right"><img src="https://example.com/centered.png" alt="End" /></p>
+    , .{ .images = images[2..3] });
+    const end_image = findImageId(end_tree.root, 81).?;
+    var end_nodes: [32]canvas.WidgetLayoutNode = undefined;
+    const end_layout = try canvas.layoutWidgetTreeWithTokens(
+        end_tree.root,
+        geometry.RectF.init(0, 0, 400, 100),
+        .{},
+        &end_nodes,
+    );
+    const end_frame = end_layout.findById(end_image.id).?.frame;
+    try testing.expectApproxEqAbs(@as(f32, 400), end_frame.x + end_frame.width, 0.01);
+}
+
+test "resolved leading paragraph images compose with trailing inline text" {
+    const source = "https://example.com/diagram.png";
+    const images = [_]markdown.ResolvedImage{
+        .{ .source = source, .image = 77, .width = 80, .height = 40 },
+    };
+
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\![Architecture](https://example.com/diagram.png) **Current** design
+        \\Text before ![inline](https://example.com/inline.png) stays an alt fallback.
+    , .{ .images = &images });
+
+    const image = findImageId(tree.root, 77).?;
+    try testing.expectEqualStrings("Architecture", image.semantics.label);
+    try testing.expect(findParagraphContaining(tree.root, "Current design") != null);
+    try testing.expect(findParagraphContaining(tree.root, "Text before inline stays an alt fallback.") != null);
+}
+
+test "resolved image bounds preserve aspect ratio" {
+    const source = "https://example.com/wide.png";
+    const images = [_]markdown.ResolvedImage{
+        .{ .source = source, .image = 80, .width = 1024, .height = 256 },
+    };
+
+    var doc = TestDoc.init();
+    defer doc.deinit();
+    const tree = try doc.build(
+        \\![Wide](https://example.com/wide.png)
+    , .{ .images = &images });
+    const image = findImageId(tree.root, 80).?;
+    try testing.expectEqual(@as(f32, 512), image.layout.min_size.width);
+    try testing.expectEqual(@as(f32, 128), image.layout.min_size.height);
+}
+
+test "image source collection is bounded, distinct, and keeps code inert" {
+    var storage: [4]markdown.CollectedImageSource = undefined;
+    const sources = markdown.collectImageSources(
+        \\![first](https://example.com/first.png)
+        \\Text before ![inline](https://example.com/inline.png)
+        \\`![code](https://example.com/code.png)`
+        \\| Image | Copy |
+        \\| --- | --- |
+        \\| <a href="https://example.com"><sup><img src="https://example.com/second.svg?a=1&amp;b=2" alt="second" /></sup></a> label | <!-- <img src="https://example.com/comment.png" /> --> |
+        \\![again](https://example.com/first.png)
+        \\```
+        \\![fenced](https://example.com/fenced.png)
+        \\```
+    , &storage);
+
+    try testing.expectEqual(@as(usize, 2), sources.len);
+    try testing.expectEqualStrings("https://example.com/first.png", sources[0].value());
+    try testing.expectEqualStrings("https://example.com/second.svg?a=1&b=2", sources[1].value());
+}
+
+test "image source collection mirrors visible block starts and keeps opaque HTML inert" {
+    var storage: [10]markdown.CollectedImageSource = undefined;
+    const sources = markdown.collectImageSources(
+        \\Opening prose
+        \\![joined fallback](https://example.com/joined.png)
+        \\
+        \\# ![heading](https://example.com/heading.png)
+        \\- ![list](https://example.com/list.png)
+        \\> ![quote](https://example.com/quote.png)
+        \\<p><img src="https://example.com/html.png" alt="html" /></p>
+        \\<!--
+        \\<img src="https://tracker.example/comment.png" />
+        \\-->
+        \\![after comment](https://example.com/after-comment.png)
+        \\
+        \\<script>
+        \\<img src="https://tracker.example/script.png" />
+        \\</script>
+        \\
+        \\<pre>
+        \\<img src="https://tracker.example/pre.png" />
+        \\</pre>
+        \\![after pre](https://example.com/after-pre.png)
+        \\
+        \\<code>
+        \\<img src="https://tracker.example/code.png" />
+        \\</code>
+    , &storage);
+
+    try testing.expectEqual(@as(usize, 6), sources.len);
+    try testing.expectEqualStrings("https://example.com/heading.png", sources[0].value());
+    try testing.expectEqualStrings("https://example.com/list.png", sources[1].value());
+    try testing.expectEqualStrings("https://example.com/quote.png", sources[2].value());
+    try testing.expectEqualStrings("https://example.com/html.png", sources[3].value());
+    try testing.expectEqualStrings("https://example.com/after-comment.png", sources[4].value());
+    try testing.expectEqualStrings("https://example.com/after-pre.png", sources[5].value());
 }
 
 test "table rows pad short rows, drop extra cells, and stop at blank or pipeless lines" {
@@ -548,11 +1322,12 @@ test "the README-shaped fixture renders through the mapper and the reference ren
 // scales, wrapped bullets and em-dash spacing at the face's real
 // advances, real sans and mono outlines (fixed-pitch runs sit in their
 // 0.6 em cells), GFM tables as borderless cells on hairline row
-// separators, bare fenced code with preserved source indentation and
-// language-token colors, and near-black underlined links.
+// separators with vertically centered cell content, bare fenced code
+// with preserved source indentation and language-token colors, and
+// near-black underlined links.
 // Update deliberately when markdown rendering changes, reviewing the
 // rendered pixels first (see reference_tests.zig conventions).
-const markdown_document_reference_signature: u64 = 5787917808851547223;
+const markdown_document_reference_signature: u64 = 17200107192111546862;
 
 fn markdownGoldenDumpRequested() bool {
     if (comptime !@import("builtin").link_libc) return false;

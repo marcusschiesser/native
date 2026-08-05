@@ -1247,8 +1247,8 @@ fn measureTextAdvances(context: ?*anyopaque, font_id: u64, size: f32, text: []co
     return native_sdk_appkit_measure_text_advances(font_id, size, text.ptr, text.len, advances.ptr) == 1;
 }
 
-/// CGImageSource-backed image decoding (PNG, JPEG, ... — every codec
-/// ImageIO ships) into straight-alpha RGBA8.
+/// System image decoding (ImageIO raster codecs plus NSImage's SVG
+/// rasterizer) into straight-alpha RGBA8.
 fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!platform_mod.DecodedImage {
     _ = context;
     var width: usize = 0;

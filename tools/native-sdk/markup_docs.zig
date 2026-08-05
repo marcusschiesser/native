@@ -71,7 +71,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "skeleton", .doc = "Loading placeholder block; size with width and height." },
     .{ .name = "spinner", .doc = "Indeterminate progress spinner leaf." },
     .{ .name = "icon", .doc = "Vector icon leaf: name selects a curated built-in stroke icon (comptime-validated), an app-registered app:<name> (canvas.icons.registerAppIcons; native check verifies the name against the model contract), or one {binding} resolving to such a name. Tint via foreground, size with width/height or size." },
-    .{ .name = "code", .doc = "Bare highlighted source content with no background, border, radius, shadow, or padding. source is one required text {binding}; language is a literal lexer name. Wraps by default, line-numbers opts into logical line numbers, wrap=\"false\" keeps lines intact, and a definite height makes overflow scrollable. Wrap in a panel or card when chrome is wanted." },
+    .{ .name = "code", .doc = "Bare highlighted source content with no background, border, radius, shadow, or padding. source is one required text {binding}; language is a literal lexer name. Wraps by default, line-numbers opts into logical line numbers, added-lines/removed-lines add Geist-style diff rows, wrap=\"false\" keeps lines intact, and a definite height makes overflow scrollable. Wrap in a panel or card when chrome is wanted." },
     .{ .name = "markdown", .doc = "Renders a markdown string (GFM subset, pipe tables included) as widgets; source is one {binding}, links dispatch on-link (bare URLs autolink), <details> blocks toggle via on-details + details-expanded, #123 refs linkify via issue-link-base." },
     .{ .name = "stepper", .doc = "Stage stepper: step children joined by connectors; active names the current step index (earlier steps render completed, later ones pending)." },
     .{ .name = "step", .doc = "One stepper stage; only allowed inside a stepper, the label is the text content (supports {} interpolation), state derives from the stepper's active index." },
@@ -169,6 +169,7 @@ pub const if_attr_docs = [_]Doc{
 
 pub const markdown_attr_docs = [_]Doc{
     .{ .name = "source", .doc = "markdown: one {binding} producing the markdown text (a []const u8 field or fn; arena fns work). Required." },
+    .{ .name = "images", .doc = "markdown: one {binding} producing []const canvas.markdown.ResolvedImage (arena fns work). Each mapping pairs a leading image source with an image id already loaded and registered through fx.loadImage plus its decoded dimensions; views never perform image I/O." },
     .{ .name = "on-link", .doc = "markdown: bare Msg tag dispatched on link press; its payload is the URL ([]const u8 variant)." },
     .{ .name = "on-details", .doc = "markdown: bare Msg tag dispatched on a <details> summary press; its payload is the block index (usize variant)." },
     .{ .name = "details-expanded", .doc = "markdown: {binding} naming a []const bool iterable of expanded flags, in details-block document order." },
@@ -180,6 +181,8 @@ pub const code_attr_docs = [_]Doc{
     .{ .name = "language", .doc = "code: literal lexer name. Supports Zig, JavaScript/TypeScript, JSX/TSX, JSON, YAML, shell, Python, Rust, C-family, Go, HTML/XML/SVG, CSS-family, SQL, and Markdown; unknown names are a validation error." },
     .{ .name = "editable", .doc = "code: true enables text editing while retaining syntax highlighting; pair it with on-input to apply TextInputEvent updates. Read-only by default." },
     .{ .name = "line-numbers", .doc = "code: opt into muted logical line numbers. Off by default; a wrapped logical line stays paired with its number." },
+    .{ .name = "added-lines", .doc = "code: one-based comma/range spec (for example 5 or 5, 9-11), or one text {binding}; applies Geist's green full-line wash and renderer-owned + without changing copied source. Lines 1-128." },
+    .{ .name = "removed-lines", .doc = "code: one-based comma/range spec (for example 2-4), or one text {binding}; applies Geist's red full-line wash and renderer-owned - without changing copied source. Lines 1-128." },
     .{ .name = "wrap", .doc = "code: true by default. false preserves logical lines and puts the highlighted content in one horizontal scroll region." },
     .{ .name = "width", .doc = "Definite width (plain number)." },
     .{ .name = "height", .doc = "code: definite height (plain number). Overflow scrolls vertically; with wrap=false the region scrolls on both axes." },

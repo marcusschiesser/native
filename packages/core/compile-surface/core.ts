@@ -6,7 +6,10 @@
 // generic value instantiation — the routing/arm-name rigor those
 // generics carry is tsc's job in the authoring lane, and the paired
 // e2e batteries hold every produced byte to the transpiler lane's
-// output. Staged as ./sdk/core.ts by tests/compiled-core/build_core.sh.
+// output. Every external-compile stage copies this ONE file in as its
+// ./sdk/core.ts: the fixture driver (tests/compiled-core/build_core.sh)
+// and the product lane's stager (packages/core/scripts/
+// stage_external_core.mjs) alike.
 
 export function asciiBytes(s: string): Uint8Array {
   const out = new Uint8Array(s.length);
@@ -91,6 +94,44 @@ export interface AudioRoute<M extends Msgish> {
   readonly event: M["kind"];
 }
 
+export type AudioCaptureState = "started" | "readable" | "stopped" | "failed" | "rejected";
+export type AudioCaptureReason =
+  | "none" | "invalid_options" | "permission_missing" | "permission_required"
+  | "already_recording" | "device_not_found" | "device_disconnected"
+  | "capture_failed" | "no_audio" | "consumer_too_slow" | "discarded" | "unsupported";
+export type AudioCaptureReadState = "chunk" | "empty" | "ended" | "rejected";
+export type AudioCaptureReadReason = "none" | "invalid_options" | "not_recording" | "read_in_progress";
+export type MicrophoneDeviceState = "device" | "completed" | "failed" | "rejected";
+export type AudioCaptureAccessSource = "system_audio" | "microphone";
+export type AudioCaptureAccessAction = "status" | "request";
+export type AudioCaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
+export type MicrophoneSelection = "none" | "default" | Uint8Array;
+
+export interface AudioCaptureOptions {
+  readonly systemAudio?: boolean;
+  readonly microphone?: MicrophoneSelection;
+  readonly sampleRate?: 16000 | 24000 | 44100 | 48000;
+  readonly channels?: 1 | 2;
+  readonly excludeCurrentProcessAudio?: boolean;
+  readonly bufferDurationMs?: number;
+}
+
+export interface AudioCaptureRoute<M extends Msgish> {
+  readonly event: M["kind"];
+}
+
+export interface AudioCaptureReadRoute<M extends Msgish> {
+  readonly event: M["kind"];
+}
+
+export interface MicrophoneDevicesRoute<M extends Msgish> {
+  readonly event: M["kind"];
+}
+
+export interface AudioCaptureAccessRoute<M extends Msgish> {
+  readonly event: M["kind"];
+}
+
 export interface VideoSource {
   readonly surface: number;
   readonly path?: Uint8Array;
@@ -135,6 +176,12 @@ export interface FetchSpec {
   readonly headers?: { readonly [name: string]: string | Uint8Array };
   readonly body?: Uint8Array;
   readonly timeoutMs?: number;
+}
+
+export interface NotificationSpec {
+  readonly title: Uint8Array;
+  readonly subtitle?: Uint8Array;
+  readonly body?: Uint8Array;
 }
 
 /// The inert command data — the reference module's Cmd<M> union with
@@ -183,6 +230,7 @@ export type CmdData =
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
+  | { readonly op: "show_notification"; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
   | {
       readonly op: "spawn";
@@ -208,6 +256,23 @@ export type CmdData =
       readonly key: string;
       readonly verb: "pause" | "resume" | "stop" | "seek" | "volume";
       readonly value: number;
+    }
+  | {
+      readonly op: "audio_capture_start";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly options: AudioCaptureOptions;
+    }
+  | { readonly op: "audio_capture_stop"; readonly key: string }
+  | { readonly op: "audio_capture_read"; readonly key: string; readonly eventKind: string; readonly maxFrames: number }
+  | { readonly op: "audio_capture_discard"; readonly key: string }
+  | { readonly op: "microphone_devices"; readonly key: string; readonly eventKind: string }
+  | {
+      readonly op: "audio_capture_access";
+      readonly key: string;
+      readonly eventKind: string;
+      readonly source: "system_audio" | "microphone";
+      readonly action: AudioCaptureAccessAction;
     }
   | {
       readonly op: "video_load";
@@ -376,6 +441,15 @@ export const Cmd = {
     return { op: "clip_read", key: route.key ?? "", okKind: route.ok, errKind: route.err };
   },
 
+  showNotification(spec: NotificationSpec): CmdData {
+    return {
+      op: "show_notification",
+      title: spec.title,
+      subtitle: spec.subtitle ?? new Uint8Array(0),
+      body: spec.body ?? new Uint8Array(0),
+    };
+  },
+
   delay(key: string, ms: number, msgKind: string): CmdData {
     return { op: "delay", key, afterMs: ms, msgKind };
   },
@@ -427,6 +501,30 @@ export const Cmd = {
 
   audioSetVolume(key: string, volume: number): CmdData {
     return { op: "audio_ctl", key, verb: "volume", value: volume };
+  },
+
+  audioCaptureStart(key: string, options: AudioCaptureOptions, route: { readonly event: string }): CmdData {
+    return { op: "audio_capture_start", key, eventKind: route.event, options };
+  },
+
+  audioCaptureStop(key: string): CmdData {
+    return { op: "audio_capture_stop", key };
+  },
+
+  audioCaptureRead(key: string, maxFrames: number, route: { readonly event: string }): CmdData {
+    return { op: "audio_capture_read", key, eventKind: route.event, maxFrames };
+  },
+
+  audioCaptureDiscard(key: string): CmdData {
+    return { op: "audio_capture_discard", key };
+  },
+
+  microphoneDevices(key: string, route: { readonly event: string }): CmdData {
+    return { op: "microphone_devices", key, eventKind: route.event };
+  },
+
+  audioCaptureAccess(key: string, source: "system_audio" | "microphone", action: AudioCaptureAccessAction, route: { readonly event: string }): CmdData {
+    return { op: "audio_capture_access", key, eventKind: route.event, source, action };
   },
 
   videoLoad(key: string, source: VideoSource, route: { readonly event: string }): CmdData {
@@ -539,6 +637,7 @@ export const Cmd = {
 export type SubData =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | { readonly op: "microphone_devices_changed"; readonly msgKind: string }
   | { readonly op: "batch"; readonly subs: readonly SubData[] };
 
 export type Sub<M extends Msgish> = SubData;
@@ -548,6 +647,10 @@ export const Sub = {
 
   timer(key: string, everyMs: number, msgKind: string): SubData {
     return { op: "timer", key, everyMs, msgKind };
+  },
+
+  microphoneDevicesChanged(msgKind: string): SubData {
+    return { op: "microphone_devices_changed", msgKind };
   },
 
   batch(subs: readonly SubData[]): SubData {

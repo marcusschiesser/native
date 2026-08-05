@@ -56,6 +56,13 @@ pub const max_recent = 6;
 /// Model-owned `<details>` expansion flags, indexed by document order.
 /// The renderer caps details blocks at 16 per document, matching this.
 pub const max_details = 16;
+/// Stay within the runtime image registry while reserving four of the shared
+/// effect slots for open/save/recent/link work during an image-heavy document.
+pub const max_preview_images = @min(native_sdk.max_registered_canvas_images, native_sdk.max_effects - 4);
+/// `fx.loadImage` accepts URLs through 2 KiB. Keeping the same bound makes a
+/// too-long source stay on the Markdown alt-text fallback without staging an
+/// effect that can only reject.
+const max_image_source_bytes = canvas.markdown.max_markdown_image_source_bytes;
 const max_note_bytes = 192;
 
 // Effect keys: caller-chosen identities, one per concurrent operation.
@@ -65,7 +72,11 @@ pub const recent_read_key: u64 = 3;
 pub const recent_write_key: u64 = 4;
 pub const link_key: u64 = 5;
 
-const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
+const app_permissions = [_][]const u8{
+    native_sdk.security.permission_command,
+    native_sdk.security.permission_network,
+    native_sdk.security.permission_view,
+};
 const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Markdown viewer canvas", .accessibility_label = "Markdown viewer", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
 };
@@ -89,6 +100,19 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .views = &shell_views,
 }};
 const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
+
+const PreviewImage = struct {
+    source_storage: [max_image_source_bytes]u8 = undefined,
+    source_len: usize = 0,
+    id: canvas.ImageId = 0,
+    width: usize = 0,
+    height: usize = 0,
+    loaded: bool = false,
+
+    fn source(image: *const PreviewImage) []const u8 {
+        return image.source_storage[0..image.source_len];
+    }
+};
 
 // ---------------------------------------------------------------- samples
 
@@ -149,6 +173,10 @@ pub const Model = struct {
     /// Preview scroll offset (model-owned; the runtime echoes scrolls
     /// back through `doc_scrolled` and the view's `value` binding).
     doc_scroll: f32 = 0,
+    /// Remote Markdown images follow the normal TEA/effect boundary: source
+    /// and load state live here; decoded pixels live in the runtime registry.
+    /// The view sees only successful source -> ImageId mappings.
+    preview_images: [max_preview_images]PreviewImage = [_]PreviewImage{.{}} ** max_preview_images,
 
     pub const samples = [_]Sample{
         .{ .id = welcome_sample_id, .title = "Welcome", .body = @embedFile("samples/welcome.md") },
@@ -168,6 +196,26 @@ pub const Model = struct {
 
     pub fn document(model: *const Model) []const u8 {
         return model.editor.text();
+    }
+
+    pub fn markdownImages(model: *const Model, arena: std.mem.Allocator) []const canvas.markdown.ResolvedImage {
+        var count: usize = 0;
+        for (model.preview_images) |image| {
+            if (image.loaded) count += 1;
+        }
+        const resolved = arena.alloc(canvas.markdown.ResolvedImage, count) catch return &.{};
+        var index: usize = 0;
+        for (&model.preview_images) |*image| {
+            if (!image.loaded) continue;
+            resolved[index] = .{
+                .source = image.source(),
+                .image = image.id,
+                .width = @floatFromInt(image.width),
+                .height = @floatFromInt(image.height),
+            };
+            index += 1;
+        }
+        return resolved;
     }
 
     pub fn path(model: *const Model) []const u8 {
@@ -383,6 +431,7 @@ pub const Msg = union(enum) {
     open_url: []const u8,
     file_done: native_sdk.EffectFileResult,
     recent_done: native_sdk.EffectFileResult,
+    image_done: native_sdk.EffectImageResult,
     link_done: native_sdk.EffectExit,
 };
 
@@ -391,12 +440,95 @@ pub const Effects = ViewerApp.Effects;
 
 /// TEA init: restore the persisted recent list before the first paint.
 pub fn boot(model: *Model, fx: *Effects) void {
+    refreshPreviewImages(model, fx);
     if (model.recent_path_len == 0) return;
     fx.readFile(.{
         .key = recent_read_key,
         .path = model.recentStorePath(),
         .on_result = Effects.fileMsg(.recent_done),
     });
+}
+
+fn previewImageSourceAllowed(source: []const u8) bool {
+    return source.len > 0 and source.len <= max_image_source_bytes and
+        (std.ascii.startsWithIgnoreCase(source, "https://") or std.ascii.startsWithIgnoreCase(source, "http://"));
+}
+
+fn previewImageId(model: *const Model, source: []const u8) canvas.ImageId {
+    var id = std.hash.Wyhash.hash(0, source) & ~canvas.media_surface_image_id_bit;
+    if (id <= link_key) id += 16;
+    while (true) {
+        var collision = false;
+        for (model.preview_images) |image| {
+            if (image.source_len > 0 and image.id == id and !std.mem.eql(u8, image.source(), source)) {
+                collision = true;
+                break;
+            }
+        }
+        if (!collision) return id;
+        id = (id + 1) & ~canvas.media_surface_image_id_bit;
+        if (id <= link_key) id = 16;
+    }
+}
+
+fn sourceIsWanted(sources: []const []const u8, source: []const u8) bool {
+    for (sources) |candidate| {
+        if (std.mem.eql(u8, candidate, source)) return true;
+    }
+    return false;
+}
+
+/// Reconcile the document's bounded remote-image set with model/effect state.
+/// Removed sources cancel and unregister; new sources issue one load. Existing
+/// successes survive every keystroke and rebuild without refetching.
+fn refreshPreviewImages(model: *Model, fx: *Effects) void {
+    var source_storage: [max_preview_images]canvas.markdown.CollectedImageSource = undefined;
+    const discovered = canvas.markdown.collectImageSources(model.editor.text(), &source_storage);
+
+    var wanted_storage: [max_preview_images][]const u8 = undefined;
+    var wanted_len: usize = 0;
+    for (discovered) |*collected| {
+        const source = collected.value();
+        if (!previewImageSourceAllowed(source)) continue;
+        wanted_storage[wanted_len] = source;
+        wanted_len += 1;
+    }
+    const wanted = wanted_storage[0..wanted_len];
+
+    for (&model.preview_images) |*image| {
+        if (image.source_len == 0 or sourceIsWanted(wanted, image.source())) continue;
+        fx.cancel(image.id);
+        _ = fx.unregisterImage(image.id);
+        image.* = .{};
+    }
+
+    for (wanted) |source| {
+        var present = false;
+        for (model.preview_images) |image| {
+            if (image.source_len > 0 and std.mem.eql(u8, image.source(), source)) {
+                present = true;
+                break;
+            }
+        }
+        if (present) continue;
+
+        var free: ?*PreviewImage = null;
+        for (&model.preview_images) |*image| {
+            if (image.source_len == 0) {
+                free = image;
+                break;
+            }
+        }
+        const image = free orelse break;
+        @memcpy(image.source_storage[0..source.len], source);
+        image.source_len = source.len;
+        image.id = previewImageId(model, source);
+        fx.loadImage(.{
+            .id = image.id,
+            .url = image.source(),
+            .on_result = Effects.imageMsg(.image_done),
+        });
+    }
 }
 
 fn persistRecent(model: *Model, fx: *Effects) void {
@@ -454,11 +586,13 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
         .edit => |edit| {
             model.editor.apply(edit);
             model.active_sample_id = 0;
+            refreshPreviewImages(model, fx);
             if (model.editor.truncated) model.setNote("Document is full ({d} KiB cap)", .{max_document_bytes / 1024});
         },
         .edit_path => |edit| model.path_field.apply(edit),
         .load_sample => |id| {
             model.loadSample(id);
+            refreshPreviewImages(model, fx);
             model.sample_picker_open = false;
         },
         .toggle_sample_picker => model.sample_picker_open = !model.sample_picker_open,
@@ -499,6 +633,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                     // COPY the payload: result.bytes is drain scratch.
                     model.editor.set(result.bytes);
                     model.active_sample_id = 0;
+                    refreshPreviewImages(model, fx);
                     model.details_expanded = [_]bool{false} ** max_details;
                     model.doc_scroll = 0;
                     model.adoptPendingPath();
@@ -509,6 +644,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 .truncated => {
                     model.editor.set(result.bytes);
                     model.active_sample_id = 0;
+                    refreshPreviewImages(model, fx);
                     model.doc_scroll = 0;
                     model.setNote("Opened a cut copy: file exceeds the {d} KiB document cap", .{max_document_bytes / 1024});
                 },
@@ -531,6 +667,22 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (result.op == .read and result.outcome == .ok) model.restoreRecent(result.bytes);
             // Write acknowledgements and missing-file reads are quiet:
             // the recent list is a convenience, never an error surface.
+        },
+        .image_done => |result| {
+            var retained = false;
+            for (&model.preview_images) |*image| {
+                if (image.source_len == 0 or image.id != result.id) continue;
+                retained = true;
+                if (result.outcome == .loaded and result.width > 0 and result.height > 0) {
+                    image.loaded = true;
+                    image.width = result.width;
+                    image.height = result.height;
+                }
+                break;
+            }
+            // A removed source may race its terminal. The worker registered
+            // pixels before delivery, so release that orphaned registry slot.
+            if (!retained and result.outcome == .loaded) _ = fx.unregisterImage(result.id);
         },
         .link_done => |exit| {
             if (exit.reason == .exited and exit.code == 0) {

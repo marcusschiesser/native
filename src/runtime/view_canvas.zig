@@ -313,6 +313,21 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             self.canvas_frame_image_cache_count = entries.len;
         }
 
+        /// Forget every retained cache key for one platform image. The
+        /// platform removal seam destroys the resource independently of
+        /// this per-view planner mirror; leaving an identical key here
+        /// would turn a same-content re-registration into `.retain` and
+        /// skip the upload needed to recreate that resource.
+        pub fn removeCanvasFrameImageCacheId(self: *RuntimeView, image_id: canvas.ImageId) void {
+            var kept: usize = 0;
+            for (self.canvas_frame_image_cache[0..self.canvas_frame_image_cache_count]) |entry| {
+                if (entry.key.image_id == image_id) continue;
+                self.canvas_frame_image_cache[kept] = entry;
+                kept += 1;
+            }
+            self.canvas_frame_image_cache_count = kept;
+        }
+
         pub fn copyCanvasFrameLayerCache(self: *RuntimeView, entries: []const canvas.RenderLayerCacheEntry) anyerror!void {
             if (entries.len > self.canvas_frame_layer_cache.len) return error.LayerListFull;
             @memcpy(self.canvas_frame_layer_cache[0..entries.len], entries);

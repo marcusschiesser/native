@@ -219,6 +219,11 @@ pub const RuntimeView = struct {
     gpu_first_frame_latency_recorded: bool = false,
     gpu_frame_nonblank: bool = false,
     gpu_sample_color: u32 = 0,
+    /// Immutable creation-time backend request. `gpu_backend` below is
+    /// completion state and changes to the concrete presenter reported by
+    /// the host, so it cannot answer whether packet work was explicitly
+    /// opted out before a present.
+    gpu_requested_backend: platform.GpuSurfaceBackend = .none,
     gpu_backend: platform.GpuSurfaceBackend = .none,
     gpu_pixel_format: platform.GpuSurfacePixelFormat = .none,
     gpu_present_mode: platform.GpuSurfacePresentMode = .none,
@@ -860,6 +865,7 @@ pub const RuntimeView = struct {
     pub const copyCanvasFrameResourceCache = CanvasFrameMethods.copyCanvasFrameResourceCache;
     pub const copyCanvasFramePathGeometryCache = CanvasFrameMethods.copyCanvasFramePathGeometryCache;
     pub const copyCanvasFrameImageCache = CanvasFrameMethods.copyCanvasFrameImageCache;
+    pub const removeCanvasFrameImageCacheId = CanvasFrameMethods.removeCanvasFrameImageCacheId;
     pub const copyCanvasFrameLayerCache = CanvasFrameMethods.copyCanvasFrameLayerCache;
     pub const copyCanvasFrameVisualEffectCache = CanvasFrameMethods.copyCanvasFrameVisualEffectCache;
     pub const copyCanvasRenderAnimations = CanvasFrameMethods.copyCanvasRenderAnimations;

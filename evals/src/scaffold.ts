@@ -145,7 +145,7 @@ async function scaffoldAppWorkspace(
  * core), a README documenting the check loop, and the ts-core skill
  * delivered along the documented user path (`native skills get ts-core`).
  * No app scaffold: the core module is the whole deliverable, graded through
- * the @native-sdk/core transpiler and the case's zig-test harness.
+ * the @native-sdk/core frontend and the case's zig-test harness.
  */
 async function scaffoldTsCoreWorkspace(
   repoRoot: string,
@@ -202,8 +202,7 @@ export function update(model: Model, msg: Msg): Model {
 `;
 
 function tsCoreReadme(repoRoot: string): string {
-  const transpiler = join(repoRoot, "packages", "core", "src", "cli.ts");
-  const rt = join(repoRoot, "packages", "core", "rt", "rt.zig");
+  const frontend = join(repoRoot, "packages", "core", "src", "cli.ts");
   return `# App-core workspace
 
 This workspace holds one deliverable: \`src/core.ts\`, an app core written in the
@@ -212,24 +211,15 @@ app-core TypeScript subset. The authoring guide is
 
 ## Check loop
 
-Transpile after every meaningful edit; the diagnostics teach the rule, the fix,
+Check after every meaningful edit; the diagnostics teach the rule, the fix,
 and the reason:
 
 \`\`\`sh
-node ${transpiler} src/core.ts -o /tmp/core.zig
+node ${frontend} src/core.ts
 \`\`\`
 
-Exit 0 means the module typechecks, passes the subset checker, and emits Zig.
-
-To sanity-check behavior natively, build the emitted core against the runtime
-kernel with a scratch test file that imports both:
-
-\`\`\`sh
-mkdir -p .check && cp ${rt} .check/rt.zig
-node ${transpiler} src/core.ts -o .check/core.zig
-# write .check/smoke.zig with zig tests importing core.zig, then:
-cd .check && zig test smoke.zig
-\`\`\`
+Exit 0 means the module typechecks and passes the subset checker — the exact
+gate every build runs before the external core compiler takes the graph.
 
 The subset is erasable TypeScript, so node can also import \`src/core.ts\`
 directly for quick behavioral pokes — semantics match the native build.
@@ -260,50 +250,24 @@ export async function prewarmWorkspace(
 }
 
 /**
- * Pre-warm a ts-core workspace: transpile the starter core once (proves the
- * scaffold compiles) and `zig test` a trivial harness against it so the zig
- * std/test-runner graph is cached before the agent's own check loops and the
- * ts_harness grader hit it.
+ * Pre-warm a ts-core workspace: run the frontend check over the starter
+ * core once — proves the scaffold is subset-clean before spending model
+ * tokens (the ts_harness grader compiles through the external toolchain
+ * itself and needs no warm zig graph here).
  */
 export async function prewarmTsCoreWorkspace(
   repoRoot: string,
   workspace: Workspace,
   log: (line: string) => void,
 ): Promise<void> {
-  log("[prewarm] transpile starter + zig test smoke...");
-  const scratch = join(workspace.path, ".prewarm");
-  mkdirSync(scratch, { recursive: true });
-  const transpile = await exec(
+  log("[prewarm] frontend check over the starter core...");
+  const check = await exec(
     "node",
-    [
-      join(repoRoot, "packages", "core", "src", "cli.ts"),
-      join(workspace.path, "src", "core.ts"),
-      "-o",
-      join(scratch, "core.zig"),
-    ],
+    [join(repoRoot, "packages", "core", "src", "cli.ts"), join(workspace.path, "src", "core.ts")],
     { cwd: workspace.path, timeoutMs: 2 * 60 * 1000 },
   );
-  if (transpile.code !== 0) {
-    throw new Error(`pre-warm transpile failed — starter core is broken:\n${tailLines(transpile)}`);
+  if (check.code !== 0) {
+    throw new Error(`pre-warm check failed — starter core is broken:\n${tailLines(check)}`);
   }
-  cpSync(join(repoRoot, "packages", "core", "rt", "rt.zig"), join(scratch, "rt.zig"));
-  writeFileSync(
-    join(scratch, "smoke.zig"),
-    `const core = @import("core.zig");
-test "starter core initializes" {
-    core.rt.resetAll();
-    _ = core.commitModelRoot(core.initialModel());
-    core.rt.frameReset();
-}
-`,
-  );
-  const smoke = await exec("zig", ["test", "smoke.zig"], {
-    cwd: scratch,
-    timeoutMs: 10 * 60 * 1000,
-  });
-  if (smoke.code !== 0) {
-    throw new Error(`pre-warm zig test failed — starter core is broken:\n${tailLines(smoke)}`);
-  }
-  rmSync(scratch, { recursive: true, force: true });
-  log(`[prewarm] done in ${((transpile.durationMs + smoke.durationMs) / 1000).toFixed(0)}s`);
+  log(`[prewarm] done in ${(check.durationMs / 1000).toFixed(0)}s`);
 }

@@ -86,19 +86,25 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // republish when the runtime is invalidated, and a frame
                 // completion carrying a NEW discrete fact may have no
                 // other invalidation source, leaving the published
-                // snapshot stale forever. Two such facts invalidate here
-                // (a third — a resolved input latency — is checked after
+                // snapshot stale forever. Three such facts invalidate here
+                // (a fourth — a resolved input latency — is checked after
                 // the app dispatch below, where the responding present
                 // stamps it):
                 //   - the host-reported nonblank verdict changed (the
                 //     first nonblank presentation on an idle boot has no
                 //     resize and no input to piggyback on);
+                //   - the concrete presenter changed (for example a
+                //     Direct2D packet refusal fell back to software, or a
+                //     later packet recovered Direct2D);
                 //   - this frame recorded the first-frame latency.
                 // Steady-state frames carry no new fact and stay quiet —
                 // a timer-mode surface must not republish observable
                 // state 60 times a second.
                 const first_frame_latency_recorded = !first_frame_latency_was_recorded and self.views[index].gpu_first_frame_latency_recorded;
-                if (self.views[index].gpu_frame_nonblank != frame_event.nonblank or first_frame_latency_recorded) {
+                if (self.views[index].gpu_frame_nonblank != frame_event.nonblank or
+                    self.views[index].gpu_backend != frame_event.backend or
+                    first_frame_latency_recorded)
+                {
                     self.invalidateFor(.state, self.views[index].frame);
                 }
                 self.views[index].gpu_frame_nonblank = frame_event.nonblank;
@@ -113,11 +119,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     try enrichGpuSurfaceFrameDiagnostics(self, index, &enriched_frame_event);
                 } else if (self.views[index].info().gpuFrame()) |gpu_frame| {
                     enriched_frame_event = gpuSurfaceFrameEventFromGpuFrame(gpu_frame);
-                    // GpuFrame is persistent surface state; the occluded
-                    // fact is per-completion metadata and must survive
-                    // the rebuild so the app sees it honestly.
-                    enriched_frame_event.occluded = frame_event.occluded;
                 }
+                // Diagnostic enrichment and the low-cost persistent-frame
+                // rebuild can both replace fields. Reapply facts owned by
+                // this host completion, including device-loss recovery.
+                preserveGpuSurfaceCompletionFacts(frame_event, &enriched_frame_event);
                 // Alpha mode is immutable surface configuration, not a
                 // completion-time measurement. The desktop ABIs predate
                 // premultiplied surfaces and stamp their legacy opaque
@@ -1037,6 +1043,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 .timestamp_ns = enriched_frame_event.timestamp_ns,
                 .surface_size = enriched_frame_event.size,
                 .scale = enriched_frame_event.scale_factor,
+                .full_repaint = enriched_frame_event.canvas_frame_full_repaint,
             }, CanvasFrameMethods().canvasFrameScratchStorage(self), false);
             const preview_render_pass = preview_frame.renderPass();
             const preview_gpu_packet_summary = preview_frame.gpuPacketSummary();
@@ -1140,6 +1147,30 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             return runtime_canvas_widget_scroll_drivers.RuntimeCanvasWidgetScrollDrivers(Runtime);
         }
     };
+}
+
+fn preserveGpuSurfaceCompletionFacts(source: platform.GpuSurfaceFrameEvent, target: *platform.GpuSurfaceFrameEvent) void {
+    target.occluded = source.occluded;
+    if (source.canvas_frame_full_repaint) {
+        target.canvas_frame_requires_render = true;
+        target.canvas_frame_full_repaint = true;
+    }
+}
+
+test "GPU completion preserves host-forced full repaint" {
+    var enriched: platform.GpuSurfaceFrameEvent = .{
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+    };
+    preserveGpuSurfaceCompletionFacts(.{
+        .label = "canvas",
+        .size = geometry.SizeF.init(640, 360),
+        .occluded = true,
+        .canvas_frame_full_repaint = true,
+    }, &enriched);
+    try std.testing.expect(enriched.occluded);
+    try std.testing.expect(enriched.canvas_frame_requires_render);
+    try std.testing.expect(enriched.canvas_frame_full_repaint);
 }
 
 fn setFocusedView(self: anytype, window_id: platform.WindowId, label: []const u8) !void {

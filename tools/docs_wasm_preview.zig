@@ -214,6 +214,20 @@ export fn preview_instance_bytes() usize {
     return @sizeOf(Preview);
 }
 
+/// Keep the diff mask's high half honest on wasm32: code widgets reuse a
+/// fixed-width metadata slot that must retain lines 97-128 even though
+/// `usize` is only 32 bits in this module.
+export fn preview_code_diff_metadata_round_trip() u32 {
+    var widget = canvas.Widget{ .kind = .text };
+    const expected = canvas.CodeDiffLines{
+        .added = @as(u128, 1) << 126,
+        .removed = @as(u128, 1) << 127,
+    };
+    widget.setCodeDiffLines(expected);
+    const actual = widget.codeDiffLines() orelse return 0;
+    return @intFromBool(actual.added == expected.added and actual.removed == expected.removed);
+}
+
 // ---------------------------------------------------------- lifecycle
 
 export fn preview_create(name_ptr: ?[*]const u8, name_len: usize, dark: u32) ?*Preview {

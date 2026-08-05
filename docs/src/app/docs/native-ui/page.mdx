@@ -197,13 +197,13 @@ Type discipline is teaching errors over silent coercion: a string minus a number
 
 The function library is closed — seventeen functions, and growing the set is a toolkit change: `fixed(x, digits)` (exact decimals), `thousands(n)` (`1,234,567`), `percent(fraction, digits?)` (`0.42` → `42%`), `date(ts)`/`time(ts)`/`datetime(ts)` (a model unix timestamp in seconds, formatted in UTC — formatting model time is pure; *reading the clock* is an effect, so `now()` is a teaching error pointing at the model/fx loop), `upper`/`lower`/`trim` (ASCII case mapping; other characters pass through), `min`/`max`/`abs`, `round`/`floor`/`ceil` (number → whole number), `plural(count, singular, plural)` (`{plural(n, 'item', 'items')}`), and `pad(x, width)` (zero-pads the integer value of x to `width` digits — `pad(7, 2)` → `07`, a negative sign precedes the zeros without counting toward the width, and numbers wider than `width` print in full; the mm:ss counter function: `{pad(minutes, 2)}:{pad(seconds, 2)}`).
 
-Complexity is bounded and taught one past the bound: at most 256 bytes, 64 terms, and 16 nesting levels per expression — anything larger is a named model function by design.
+Complexity is bounded and taught one past the bound: at most 256 bytes, 64 terms, and 16 nesting levels per expression — anything larger is a named core helper by design.
 
-The same line separates inline arithmetic from model functions. Inline expression arithmetic is sanctioned for one-off presentation-level derivation — `{percent(done / total)}` on the single readout that shows it is exactly what expressions are for. The moment a derivation is reused in a second binding, deserves a name, or carries meaning the model owns (a threshold, a rule, a policy), it belongs in a named model function: `{completionRate}` reads at the binding site, tests in Zig, and changes in one place.
+The same line separates inline arithmetic from core helpers. Inline expression arithmetic is sanctioned for one-off presentation-level derivation — `{percent(done / total)}` on the single readout that shows it is exactly what expressions are for. The moment a derivation is reused in a second binding, deserves a name, or carries meaning the model owns (a threshold, a rule, a policy), it belongs in a named helper: `{completionRate}` reads at the binding site, tests in the core's language, and changes in one place.
 
-Bindings resolve against your model: struct fields, zero-argument public methods, and — for `for each` — slices, public array declarations, or functions taking `(*const Model)` or `(*const Model, std.mem.Allocator)` (the allocator variant is how filtered lists work). Enums resolve to their tag names. Expressions are allowed in text interpolation, attribute values, `if` tests, and template args at use sites; message tags and payloads, `for each` iterables, and import paths stay path-only.
+In the default TypeScript core, model fields bind by their authored names (`nextId` is `{nextId}`), and an exported helper declared in `src/core.ts` with exactly one `Model` parameter becomes a derived binding under its exported name. Scalar-returning helpers drive text/attributes; array-returning helpers drive `for each` and chart series; item record fields continue the path. See [TypeScript Cores](/docs/typescript) for the supported return shapes and module boundary.
 
-Scalar bindings take the allocator form too: `{summary}` binds `pub fn summary(m: *const Model, arena: std.mem.Allocator) []const u8` directly, formatting a derived display string into the build arena — it works in text interpolation, attribute values, message payloads, and as function arguments (`{upper(summary)}`). The one exclusion is comparison operands (`==`, `<`, ...), which reject arena-computed values with a teaching error: compare the source fields, or bind a `bool`-returning method. For `<if test>`, write the predicate out (`test="{count > 0}"`) or bind one (`test="{hasItems}"`) instead of leaning on numeric truthiness.
+In a Zig core, bindings resolve struct fields and zero-argument public model methods. A `for each` iterable may also be a slice, public array declaration, `pub fn (*const Model) []const T`, or `pub fn (*const Model, std.mem.Allocator) []const T`; the allocator form derives filtered rows into the one-build arena. Scalar bindings take that form too: `{summary}` binds `pub fn summary(m: *const Model, arena: std.mem.Allocator) []const u8`. Arena-computed values work in text, attributes, message payloads, and function arguments, but not as comparison operands — compare source fields or bind a boolean helper. In either tier, write `<if test>` predicates explicitly (`test="{count > 0}"` or `test="{hasItems}"`) instead of leaning on numeric truthiness. Expressions are allowed in text interpolation, attribute values, `if` tests, and template args at use sites; message tags and payloads, `for each` iterables, and import paths stay path-only.
 
 ## Messages
 
@@ -432,6 +432,29 @@ Files ride the same channel: `fx.writeFile` / `fx.readFile` persist app state �
 .saved => |result| model.noteSaved(result.outcome),
 ```
 
+Desktop notifications use the same bounded platform-services facade but are intentionally fire-and-forget: once the host accepts a request, the OS can still suppress it through Focus / Do Not Disturb or the user's notification settings, so a success Msg would over-promise. Return `Cmd.showNotification` from a TypeScript core or call `fx.showNotification` from a Zig `update_fx` arm; invalid or over-bound fields and unavailable services fail closed. The fake executor and session replay never display one.
+
+<CodeToggle>
+
+```ts
+case "build_finished":
+  return [model, Cmd.showNotification({
+    title: asciiBytes("Build finished"),
+    subtitle: asciiBytes("native-sdk"),
+    body: asciiBytes("All checks passed."),
+  })];
+```
+
+```zig
+.build_finished => fx.showNotification(.{
+    .title = "Build finished",
+    .subtitle = "native-sdk",
+    .body = "All checks passed.",
+}),
+```
+
+</CodeToggle>
+
 Failure and overflow are always visible: a spawn that cannot run delivers an exit Msg with reason `rejected`, a fetch that cannot run delivers a response Msg with outcome `rejected`, and a file effect that cannot run delivers a result Msg with outcome `rejected`; dropped or truncated lines carry counts and flags; `cancel` kills and reaps the process and always ends in exactly one `cancelled` exit Msg, with no further line Msgs after it. Tests use the fake executor (`effects.executor = .fake`) to assert on spawn, fetch, and file requests and feed synthetic lines, stderr (`feedStderr`, collect spawns), exits, responses, and file results back deterministically — set it before the first frame and `init_fx` boot spawns are recorded too. See `examples/effects-probe`.
 
 For timestamps, the facade owns the clocks (Zig 0.16 puts `std.time` behind `std.Io`, which `update` never sees): `native_sdk.nowMs()` / `nowNanoseconds()` read the wall clock and `monotonicMs()` / `monotonicNanoseconds()` the duration clock. Time-dependent logic stores the `native_sdk.Clock` seam in the model (`.system` by default) so tests substitute a deterministic `native_sdk.TestClock` and advance it by hand.
@@ -589,6 +612,7 @@ Markdown builds on the same model. `native_sdk.markdown` maps a GitHub-flavored 
 ```zig
 const Md = native_sdk.markdown.Markdown(Msg);
 Md.view(ui, issue.body, .{
+    .images = model.markdown_images, // successful fx.loadImage mappings
     .on_link = Ui.linkMsg(.open_url),
     .on_details = Md.detailsMsg(.toggle_details),
     .details_expanded = &model.details_expanded, // caller-owned flags, elm-style
@@ -605,10 +629,10 @@ GFM pipe tables map onto the real `table`/`table-row`/`table-cell` widgets: the 
 In markup, the `<markdown>` element wires all of this declaratively:
 
 ```html
-<markdown source="{issue_body}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" issue-link-base="ghissue://" />
+<markdown source="{issue_body}" images="{markdownImages}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" issue-link-base="ghissue://" />
 ```
 
-`source` (required) is one `{binding}` producing the markdown text — a string field, zero-arg method, or arena-taking method. `on-link` and `on-details` are bare `Msg` tags (the runtime supplies their payloads: the URL as `[]const u8`, the details index as `usize`), `details-expanded` names a `[]const bool` iterable through the same sources `for each` accepts, and `issue-link-base` (a literal prefix or one `{binding}`) turns `#123` references into links to base ++ number. Everything but `source` is optional — without the details wiring, `<details>` blocks render collapsed and inert. Both the interpreter and the comptime compiler implement the element identically.
+`source` (required) is one `{binding}` producing the markdown text — a string field, zero-arg method, or arena-taking method. `images` optionally binds `[]const canvas.markdown.ResolvedImage`: give `canvas.markdown.collectImageSources` a caller-owned `[]canvas.markdown.CollectedImageSource`, consume each canonical source through `value()` while that storage is alive, load it through `fx.loadImage`, and retain the source, successful id, and dimensions in the model. Return those mappings from a model or arena-taking method; the view performs no I/O. `on-link` and `on-details` are bare `Msg` tags (the runtime supplies their payloads: the URL as `[]const u8`, the details index as `usize`), `details-expanded` names a `[]const bool` iterable through the same sources `for each` accepts, and `issue-link-base` (a literal prefix or one `{binding}`) turns `#123` references into links to base ++ number. Everything but `source` is optional — without the details wiring, `<details>` blocks render collapsed and inert. Both the interpreter and the comptime compiler implement the element identically.
 
 ## Pipeline components: stepper, timeline, and nav
 
@@ -698,10 +722,10 @@ Zig-built views get the same discipline at tree level: `canvas.expectA11yAuditSw
 
 The model-contract artifact — `zig-out/model-contract.zon`, a reflection of your `Model`/`Msg` — is refreshed by `native test` in every app shape (apps that own their build can also run `zig build model-contract` directly). With that artifact fresh, `native check` verifies markup against your app's actual surface — no app compile in the loop:
 
-- View → model: every binding path, `for each` iterable, `key` field, message tag, and payload type must exist on the model with the right shape, and expressions type-check with the real binding types — `{count > 'a'}` is an error naming `count` and its Zig type. Unknown names get a did-you-mean over your model's actual fields.
-- Model → view: model fields, query fns, and `Msg` tags that no view binds or dispatches are reported as **warnings** — state only `update`/fx logic touches is legitimate, so declare it: `pub const view_unbound = .{ "next_id" };` on `Model` or `Msg` opts names out. `--strict` promotes the warnings to failures.
+- View → model: every binding path, `for each` iterable, `key` field, message tag, and payload type must exist on the model with the right shape, and expressions type-check with the real binding types — `{count > 'a'}` is an error naming `count` and its core type. Unknown names get a did-you-mean over your model's actual fields.
+- Model → view: model fields, derived helpers/query functions, and `Msg` tags that no view binds or dispatches are reported as **warnings**. State only `update` or effects logic touches is legitimate, so opt it out in the core's vocabulary: TypeScript declares `export const viewUnbound = ["nextId", "tick"] as const` in `src/core.ts`; Zig declares `pub const view_unbound = .{ "next_id", "tick" };` on `Model` or `Msg`. Use the names exactly as that core authored them. `--strict` promotes the warnings to failures.
 - Template args are part of a template's interface: the kinds of use-site arguments flow into the template body (a string passed into a `width` arg fails at the use), slot content checks in the consumer's scope, and the check follows the whole `<import>` closure.
 
-A missing or stale artifact (the artifact carries a hash of your Zig sources) degrades to structural checking with one loud line ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks") — never a false pass; the compiled engine still enforces the same contract at build time, and a conformance suite holds the two checkers to identical accept/reject sets. Model state consumed only by a Zig-built view needs `view_unbound` too — the markup checker cannot see Zig view reads.
+A missing or stale artifact (the artifact carries a hash of the app's core sources) degrades to structural checking with one loud line ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks") — never a false pass; the compiled engine still enforces the same contract at build time, and a conformance suite holds the two checkers to identical accept/reject sets. Model state consumed only by a Zig-built view needs `view_unbound` too — the markup checker cannot see Zig view reads.
 
 For the component catalog and styling model, see [Built-in Components](/docs/built-in-components). For dropping down to the programmatic API, the `canvas.Ui(Msg)` builder produces exactly the same trees the markup compiles to.

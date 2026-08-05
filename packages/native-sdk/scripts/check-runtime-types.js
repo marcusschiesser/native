@@ -78,6 +78,20 @@ function typeUnionTags(typeName) {
   return [...match[1].matchAll(/"([^"]+)"/g)].map((tag) => tag[1]);
 }
 
+function checkSameTags(typeName, expectedTags, subject) {
+  const actualTags = typeUnionTags(typeName);
+  for (const tag of expectedTags) {
+    if (!actualTags.includes(tag)) {
+      addError(`${typeName} is missing ${subject} "${tag}"`);
+    }
+  }
+  for (const tag of actualTags) {
+    if (!expectedTags.includes(tag)) {
+      addError(`${typeName} includes unknown ${subject} "${tag}"`);
+    }
+  }
+}
+
 const viewInfoBody = viewInfoTypeBody();
 for (const key of publicViewJsonKeys()) {
   if (!interfaceHasProperty(viewInfoBody, key)) {
@@ -174,6 +188,37 @@ for (const tag of typeProfileRiskTags) {
   if (!profileRiskTags.includes(tag)) {
     addError(`NativeSdkCanvasFrameProfileRisk includes unknown platform risk "${tag}"`);
   }
+}
+
+// A GPU surface reports the concrete backend that presented its frame, but
+// callers request only the portable backends admitted by GpuSurfaceOptions.
+// Keep those roles separate so adding a host renderer cannot silently make it
+// appear as a valid create option in the public TypeScript API.
+const backendTags = platformEnumTags('GpuSurfaceBackend');
+checkSameTags('NativeSdkGpuSurfaceBackend', backendTags, 'reported GPU surface backend');
+
+const supportedOptionsBody = sliceBetween(
+  platformSource,
+  'pub fn isSupported(self: GpuSurfaceOptions) bool {',
+  '\n    }',
+);
+const requestBackendTags = unique(
+  [...supportedOptionsBody.matchAll(/self\.backend == \.([A-Za-z_][A-Za-z0-9_]*)/g)].map((match) => match[1]),
+);
+checkSameTags('NativeSdkGpuSurfaceBackendRequest', requestBackendTags, 'requestable GPU surface backend');
+
+if (!interfaceHasProperty(viewInfoBody, 'gpuBackend') ||
+    !/\n\s*gpuBackend\s*:\s*NativeSdkGpuSurfaceBackend\s*;/.test(viewInfoBody)) {
+  addError('NativeSdkViewInfo.gpuBackend must use the reported NativeSdkGpuSurfaceBackend type');
+}
+
+const createNativeViewBody = sliceBetween(
+  typeSource,
+  'export interface NativeSdkCreateNativeViewOptions',
+  'export interface NativeSdkCreateWebViewViewOptions',
+);
+if (!/\n\s*gpuBackend\?\s*:\s*NativeSdkGpuSurfaceBackendRequest\s*;/.test(createNativeViewBody)) {
+  addError('NativeSdkCreateNativeViewOptions.gpuBackend must use NativeSdkGpuSurfaceBackendRequest');
 }
 
 if (errors.length > 0) {

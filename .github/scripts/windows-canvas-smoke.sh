@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Windows canvas smoke under Wine.
 #
-# Exercises the Windows gpu_surface software path (src/platform/windows/
-# webview2_host.cpp: child HWND, WM_TIMER frame events, SetDIBitsToDevice
-# blits) without Windows hardware: cross-compiles examples/ui-inbox for
+# Exercises the Windows gpu_surface Direct2D path (src/platform/windows/
+# webview2_host.cpp: child HWND, WM_TIMER frame events, retained binary
+# packets) under Wine: cross-compiles examples/ui-inbox for
 # x86_64-windows-gnu, runs the .exe under Xvfb + Wine, and asserts against
 # the automation snapshot:
 #
 #   1. snapshot ready=true            (app booted, automation server live)
-#   2. gpu_backend=software           (the SetDIBitsToDevice path is active)
+#   2. gpu_backend=direct2d           (the retained packet path is active)
 #   3. gpu_nonblank=true              (real pixels were presented)
 #   4. widget-click "Add task" -> '4 open'   (automation input mutates state)
 #   5. real X11 click + typing lands in the draft textbox (XTEST -> Wine ->
@@ -116,9 +116,9 @@ app_pid=$!
 poll 180 'ready=true' || fail "snapshot never became ready"
 echo "== ready: $(head -1 "$snap" | cut -d'|' -f1)"
 
-# ---- 2 + 3: software backend presented non-blank pixels --------------------
+# ---- 2 + 3: Direct2D backend presented non-blank pixels --------------------
 poll 60 'gpu_nonblank=true' || fail "gpu_nonblank never became true"
-poll 10 'gpu_backend=software' || fail "gpu_backend is not software"
+poll 10 'gpu_backend=direct2d' || fail "gpu_backend is not direct2d"
 echo "== canvas: $(grep -o 'gpu_backend=[a-z]*' "$snap" | head -1)" \
   "$(grep -o 'gpu_nonblank=[a-z]*' "$snap" | head -1)" \
   "$(grep -o 'gpu_sample=0x[0-9a-f]*' "$snap" | head -1)" \

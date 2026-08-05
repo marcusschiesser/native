@@ -431,6 +431,86 @@ test "runtime invalidates canvas display list dirty regions" {
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.pendingDirtyRegions().len);
 }
 
+test "backdrop blur promotes intersecting damage to a full repaint" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-blur-damage", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const surface = geometry.SizeF.init(100, 40);
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.pixel_present_retained_baseline = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, surface.width, surface.height),
+    });
+    var pixels: [100 * 40 * 4]u8 = undefined;
+    var scratch: [100 * 40 * 4]u8 = undefined;
+    const clear = canvas.Color.rgb8(0, 0, 0);
+
+    const initial = [_]canvas.CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(4, 4, 4, 4), .fill = .{ .color = canvas.Color.rgb8(255, 0, 0) } } },
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(44, 15, 4, 4), .fill = .{ .color = canvas.Color.rgb8(255, 0, 0) } } },
+        .{ .fill_rect = .{ .id = 5, .rect = geometry.RectF.init(90, 4, 4, 4), .fill = .{ .color = canvas.Color.rgb8(255, 0, 0) } } },
+        .{ .push_clip = .{ .id = 3, .rect = geometry.RectF.init(50, 10, 20, 20) } },
+        .{ .blur = .{ .id = 4, .rect = geometry.RectF.init(50, 10, 20, 20), .radius = 8 } },
+        .pop_clip,
+    };
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &initial });
+    const first = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 1,
+        .surface_size = surface,
+    }, canvasFrameScratchStorage(&harness.runtime), &pixels, &scratch, clear);
+    try std.testing.expect(first.full_repaint);
+
+    // Two damage islands well outside the blur's radius keep the retained
+    // path even though their bounding union crosses the blur apron.
+    const far_changed = [_]canvas.CanvasCommand{
+        .{ .fill_rect = .{ .id = 1, .rect = geometry.RectF.init(4, 4, 4, 4), .fill = .{ .color = canvas.Color.rgb8(0, 255, 0) } } },
+        initial[1],
+        .{ .fill_rect = .{ .id = 5, .rect = geometry.RectF.init(90, 4, 4, 4), .fill = .{ .color = canvas.Color.rgb8(0, 255, 0) } } },
+        initial[3],
+        initial[4],
+        initial[5],
+    };
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &far_changed });
+    const incremental = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 2,
+        .surface_size = surface,
+    }, canvasFrameScratchStorage(&harness.runtime), &pixels, &scratch, clear);
+    try std.testing.expect(!incremental.full_repaint);
+    try std.testing.expect(incremental.dirty_bounds != null);
+    try std.testing.expectEqual(@as(usize, 2), incremental.dirtyRects().len);
+
+    // This changed rect stops two points before the blur output, but it
+    // lies inside the radius-8 sampling apron. A scissored replay would
+    // sample the prior composited frame outside its dirty boundary.
+    const apron_changed = [_]canvas.CanvasCommand{
+        far_changed[0],
+        .{ .fill_rect = .{ .id = 2, .rect = geometry.RectF.init(44, 15, 4, 4), .fill = .{ .color = canvas.Color.rgb8(0, 0, 255) } } },
+        far_changed[2],
+        initial[3],
+        initial[4],
+        initial[5],
+    };
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &apron_changed });
+    const promoted = try harness.runtime.presentNextCanvasFramePixels(1, "canvas", .{
+        .frame_index = 3,
+        .surface_size = surface,
+    }, canvasFrameScratchStorage(&harness.runtime), &pixels, &scratch, clear);
+    try std.testing.expect(promoted.full_repaint);
+    try std.testing.expectEqual(@as(usize, 0), promoted.changes.len);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 0, surface.width, surface.height), promoted.dirty_bounds.?);
+}
+
 test "runtime requests gpu surface frames for retained canvas changes" {
     const TestApp = struct {
         fn app(self: *@This()) App {

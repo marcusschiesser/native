@@ -1,6 +1,6 @@
-//! `TsUiApp(core)` — the first-class UiApp adapter for transpiled app
-//! cores: the committed TS model IS the app model. Where a Zig core
-//! hands `UiApp` a mutable model plus `update`, a transpiled core is an
+//! `TsUiApp(core)` — the first-class UiApp adapter for compiled
+//! TypeScript app cores: the committed TS model IS the app model. Where a Zig core
+//! hands `UiApp` a mutable model plus `update`, a compiled TypeScript core is an
 //! immutable committed graph plus a pure `update` returning the next
 //! root — this adapter closes that gap with no per-app glue:
 //!
@@ -32,7 +32,7 @@
 //! `chromeMsg` -> `on_appearance`/`on_chrome`, each host event built
 //! structurally by field name from the core's declared records (the
 //! effects-routing rule applied to the app shell; every shape mismatch
-//! is a teaching compile error re-deriving the transpiler's NS1033).
+//! is a teaching compile error re-deriving the frontend's NS1033).
 //! `CoreOptions` carries the launch-boundary channels the wiring
 //! resolves: `boot_images` (app.zon assets, registered on the
 //! installing frame) and `env_values` (the core's `envMsgs` variables,
@@ -52,10 +52,10 @@
 //! Record/replay, automation, and pixel fingerprints need nothing
 //! extra: the adapter rides the ordinary UiApp dispatch path, so the
 //! session journal, the automation verbs, and the screenshot marks see
-//! a transpiled core exactly as they see a Zig one. The v1 process
-//! contract is the bridge's: one live app per core module (two apps
-//! over one emitted core would share a committed root; distinct core
-//! modules coexist).
+//! a compiled TypeScript core exactly as they see a Zig one. The
+//! process contract is the bridge's: one live app per core module (two
+//! apps over one core would share a committed root), and one compiled
+//! archive per process (the fixed-prefix C ABI symbol set).
 
 const std = @import("std");
 const canvas = @import("canvas");
@@ -100,7 +100,7 @@ pub fn TsUiApp(comptime core: type) type {
         };
 
         /// Adapter-owned configuration — the knobs that exist because
-        /// the core is transpiled, kept separate from `App.Options` so
+        /// the core is TypeScript, kept separate from `App.Options` so
         /// the wiring surface reads as ordinary UiApp wiring.
         pub const CoreOptions = struct {
             /// Platform caches directory for URL audio playback: when a
@@ -172,7 +172,7 @@ pub fn TsUiApp(comptime core: type) type {
 
         fn stampOptions(options: Options) Options {
             if (options.update != null or options.update_fx != null) {
-                @panic("TsUiApp owns update: the transpiled core is the update loop - remove the wiring's update/update_fx");
+                @panic("TsUiApp owns update: the TypeScript core is the update loop - remove the wiring's update/update_fx");
             }
             if (options.init_fx != null) {
                 @panic("TsUiApp owns init_fx: the core's initialModel boots the app - remove the wiring's init_fx");
@@ -282,7 +282,7 @@ pub fn TsUiApp(comptime core: type) type {
             }
         }
 
-        /// Teaching re-derivation of the transpiler's NS1033 for
+        /// Teaching re-derivation of the frontend's NS1033 for
         /// hand-assembled cores: every `envMsgs` entry must name a Msg
         /// arm carrying exactly one bytes payload.
         fn validateEnvMsgs() void {
@@ -472,7 +472,7 @@ pub fn TsUiApp(comptime core: type) type {
         }
 
         /// The Msg arm index a channel export names, with the teaching
-        /// error the transpiler's NS1033 re-derives for hand-written
+        /// error the frontend's NS1033 re-derives for hand-written
         /// cores.
         fn channelArmIndex(comptime tag: []const u8, comptime channel: []const u8) usize {
             for (@typeInfo(Msg).@"union".fields, 0..) |arm, index| {

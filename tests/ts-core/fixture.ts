@@ -141,7 +141,8 @@ export type Msg =
   | { readonly kind: "watch" }
   | { readonly kind: "mix_reject" }
   | { readonly kind: "mix_reject_flip" }
-  | { readonly kind: "chan_evt"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+  | { readonly kind: "chan_evt"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number }
+  | { readonly kind: "notify" };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -421,6 +422,12 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       if (msg.state === "rejected")
         return [{ ...model, chanState: msg.state, chanEvents: (model.chanEvents < 9007199254740991 ? model.chanEvents + 1 : 9007199254740991), rejectSeq: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991), chanRejectAt: (model.rejectSeq < 9007199254740991 ? model.rejectSeq + 1 : 9007199254740991) }, Cmd.none];
       return [{ ...model, chanState: msg.state, chanEvents: (model.chanEvents < 9007199254740991 ? model.chanEvents + 1 : 9007199254740991) }, Cmd.none];
+    case "notify":
+      return [model, Cmd.showNotification({
+        title: model.status,
+        subtitle: asciiBytes("native-sdk"),
+        body: asciiBytes("TS core notification"),
+      })];
   }
 }
 

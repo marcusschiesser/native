@@ -10,7 +10,7 @@
 // return path (NS1017) — they never live in the Model, in a Msg, in a local,
 // or in a helper.
 //
-// The v3 command set:
+// The v5 command set:
 //
 //   Cmd.none                     no effects (what a bare `return model` means)
 //   Cmd.persist()                ask the host to persist the committed model
@@ -66,6 +66,9 @@
 //                                clipboard read; ok arm carries the text bytes,
 //                                err arm the reason bytes ("failed",
 //                                "rejected")
+//   Cmd.showNotification({ title, subtitle?, body? })
+//                                fire-and-forget desktop notification; the OS
+//                                remains authoritative over final delivery
 //   Cmd.delay(key, ms, "fired")  a keyed ONE-SHOT timer: dispatches the named
 //                                arm once after `ms`, with the fire time (ms)
 //                                as its single number payload; re-issuing a
@@ -872,6 +875,16 @@ export interface FetchSpec {
   readonly timeoutMs?: number;
 }
 
+/// A desktop notification request. Text is bytes so every field may come
+/// directly from model data; subtitle and body default to empty. Delivery is
+/// fire-and-forget because the OS may suppress an accepted request through
+/// Focus / Do Not Disturb or the user's notification settings.
+export interface NotificationSpec {
+  readonly title: Uint8Array;
+  readonly subtitle?: Uint8Array;
+  readonly body?: Uint8Array;
+}
+
 /// An inert command value, parameterized by the app's Msg union so the
 /// factories can validate message targets. Opaque to app code: build with
 /// the `Cmd.*` factories, return from `update`/`initialModel`, never inspect
@@ -923,6 +936,7 @@ export type Cmd<M extends Msgish> =
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
+  | { readonly op: "show_notification"; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
   | {
       readonly op: "spawn";
@@ -1160,6 +1174,19 @@ export const Cmd = {
   /// "rejected").
   clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M> {
     return { op: "clip_read", key: route.key ?? "", okKind: route.ok, errKind: route.err };
+  },
+
+  /// Ask the desktop host to show a system notification. Fire-and-forget:
+  /// platform acceptance cannot promise display while OS focus modes and user
+  /// notification settings remain authoritative. Empty or over-bound titles,
+  /// over-bound optional fields, and unavailable services fail closed.
+  showNotification(spec: NotificationSpec): Cmd<never> {
+    return {
+      op: "show_notification",
+      title: spec.title,
+      subtitle: spec.subtitle ?? new Uint8Array(0),
+      body: spec.body ?? new Uint8Array(0),
+    };
   },
 
   /// A keyed one-shot delay: dispatch the named Msg arm once, `ms` from now,

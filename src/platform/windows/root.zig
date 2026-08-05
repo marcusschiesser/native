@@ -4,6 +4,9 @@ const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
 
+const bundled_geist_regular = @embedFile("../../primitives/canvas/fonts/Geist-Regular.ttf");
+const bundled_geist_mono = @embedFile("../../primitives/canvas/fonts/GeistMono-Regular.ttf");
+
 pub const Error = error{
     CallbackFailed,
     CreateFailed,
@@ -73,10 +76,19 @@ const WindowsEvent = extern struct {
     frame_interval_ns: u64,
     nonblank: c_int,
     sample_color: u32,
+    /// Concrete Windows presenter plus the most recent accepted packet's
+    /// decode/draw durations. The host clears timings before dispatch so
+    /// a synchronous next present cannot be clobbered after the callback.
+    gpu_backend: c_int,
+    packet_decode_ns: u64,
+    packet_draw_ns: u64,
     /// Nonzero when the frame completed logically while the top-level
     /// window was minimized (heartbeat pacing; nothing painted) — its
     /// timestamp is pacing policy, never a latency endpoint.
     occluded: c_int,
+    /// Nonzero when the Direct2D presenter lost its retained resources and
+    /// this completion must rebuild the canvas from a full packet.
+    force_full_repaint: c_int,
     input_kind: c_int,
     button: c_int,
     delta_x: f64,
@@ -149,7 +161,7 @@ extern fn native_sdk_windows_close_window(host: *WindowsHost, window_id: u64) c_
 extern fn native_sdk_windows_minimize_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_show_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_close_policy(host: *WindowsHost, window_id: u64, close_policy: c_int) c_int;
-extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
+extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, gpu_backend_request: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_update_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_windows_set_view_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_windows_set_view_visible(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
@@ -158,6 +170,11 @@ extern fn native_sdk_windows_close_view(host: *WindowsHost, window_id: u64, labe
 extern fn native_sdk_windows_request_gpu_surface_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_note_gpu_surface_input(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_windows_present_gpu_surface_pixels(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, width: usize, height: usize, scale: f64, has_dirty_rect: c_int, dirty_x: f64, dirty_y: f64, dirty_width: f64, dirty_height: f64, rgba8: [*]const u8, rgba8_len: usize) c_int;
+extern fn native_sdk_windows_present_gpu_surface_packet_binary(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, surface_width: f64, surface_height: f64, scale: f64, clear_r: u8, clear_g: u8, clear_b: u8, clear_a: u8, requires_render: c_int, command_count: usize, unsupported_command_count: usize, representable: c_int, packet: [*]const u8, packet_len: usize) c_int;
+extern fn native_sdk_windows_upload_gpu_surface_image(host: *WindowsHost, id: u64, width: usize, height: usize, rgba8: [*]const u8, rgba8_len: usize) c_int;
+extern fn native_sdk_windows_remove_gpu_surface_image(host: *WindowsHost, id: u64) c_int;
+extern fn native_sdk_windows_register_gpu_surface_font(host: *WindowsHost, id: u64, ttf: [*]const u8, ttf_len: usize, token: *u64) c_int;
+extern fn native_sdk_windows_unregister_gpu_surface_font(host: *WindowsHost, id: u64, token: u64) c_int;
 extern fn native_sdk_windows_create_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, transparent: c_int, bridge_enabled: c_int) c_int;
 extern fn native_sdk_windows_set_webview_frame(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_windows_navigate_webview(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, url: [*]const u8, url_len: usize) c_int;
@@ -321,6 +338,18 @@ pub const WindowsPlatform = struct {
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
         const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
+        // Packet text must use the same Geist metrics the engine planned
+        // against. Register both built-in faces directly from their
+        // compile-time bytes; custom application fonts keep the public
+        // side-channel and ids >= 64. If either required face cannot be
+        // registered, disable packet rendering as one capability and keep
+        // the exact reference-pixel fallback — never draw system faces
+        // against Geist-planned layout.
+        if (web_engine == .system) {
+            var font_token: u64 = 0;
+            _ = native_sdk_windows_register_gpu_surface_font(host, 1, bundled_geist_regular.ptr, bundled_geist_regular.len, &font_token);
+            _ = native_sdk_windows_register_gpu_surface_font(host, 2, bundled_geist_mono.ptr, bundled_geist_mono.len, &font_token);
+        }
         // The manifest's declared close policy rides right after the
         // create, like the min-size floor: close handling is host
         // window state fixed for the window's life.
@@ -414,6 +443,11 @@ pub const WindowsPlatform = struct {
                 .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 .note_gpu_surface_input_fn = noteGpuSurfaceInput,
                 .present_gpu_surface_pixels_fn = presentGpuSurfacePixels,
+                .present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary,
+                .upload_gpu_surface_image_fn = uploadGpuSurfaceImage,
+                .remove_gpu_surface_image_fn = removeGpuSurfaceImage,
+                .register_gpu_surface_font_fn = registerGpuSurfaceFont,
+                .unregister_gpu_surface_font_fn = unregisterGpuSurfaceFont,
                 .show_context_menu_fn = showContextMenu,
                 .create_webview_fn = createWebView,
                 .set_webview_frame_fn = setWebViewFrame,
@@ -628,25 +662,7 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .window_id = event.window_id,
         } }),
         .tray_action => state.emit(.{ .tray_action = event.tray_item_id }),
-        .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = .{
-            .window_id = event.window_id,
-            .label = event.view_label[0..event.view_label_len],
-            .size = geometry.SizeF.init(@floatCast(event.width), @floatCast(event.height)),
-            .scale_factor = @floatCast(event.scale),
-            .frame_index = event.frame_index,
-            .timestamp_ns = event.timestamp_ns,
-            .frame_interval_ns = event.frame_interval_ns,
-            .nonblank = event.nonblank != 0,
-            .sample_color = event.sample_color,
-            .occluded = event.occluded != 0,
-            .backend = .software,
-            .pixel_format = .bgra8_unorm,
-            .present_mode = .timer,
-            .alpha_mode = .@"opaque",
-            .color_space = .srgb,
-            .vsync = true,
-            .status = .ready,
-        } }),
+        .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = gpuSurfaceFrameEventFromWindowsEvent(event) }),
         .gpu_surface_resize => state.emit(.{ .gpu_surface_resized = .{
             .window_id = event.window_id,
             .label = event.view_label[0..event.view_label_len],
@@ -674,6 +690,31 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
         } }),
         .context_menu_action => state.emit(.{ .context_menu_action = contextMenuActionEventFromWindowsEvent(event) }),
     }
+}
+
+fn gpuSurfaceFrameEventFromWindowsEvent(event: *const WindowsEvent) platform_mod.GpuSurfaceFrameEvent {
+    return .{
+        .window_id = event.window_id,
+        .label = event.view_label[0..event.view_label_len],
+        .size = geometry.SizeF.init(@floatCast(event.width), @floatCast(event.height)),
+        .scale_factor = @floatCast(event.scale),
+        .frame_index = event.frame_index,
+        .timestamp_ns = event.timestamp_ns,
+        .frame_interval_ns = event.frame_interval_ns,
+        .nonblank = event.nonblank != 0,
+        .sample_color = event.sample_color,
+        .packet_decode_ns = event.packet_decode_ns,
+        .packet_draw_ns = event.packet_draw_ns,
+        .occluded = event.occluded != 0,
+        .backend = if (event.gpu_backend == 1) .direct2d else .software,
+        .pixel_format = .bgra8_unorm,
+        .present_mode = .timer,
+        .alpha_mode = .@"opaque",
+        .color_space = .srgb,
+        .vsync = true,
+        .status = .ready,
+        .canvas_frame_full_repaint = event.force_full_repaint != 0,
+    };
 }
 
 /// Pure event mapping (no host calls), unit-testable on every build
@@ -1041,6 +1082,7 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
         options.label.ptr,
         options.label.len,
         viewKindInt(options.kind),
+        if (options.kind == .gpu_surface) gpuSurfaceBackendRequestInt(options.gpu_surface.backend) else 0,
         parent.ptr,
         parent.len,
         frame.x,
@@ -1157,6 +1199,91 @@ fn presentGpuSurfacePixels(context: ?*anyopaque, pixels: platform_mod.GpuSurface
         pixels.rgba8.ptr,
         pixels.rgba8.len,
     ) == 0) return error.ViewNotFound;
+}
+
+fn presentGpuSurfacePacketBinary(context: ?*anyopaque, packet: platform_mod.GpuSurfacePacket) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    const result = native_sdk_windows_present_gpu_surface_packet_binary(
+        self.host,
+        packet.window_id,
+        packet.label.ptr,
+        packet.label.len,
+        packet.surface_size.width,
+        packet.surface_size.height,
+        packet.scale_factor,
+        packet.clear_color_rgba8[0],
+        packet.clear_color_rgba8[1],
+        packet.clear_color_rgba8[2],
+        packet.clear_color_rgba8[3],
+        if (packet.requires_render) 1 else 0,
+        packet.command_count,
+        packet.unsupported_command_count,
+        if (packet.representable) 1 else 0,
+        packet.binary.ptr,
+        packet.binary.len,
+    );
+    switch (result) {
+        1 => return,
+        0 => return error.UnsupportedService,
+        -1 => return error.ViewNotFound,
+        else => return error.InvalidGpuSurfacePacket,
+    }
+}
+
+fn uploadGpuSurfaceImage(context: ?*anyopaque, image: platform_mod.GpuSurfaceImagePixels) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    return gpuSurfaceImageUploadResult(native_sdk_windows_upload_gpu_surface_image(
+        self.host,
+        image.id,
+        image.width,
+        image.height,
+        image.rgba8.ptr,
+        image.rgba8.len,
+    ));
+}
+
+fn gpuSurfaceImageUploadResult(result: c_int) anyerror!void {
+    switch (result) {
+        1 => return,
+        0 => return error.UnsupportedService,
+        else => return error.InvalidGpuSurfaceImage,
+    }
+}
+
+fn removeGpuSurfaceImage(context: ?*anyopaque, id: u64) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    if (native_sdk_windows_remove_gpu_surface_image(self.host, id) == 0) return error.InvalidGpuSurfaceImage;
+}
+
+fn registerGpuSurfaceFont(context: ?*anyopaque, font: platform_mod.GpuSurfaceFontData) anyerror!u64 {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    var token: u64 = 0;
+    return gpuSurfaceFontRegistrationResult(
+        native_sdk_windows_register_gpu_surface_font(self.host, font.id, font.ttf.ptr, font.ttf.len, &token),
+        token,
+    );
+}
+
+fn gpuSurfaceFontRegistrationResult(result: c_int, token: u64) anyerror!u64 {
+    return switch (result) {
+        1 => token,
+        0 => error.UnsupportedService,
+        else => error.InvalidGpuSurfaceFont,
+    };
+}
+
+fn unregisterGpuSurfaceFont(context: ?*anyopaque, id: u64, token: u64) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    switch (native_sdk_windows_unregister_gpu_surface_font(self.host, id, token)) {
+        1 => return,
+        0 => return error.UnsupportedService,
+        else => return error.InvalidGpuSurfaceFont,
+    }
 }
 
 /// Win32 menus treat `&` in an item label as a mnemonic marker —
@@ -1669,6 +1796,25 @@ test "windows supports native container and control kinds" {
     try std.testing.expect(isSupportedNativeViewKind(.gpu_surface));
 }
 
+test "windows GPU frame maps Direct2D recovery to a full repaint" {
+    const label = "canvas";
+    var event = std.mem.zeroes(WindowsEvent);
+    event.window_id = 7;
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.width = 640;
+    event.height = 360;
+    event.scale = 2;
+    event.gpu_backend = 1;
+    event.force_full_repaint = 1;
+
+    const frame = gpuSurfaceFrameEventFromWindowsEvent(&event);
+    try std.testing.expectEqual(@as(platform_mod.WindowId, 7), frame.window_id);
+    try std.testing.expectEqualStrings(label, frame.label);
+    try std.testing.expectEqual(platform_mod.GpuSurfaceBackend.direct2d, frame.backend);
+    try std.testing.expect(frame.canvas_frame_full_repaint);
+}
+
 test "windows gpu surface input preserves key and text" {
     const label = "canvas";
     const key = "enter";
@@ -1920,6 +2066,134 @@ test "windows passive canvas creation does not focus its child hwnd" {
     ) != null);
 }
 
+test "windows software GPU backend request stays on the pixel presenter" {
+    try std.testing.expectEqual(@as(c_int, 0), gpuSurfaceBackendRequestInt(.metal));
+    try std.testing.expectEqual(@as(c_int, 1), gpuSurfaceBackendRequestInt(.software));
+
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "view.gpu_backend_request != kGpuBackendRequestSoftware",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (view.gpu_backend_request == kGpuBackendRequestSoftware) return 0;",
+    ) != null);
+}
+
+test "windows unavailable image uploader negotiates pixel fallback" {
+    try gpuSurfaceImageUploadResult(1);
+    try std.testing.expectError(error.UnsupportedService, gpuSurfaceImageUploadResult(0));
+    try std.testing.expectError(error.InvalidGpuSurfaceImage, gpuSurfaceImageUploadResult(-1));
+
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (!host->gpu_renderer) return 0;",
+    ) != null);
+}
+
+test "windows packet renderer requires deterministic font and caption seams" {
+    try std.testing.expectEqual(@as(u64, 37), try gpuSurfaceFontRegistrationResult(1, 37));
+    try std.testing.expectError(error.UnsupportedService, gpuSurfaceFontRegistrationResult(0, 0));
+    try std.testing.expectError(error.InvalidGpuSurfaceFont, gpuSurfaceFontRegistrationResult(-1, 0));
+
+    const renderer_source = @embedFile("gpu_surface_renderer.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "fallback_builder->CreateFontFallback(&font_fallback_)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "layout2->SetFontFallback(renderer_->fontFallback())",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_GDI_COMPATIBLE",
+    ) != null);
+
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (id == 1 || id == 2) host->gpu_renderer.reset();",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "view.gpu_surface->readColorAt(sample_x, sample_y, &packed)",
+    ) != null);
+}
+
+test "windows packet renderer preserves text baselines and disjoint dirty regions" {
+    const renderer_source = @embedFile("gpu_surface_renderer.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "draw_line(text.text, text.origin.x, text.origin.y)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "backing_target_->DrawGlyphRun(\n                    D2D1::Point2F(glyph.x, glyph.baseline)",
+    ) != null);
+
+    const draw_list_at = std.mem.indexOf(
+        u8,
+        renderer_source,
+        "bool drawCommandList(const std::vector<const Command *> &commands",
+    ) orelse return error.TestExpectedEqual;
+    const draw_list = renderer_source[draw_list_at..];
+    const blur_target_at = std.mem.indexOf(
+        u8,
+        draw_list,
+        "const Rect target = blurTarget(*command, outer_clip);",
+    ) orelse return error.TestExpectedEqual;
+    const segment_end_at = std.mem.indexOf(
+        u8,
+        draw_list,
+        "const HRESULT segment = backing_target_->EndDraw();",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expect(blur_target_at < segment_end_at);
+
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "gpuSurfaceUpdateRegionRects(\n                hwnd, paint_rects, kGpuPaintRegionRectCap)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "view->gpu_surface->paint(paint_rects, paint_rect_count)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "InvalidateRect(view.hwnd, &info.dirty_rects[index], FALSE)",
+    ) != null);
+}
+
+test "windows packet renderer keeps square rectangle stroke joins" {
+    const renderer_source = @embedFile("gpu_surface_renderer.cpp");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "style.lineJoin = D2D1_LINE_JOIN_MITER;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        renderer_source,
+        "command.shape.kind == Shape::Kind::stroke_rect\n                ? rect_stroke_",
+    ) != null);
+}
+
 test "windows click-through uses a layered surface even when visually opaque" {
     const host_source = @embedFile("webview2_host.cpp");
     try std.testing.expect(std.mem.indexOf(
@@ -2130,6 +2404,10 @@ fn viewKindInt(kind: platform_mod.ViewKind) c_int {
         .progress_indicator => 15,
         .segmented_control => 16,
     };
+}
+
+fn gpuSurfaceBackendRequestInt(backend: platform_mod.GpuSurfaceBackend) c_int {
+    return if (backend == .software) 1 else 0;
 }
 
 fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []const u8 {

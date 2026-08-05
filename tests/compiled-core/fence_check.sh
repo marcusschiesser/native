@@ -1,8 +1,7 @@
 #!/bin/sh
 # Determinism-fence negative control: prove the profile's fences FIRE, not merely that clean cores pass under them.
 #
-#   NATIVE_SDK_CORE_COMPILER="<toolchain command>" \
-#     tests/compiled-core/fence_check.sh <workdir>
+#   tests/compiled-core/fence_check.sh <workdir>
 #
 #   <workdir>: scratch directory (created; contents replaced)
 #
@@ -11,18 +10,22 @@
 #   1. positive control — build_core.sh compiles the pristine fixture and the co-emitted contract sidecar must attest `deterministic: true`;
 #   2. negative control — the staged fixture gets one injected fenced ambient read (Date.now() at the top of update), and the SAME compile invocation must refuse it, naming the fenced surface id (stdlib.date.now), with no archive and no attesting sidecar emitted.
 #
-# Skip-clean like the parity battery: no external toolchain supplied means the check reports the skip and exits 0, so unconditional callers (local dev boxes without the toolchain) stay green.
+# The compiler resolves from the SDK's own exact-pinned dependency (packages/core/node_modules); NATIVE_SDK_CORE_COMPILER overrides. Skip-clean: neither supplied means the check reports the skip and exits 0, so unconditional callers (a checkout that never ran `npm ci` in packages/core) stay green.
 
 set -u
 
 work="${1:?usage: fence_check.sh <workdir>}"
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 
-if [ -z "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
-  echo "fence-check: skipped — set NATIVE_SDK_CORE_COMPILER to the external core toolchain command to run the determinism-fence negative control"
+if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
+  compiler="$NATIVE_SDK_CORE_COMPILER"
+elif [ -f "$repo/packages/core/node_modules/scriptc/dist/main.js" ]; then
+  compiler="node $repo/packages/core/node_modules/scriptc/dist/main.js"
+else
+  echo "fence-check: skipped — run \`npm ci --prefix $repo/packages/core\` (or set NATIVE_SDK_CORE_COMPILER) to run the determinism-fence negative control"
   exit 0
 fi
-compiler="$NATIVE_SDK_CORE_COMPILER"
+export NATIVE_SDK_CORE_COMPILER="$compiler"
 
 # Half 1: the pristine compile succeeds and attests deterministic.
 if ! "$repo/tests/compiled-core/build_core.sh" markup "$work"; then

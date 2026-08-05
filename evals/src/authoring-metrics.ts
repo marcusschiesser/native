@@ -7,7 +7,7 @@
 // the deterministic checks cannot see:
 //
 // - first-pass compliance: did the FIRST compliance check the agent ran after
-//   first touching the sources pass? (ts-core: the @native-sdk/core transpiler run;
+//   first touching the sources pass? (ts-core: the @native-sdk/core frontend check;
 //   native: `native test` / `zig build test`.) Pre-edit runs don't count —
 //   starters compile clean, so they would grade the scaffold, not the agent.
 // - retries-to-green: failing compliance runs before the first passing one

@@ -772,6 +772,10 @@ pub const ViewKind = enum {
 pub const GpuSurfaceBackend = enum {
     none,
     metal,
+    /// Direct2D retained rendering on Windows. The application-facing
+    /// backend request remains portable; frame events report the concrete
+    /// renderer that actually completed the present.
+    direct2d,
     /// CPU rasterization (reference renderer) presented through the
     /// platform's pixel blit path. Platforms without a GPU packet renderer
     /// (Linux/GTK) report this backend in their frame events; manifests

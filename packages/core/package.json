@@ -1,7 +1,7 @@
 {
   "name": "@native-sdk/core",
-  "version": "0.7.1",
-  "description": "The TypeScript authoring tier: the app-core subset, its dev-time transpiler to arena-backed Zig, and the SDK module cores import",
+  "version": "0.8.1",
+  "description": "The TypeScript authoring tier: the app-core subset, its checker and contract frontend, the exact-pinned core compiler dependency, and the SDK module cores import",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/vercel-labs/native.git",
@@ -11,7 +11,8 @@
   "type": "module",
   "types": "./sdk/core.ts",
   "files": [
-    "sdk"
+    "sdk",
+    "compile-surface"
   ],
   "exports": {
     ".": {
@@ -29,10 +30,12 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.ts\"",
-    "gate": "node scripts/gate.mjs"
+    "build:declarations": "node scripts/gen_declarations.mjs"
   },
   "devDependencies": {
-    "@typescript/old": "npm:typescript@6.0.3",
-    "@typescript/typescript6": "6.0.2"
+    "@typescript/old": "npm:typescript@6.0.3"
+  },
+  "dependencies": {
+    "scriptc": "0.0.22"
   }
 }

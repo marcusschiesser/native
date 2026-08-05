@@ -37,6 +37,7 @@ pub const Op = union(enum) {
     pty_write: struct { key: []const u8, bytes: []const u8 },
     pty_resize: struct { key: []const u8, cols: f64, rows: f64 },
     pty_kill: struct { key: []const u8 },
+    show_notification: struct { title: []const u8, subtitle: []const u8, body: []const u8 },
 
     pub const Host = struct {
         name: []const u8,
@@ -344,6 +345,14 @@ pub const CmdIter = struct {
                 const key = shortBytes(b, &off);
                 break :blk .{ .pty_kill = .{ .key = key } };
             },
+            // show_notification [op 0x1D][title/subtitle/body as u32-length
+            // bytes] (ts_core_host.zig, 0x1D).
+            0x1D => blk: {
+                const title = longBytes(b, &off);
+                const subtitle = longBytes(b, &off);
+                const body = longBytes(b, &off);
+                break :blk .{ .show_notification = .{ .title = title, .subtitle = subtitle, .body = body } };
+            },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
         self.off = off;
@@ -571,9 +580,10 @@ test "the pty records decode, alone and inside a batch" {
     try std.testing.expectEqualStrings("-l", spawned.arg(1));
 
     // pty_write [0x1A][key][bytes u32-len], pty_resize [0x1B][key]
-    // [cols f64 LE][rows f64 LE], pty_kill [0x1C][key], and a trailing
-    // now record in one batch: each record must advance the iterator
-    // exactly its own length for the tail to decode.
+    // [cols f64 LE][rows f64 LE], pty_kill [0x1C][key], notification
+    // [0x1D][title][subtitle][body], and a trailing now record in one batch:
+    // each record must advance the iterator exactly its own length for the
+    // tail to decode.
     var batch: std.ArrayList(u8) = .empty;
     defer batch.deinit(a);
     try batch.append(a, 0x1A);
@@ -589,6 +599,13 @@ test "the pty records decode, alone and inside a batch" {
     try batch.append(a, 0x1C);
     try batch.append(a, 5);
     try batch.appendSlice(a, "shell");
+    try batch.append(a, 0x1D);
+    try batch.appendSlice(a, &.{ 5, 0, 0, 0 });
+    try batch.appendSlice(a, "Ready");
+    try batch.appendSlice(a, &.{ 3, 0, 0, 0 });
+    try batch.appendSlice(a, "SDK");
+    try batch.appendSlice(a, &.{ 4, 0, 0, 0 });
+    try batch.appendSlice(a, "Done");
     try batch.appendSlice(a, &.{ 0x02, 7 });
     var iter = CmdIter.init(batch.items);
     const wrote = iter.next() orelse return error.TestUnexpectedResult;
@@ -599,6 +616,10 @@ test "the pty records decode, alone and inside a batch" {
     try std.testing.expectEqual(@as(f64, 40), resized.pty_resize.rows);
     const killed = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("shell", killed.pty_kill.key);
+    const notification = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("Ready", notification.show_notification.title);
+    try std.testing.expectEqualStrings("SDK", notification.show_notification.subtitle);
+    try std.testing.expectEqualStrings("Done", notification.show_notification.body);
     const tail = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 7), tail.now.msg_tag);
     try std.testing.expectEqual(@as(?Op, null), iter.next());

@@ -15,16 +15,17 @@
 // install.
 //
 // packages/core/ ships too, selectively: TypeScript app cores need the
-// @native-sdk/core transpiler (src/, run under node at build time), the
+// @native-sdk/core frontend (src/, run under node at build time), the
 // SDK library modules cores import (sdk/, also the editor package the CLI
-// materializes into apps), the rt kernel the emitted core pairs with
-// (rt/rt.zig), package.json (the bundled version every scaffold pin
-// follows), and package-lock.json (npm only strips the tarball ROOT
-// lockfile; nested ones ship). The transpiler's TypeScript toolchain
-// itself does NOT ride in the payload: @typescript/typescript6 is a
-// regular dependency of @native-sdk/cli, installed by npm in the same
-// transaction and resolved from packages/core by node's ancestor walk.
-// test/ and scripts/ stay out: repo-dev surface, never build inputs.
+// materializes into apps), the external-compile staging surface
+// (compile-surface/ and the scripts/ drivers the build graph runs),
+// package.json (the bundled version every scaffold pin follows), and
+// package-lock.json (npm only strips the tarball ROOT lockfile; nested
+// ones ship). The frontend's TypeScript toolchain and the external core
+// compiler do NOT ride in the payload: the @typescript/old alias and
+// scriptc are regular dependencies of @native-sdk/cli, installed by npm
+// in the same transaction and resolved from packages/core by node's
+// ancestor walk. test/ stays out: repo-dev surface, never build inputs.
 
 import { cpSync, copyFileSync, rmSync } from 'fs';
 import { dirname, join } from 'path';
@@ -50,10 +51,20 @@ for (const dir of ['src', 'build', 'assets', 'skills', 'skill-data']) {
   console.log(`✓ Copied third_party/webview2/ to ${target}`);
 }
 
+// corewire (tools/corewire): the contract-sidecar mirror/facade/profile
+// generator every TypeScript-core build compiles from the dependency.
+{
+  const source = join(repoRoot, 'tools', 'corewire');
+  const target = join(projectRoot, 'tools', 'corewire');
+  rmSync(join(projectRoot, 'tools'), { recursive: true, force: true });
+  cpSync(source, target, { recursive: true });
+  console.log(`✓ Copied tools/corewire/ to ${target}`);
+}
+
 // The @native-sdk/core closure a TS app build needs (see the header note).
 {
   rmSync(join(projectRoot, 'packages'), { recursive: true, force: true });
-  for (const dir of ['src', 'sdk', 'rt']) {
+  for (const dir of ['src', 'sdk', 'compile-surface', 'scripts']) {
     const source = join(repoRoot, 'packages', 'core', dir);
     const target = join(projectRoot, 'packages', 'core', dir);
     cpSync(source, target, { recursive: true });

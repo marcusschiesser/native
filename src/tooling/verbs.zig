@@ -64,7 +64,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
         if (buildgraph.resolveFrameworkRoot(allocator, io, options.base_env) catch null) |framework_root| {
             defer allocator.free(framework_root);
             ts_core.selfHealEditorPackage(allocator, io, framework_root);
-            // The build graph runs the transpiler inside `zig build`; gate
+            // The build graph runs the frontend inside `zig build`; gate
             // its toolchain resolution before any zig spawns — but ONLY
             // for graphs the CLI itself generates (see the preflight's own
             // doc for why ejected apps must flow past it).

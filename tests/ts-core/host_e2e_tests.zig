@@ -1,6 +1,7 @@
-//! End-to-end: a GENUINELY TRANSPILED core (tests/ts-core/fixture.ts,
-//! emitted by the repo's own transpiler at build time — see the
-//! ts-core-e2e wiring in build.zig) driven through the real
+//! End-to-end: a GENUINELY COMPILED core (tests/ts-core/fixture.ts,
+//! built by the external core compiler at build time and reached
+//! through its generated mirror — see the ts-core-e2e wiring in
+//! build.zig) driven through the real
 //! runtime-core dispatch path: the first-class `TsUiApp(core)` adapter
 //! (the committed TS model IS the app model — the view below reads it
 //! straight off the UiApp), the null platform's live timer services, a
@@ -8,12 +9,15 @@
 //! session recorder. Timers fire, requests round-trip, replace/cancel
 //! keep the wire contract, `Cmd.now` stamps synchronously, a REAL
 //! subprocess streams lines into the core (and dies to a mid-stream
-//! cancel), audio and video events flow the soundboard way (the fake
+//! cancel), desktop notifications reach the platform service, audio and
+//! video events flow the soundboard way (the fake
 //! channel's scripted feed), and recorded sessions — streams included — replay
 //! to identical state without a host call or a process launch.
 //!
 //! The markup-view / automation / pixel-fingerprint guarantees run in
-//! markup_e2e_tests.zig over a second transpiled core.
+//! markup_e2e_tests.zig over the markup fixture's core — its own
+//! binary: the compiled-core symbol set is a fixed-prefix C ABI, so
+//! one process carries ONE archive.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -25,10 +29,6 @@ const Adapter = native_sdk.TsUiApp(fixture);
 /// The same instantiation the adapter drives (comptime memoization):
 /// assertions may read the committed model straight off the bridge.
 const Bridge = Adapter.Host;
-
-test {
-    _ = @import("markup_e2e_tests.zig");
-}
 
 const canvas_label = "ts-core-canvas";
 
@@ -49,7 +49,7 @@ const App = Adapter.App;
 /// A hand-written builder view over the COMMITTED TS MODEL — the model
 /// parameter is the UiApp-held root the adapter refreshes each
 /// dispatch, so this view (and the replay fingerprints derived from
-/// what it renders) pins the transpiled core's state directly.
+/// what it renders) pins the compiled core's state directly.
 fn e2eView(ui: *App.Ui, model: *const fixture.Model) App.Ui.Node {
     return ui.column(.{ .gap = 4, .padding = 8 }, .{
         ui.text(.{}, ui.fmt("ticks {d} failures {d}", .{ model.ticks, model.failures })),
@@ -98,6 +98,7 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.watch")) return .watch;
     if (std.mem.eql(u8, name, "core.mixreject")) return .mix_reject;
     if (std.mem.eql(u8, name, "core.mixrejectflip")) return .mix_reject_flip;
+    if (std.mem.eql(u8, name, "core.notify")) return .notify;
     return null;
 }
 
@@ -342,7 +343,7 @@ const Harness = struct {
     }
 };
 
-test "the transpiled core boots through init_fx: boot request and subscription timer are live" {
+test "the compiled core boots through init_fx: boot request and subscription timer are live" {
     HostStub.reset();
     const h = try Harness.create();
     defer h.destroy();
@@ -447,7 +448,7 @@ test "Cmd.now stamps synchronously and host_bytes reaches the stub service" {
 
 // -------------------------------------------------- named engine ops
 
-test "writeFile and readFile round-trip real disk through the transpiled core" {
+test "writeFile and readFile round-trip real disk through the compiled core" {
     const io = std.testing.io;
     HostStub.reset();
     removeStore();
@@ -516,6 +517,25 @@ test "clipboardWrite and clipboardRead ride the platform pasteboard" {
     try h.wake();
     try std.testing.expectEqualStrings("ready", Bridge.model().status);
     try std.testing.expectEqual(@as(i64, 0), Bridge.model().failures);
+}
+
+test "showNotification reaches the desktop platform from the compiled core" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    // Prove the title can come from model bytes, not only a literal in the
+    // command factory, then pin every field after the compiled wire crosses
+    // the native host decoder.
+    try fx.feedHostResult(status_request_key, true, "Build finished");
+    try h.wake();
+    try h.menu("core.notify");
+
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.notificationCount());
+    try std.testing.expectEqualStrings("Build finished", h.harness.null_platform.lastNotificationTitle());
+    try std.testing.expectEqualStrings("native-sdk", h.harness.null_platform.lastNotificationSubtitle());
+    try std.testing.expectEqualStrings("TS core notification", h.harness.null_platform.lastNotificationBody());
 }
 
 test "fetch parks on the engine and routes the { status, body } record and err reasons" {
@@ -642,7 +662,7 @@ test "cancelling a spawn mid-stream ends the real child and routes the err arm" 
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().exitCode), -1), Bridge.model().exitCode);
 }
 
-test "audio playback streams events into the transpiled core through the fake channel" {
+test "audio playback streams events into the compiled core through the fake channel" {
     HostStub.reset();
     const h = try Harness.createFake();
     defer h.destroy();
@@ -688,7 +708,7 @@ test "audio playback streams events into the transpiled core through the fake ch
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().audioEvents), 3), Bridge.model().audioEvents);
 }
 
-test "video playback streams events into the transpiled core through the fake channel" {
+test "video playback streams events into the compiled core through the fake channel" {
     HostStub.reset();
     const h = try Harness.createFake();
     defer h.destroy();
@@ -731,7 +751,7 @@ test "video playback streams events into the transpiled core through the fake ch
     try std.testing.expectEqual(@as(@TypeOf(Bridge.model().videoEvents), 2), Bridge.model().videoEvents);
 }
 
-test "image loads route their one terminal into the transpiled core through the fake channel" {
+test "image loads route their one terminal into the compiled core through the fake channel" {
     HostStub.reset();
     const h = try Harness.createFake();
     defer h.destroy();
@@ -1391,7 +1411,7 @@ fn recordSession(buffer: *JournalBuffer) !CoreSnapshot {
     return CoreSnapshot.take();
 }
 
-test "a recorded transpiled-core session replays byte-identically with no host calls" {
+test "a recorded compiled-core session replays byte-identically with no host calls" {
     const buffer = try std.heap.page_allocator.create(JournalBuffer);
     defer std.heap.page_allocator.destroy(buffer);
     buffer.len = 0;

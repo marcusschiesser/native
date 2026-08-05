@@ -755,10 +755,10 @@ const mini_core = struct {
                 return .{ .model = model, .cmd = out };
             },
             .start_capture => return .{ .model = model, .cmd = cmdAudioCaptureStart("meeting", 86, true, 2, "usb-mic", 44_100, 1, true, 5_000) },
-            .stop_capture => return .{ .model = model, .cmd = cmdKeyOnly(0x1E, "meeting") },
+            .stop_capture => return .{ .model = model, .cmd = cmdKeyOnly(0x1F, "meeting") },
             .read_capture => return .{ .model = model, .cmd = cmdAudioCaptureRead("meeting", 94, 882) },
-            .discard_capture => return .{ .model = model, .cmd = cmdKeyOnly(0x22, "meeting") },
-            .list_mics => return .{ .model = model, .cmd = cmdRoutedKey(0x1F, "mics", 87) },
+            .discard_capture => return .{ .model = model, .cmd = cmdKeyOnly(0x23, "meeting") },
+            .list_mics => return .{ .model = model, .cmd = cmdRoutedKey(0x20, "mics", 87) },
             .capture_evt => |event| {
                 const out = frameCreate(model.*);
                 out.capture_state = event.state;
@@ -1029,7 +1029,7 @@ const mini_core = struct {
 
     fn cmdAudioCaptureStart(key: []const u8, event_tag: u8, system_audio: bool, microphone_kind: u8, microphone_id: []const u8, sample_rate: u32, channels: u8, exclude_current_process_audio: bool, buffer_duration_ms: u32) []const u8 {
         const out = rt.frameAlloc(u8, 2 + key.len + 12 + 4 + microphone_id.len);
-        out[0] = 0x1D;
+        out[0] = 0x1E;
         out[1] = @intCast(key.len);
         @memcpy(out[2..][0..key.len], key);
         var off: usize = 2 + key.len;
@@ -1063,7 +1063,7 @@ const mini_core = struct {
 
     fn cmdAudioCaptureAccess(key: []const u8, event_tag: u8, source: u8, action: u8) []const u8 {
         const out = rt.frameAlloc(u8, 5 + key.len);
-        out[0] = 0x20;
+        out[0] = 0x21;
         out[1] = @intCast(key.len);
         @memcpy(out[2..][0..key.len], key);
         out[2 + key.len] = event_tag;
@@ -1074,7 +1074,7 @@ const mini_core = struct {
 
     fn cmdAudioCaptureRead(key: []const u8, event_tag: u8, max_frames: u32) []const u8 {
         const out = rt.frameAlloc(u8, 3 + key.len + 4);
-        out[0] = 0x21;
+        out[0] = 0x22;
         out[1] = @intCast(key.len);
         @memcpy(out[2..][0..key.len], key);
         out[2 + key.len] = event_tag;

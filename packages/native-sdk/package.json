@@ -1,6 +1,6 @@
 {
   "name": "@native-sdk/cli",
-  "version": "0.7.1",
+  "version": "0.8.1",
   "description": "The Native SDK: the complete toolkit for building native desktop applications — declarative markup, native rendering, WebView surfaces, and OS capabilities",
   "type": "module",
   "bin": {
@@ -19,9 +19,11 @@
     "app.zon",
     "packages/core/src",
     "packages/core/sdk",
-    "packages/core/rt",
+    "packages/core/compile-surface",
+    "packages/core/scripts",
     "packages/core/package.json",
     "packages/core/package-lock.json",
+    "tools/corewire",
     "third_party/webview2",
     "native-sdk.d.ts",
     "README.md",
@@ -29,17 +31,17 @@
   ],
   "dependencies": {
     "@typescript/old": "npm:typescript@6.0.3",
-    "@typescript/typescript6": "6.0.2"
+    "scriptc": "0.0.22"
   },
   "optionalDependencies": {
-    "@native-sdk/cli-darwin-arm64": "0.7.1",
-    "@native-sdk/cli-darwin-x64": "0.7.1",
-    "@native-sdk/cli-linux-arm64-gnu": "0.7.1",
-    "@native-sdk/cli-linux-arm64-musl": "0.7.1",
-    "@native-sdk/cli-linux-x64-gnu": "0.7.1",
-    "@native-sdk/cli-linux-x64-musl": "0.7.1",
-    "@native-sdk/cli-win32-arm64": "0.7.1",
-    "@native-sdk/cli-win32-x64": "0.7.1"
+    "@native-sdk/cli-darwin-arm64": "0.8.1",
+    "@native-sdk/cli-darwin-x64": "0.8.1",
+    "@native-sdk/cli-linux-arm64-gnu": "0.8.1",
+    "@native-sdk/cli-linux-arm64-musl": "0.8.1",
+    "@native-sdk/cli-linux-x64-gnu": "0.8.1",
+    "@native-sdk/cli-linux-x64-musl": "0.8.1",
+    "@native-sdk/cli-win32-arm64": "0.8.1",
+    "@native-sdk/cli-win32-x64": "0.8.1"
   },
   "repository": {
     "type": "git",

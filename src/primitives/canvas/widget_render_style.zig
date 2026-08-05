@@ -361,17 +361,22 @@ pub fn disabledWash(color: Color, disabled: bool, alpha: f32) Color {
 }
 
 pub fn buttonTextColorForWidget(widget: Widget, tokens: DesignTokens) Color {
-    // Disabled ink is the variant's own ink at the disabled-wash
-    // strength, matching the washed fill — the whole control fades as
-    // one piece (primary keeps knockout text on its washed fill; the
-    // quiet variants keep their body ink) instead of swapping to the
-    // shared muted gray, which read as a live-but-secondary label.
-    // Themes with a stated disabled ink (`disabled_foreground`) take it
-    // instead.
+    // Disabled ink normally keeps the variant's own ink at the
+    // disabled-wash strength. A filled primary is the exception: CSS
+    // opacity composites its knockout label and fill as ONE layer, so
+    // on the matching surface the label lands near the surface color
+    // instead of fading a second time through the already-muted fill.
+    // Precomposite that ink over the themed page at the requested state
+    // strength; this preserves the group-opacity result while still
+    // honoring a custom `disabled_alpha`. Themes with a stated disabled
+    // ink (`disabled_foreground`) take it instead — Geist uses that for
+    // its gray swap register.
     if (widget.state.disabled) {
         const visual = buttonControlVisualTokens(widget, tokens);
         if (visual.disabled_foreground) |color| return color;
-        return disabledWash(buttonTextColorForWidget(restStateWidget(widget), tokens), true, tokens.states.disabled_alpha);
+        const rest = buttonTextColorForWidget(restStateWidget(widget), tokens);
+        if (widget.variant == .primary) return compositeOver(rest, tokens.colors.background, tokens.states.disabled_alpha);
+        return disabledWash(rest, true, tokens.states.disabled_alpha);
     }
     const active = widget.state.pressed or widget.state.selected;
     const visual = buttonControlVisualTokens(widget, tokens);
@@ -417,7 +422,46 @@ pub fn buttonBorderFill(widget: Widget, tokens: DesignTokens) Fill {
             else => widgetBorderColor(widget, visual.border orelse tokens.colors.border),
         };
     };
+    if (widget.state.disabled and widget.style.border == null) {
+        const visual = buttonControlVisualTokens(widget, tokens);
+        // The shared edge is independently overridable: a custom theme
+        // may want a solid disabled outline while keeping the house fill
+        // wash instead of also stating a disabled body color.
+        switch (widget.variant) {
+            .default, .secondary, .outline => if (tokens.controls.button_disabled_border) |disabled_border| return colorFill(disabled_border),
+            .primary, .ghost, .destructive => {},
+        }
+        // shadcn's filled default button has a transparent CSS border.
+        // At rest our fallback accent stroke is invisible against the
+        // identical opaque fill, but washing both commands separately
+        // makes their overlap darker and creates a false outline. Drop
+        // that implicit edge in the disabled state. This remains
+        // transparent even when a theme states a translucent disabled
+        // body: painting that color again as a stroke would double-blend
+        // into a false outline. An explicitly themed or locally authored
+        // border still follows its own opacity wash.
+        if (widget.variant == .primary and visual.border == null) return colorFill(transparentColor());
+    }
     return colorFill(disabledWash(border, widget.state.disabled, tokens.states.disabled_alpha));
+}
+
+/// The command color equivalent to painting `foreground` over
+/// `background` at `opacity`. Button fill, border, and text are separate
+/// display-list commands, so the filled-primary disabled label uses this
+/// to reproduce whole-control opacity without blending a translucent
+/// glyph through the already-muted fill a second time.
+fn compositeOver(foreground: Color, background: Color, opacity: f32) Color {
+    const foreground_alpha = std.math.clamp(opacity, 0, 1) * std.math.clamp(foreground.a, 0, 1);
+    const background_alpha = std.math.clamp(background.a, 0, 1);
+    const output_alpha = foreground_alpha + background_alpha * (1 - foreground_alpha);
+    if (output_alpha <= 0) return transparentColor();
+    const background_weight = background_alpha * (1 - foreground_alpha);
+    return Color.rgba(
+        (foreground.r * foreground_alpha + background.r * background_weight) / output_alpha,
+        (foreground.g * foreground_alpha + background.g * background_weight) / output_alpha,
+        (foreground.b * foreground_alpha + background.b * background_weight) / output_alpha,
+        output_alpha,
+    );
 }
 
 /// Whether this widget is a button-group member rendering in the

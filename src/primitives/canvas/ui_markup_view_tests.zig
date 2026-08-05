@@ -1711,6 +1711,10 @@ pub const doc_body_source =
     \\
     \\Tracked in #12, see https://status.example.com.
     \\
+    \\| State |
+    \\| --- |
+    \\| ![Ready](https://status.example.com/ready.png) Ready |
+    \\
     \\<details>
     \\<summary>Rollout</summary>
     \\
@@ -1724,6 +1728,12 @@ pub const DocModel = struct {
     details_expanded: [2]bool = .{ false, false },
     opened_count: usize = 0,
     issue_base: []const u8 = "ghissue://",
+    images: [1]canvas.markdown.ResolvedImage = .{.{
+        .source = "https://status.example.com/ready.png",
+        .image = 71,
+        .width = 10,
+        .height = 10,
+    }},
 
     /// Arena scalar as a markdown source: composed at view time.
     pub fn banner(model: *const DocModel, arena: std.mem.Allocator) []const u8 {
@@ -1733,7 +1743,7 @@ pub const DocModel = struct {
 
 pub const doc_markup_source =
     \\<column gap="8">
-    \\  <markdown source="{body}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" issue-link-base="{issue_base}" />
+    \\  <markdown source="{body}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" issue-link-base="{issue_base}" images="{images}" />
     \\  <markdown source="{banner}" />
     \\</column>
 ;
@@ -1750,6 +1760,7 @@ pub fn handDocView(ui: *DocUi, model: *const DocModel) DocUi.Node {
             .on_details = DocMd.detailsMsg(.toggle_details),
             .details_expanded = &model.details_expanded,
             .issue_link_base = model.issue_base,
+            .images = &model.images,
         }),
         DocMd.view(ui, model.banner(ui.arena), .{}),
     });
@@ -1807,6 +1818,7 @@ test "the markdown element builds the hand-written Md.view tree and dispatches l
     // URLs autolink (trailing punctuation trimmed).
     try testing.expectEqualStrings("ghissue://12", findSpanLink(markup_tree.root, "#12").?);
     try testing.expectEqualStrings("https://status.example.com", findSpanLink(markup_tree.root, "https://status.example.com").?);
+    try testing.expectEqual(@as(canvas.ImageId, 71), findByKind(markup_tree.root, .image).?.image_id);
 
     // Details summary dispatches on-details with the block index; the body
     // is hidden while the caller-owned flag is false.
@@ -1947,11 +1959,12 @@ pub const CodeModel = struct {
     show_lines: bool = true,
     wrap_code: bool = false,
     editable_code: bool = false,
+    added_spec: []const u8 = "2",
     count: usize = 3,
 };
 
 pub const code_markup_source =
-    \\<code source="{snippet}" language="tsx" editable="{editable_code}" on-input="edit" line-numbers="{show_lines}" wrap="{wrap_code}" width="240" label="Example code" />
+    \\<code source="{snippet}" language="tsx" editable="{editable_code}" on-input="edit" line-numbers="{show_lines}" added-lines="{added_spec}" removed-lines="3" wrap="{wrap_code}" width="240" label="Example code" />
 ;
 
 pub const CodeUi = canvas.Ui(CodeMsg);
@@ -1962,6 +1975,8 @@ pub fn handCodeView(ui: *CodeUi, model: *const CodeModel) CodeUi.Node {
         .editable = model.editable_code,
         .on_input = CodeUi.inputMsg(.edit),
         .line_numbers = model.show_lines,
+        .added_lines = &.{2},
+        .removed_lines = &.{3},
         .wrap = model.wrap_code,
         .width = 240,
         .semantics = .{ .label = "Example code" },
@@ -1995,7 +2010,9 @@ test "code markup builds the reusable component with opt-in numbers and horizont
     try testing.expect(markup_tree.root.style.radius == null);
     try testing.expectEqual(canvas.ScrollAxes.horizontal, findByKind(markup_tree.root, .scroll_view).?.scroll_axes);
     const source = findByText(markup_tree.root, .text, model.snippet).?;
-    try testing.expectEqual(@as(u8, 1), source.code_line_number_digits);
+    try testing.expectEqual(@as(u8, 1), source.codeLineNumberDigits());
+    try testing.expectEqual(@as(u128, 1) << 1, source.codeDiffLines().?.added);
+    try testing.expectEqual(@as(u128, 1) << 2, source.codeDiffLines().?.removed);
     try testing.expectEqualStrings("Example code", markup_tree.root.semantics.label);
 
     var editable_model = model;
@@ -2051,6 +2068,9 @@ test "code markup misuse reports the component's closed contract" {
         .{ .source = "<code source=\"literal\" />", .message = canvas.ui_markup.code_source_message },
         .{ .source = "<code source=\"{count}\" />", .message = canvas.ui_markup.code_source_message, .model_agnostic = false },
         .{ .source = "<code source=\"{snippet}\" language=\"brainwave\" />", .message = canvas.ui_markup.code_language_message },
+        .{ .source = "<code source=\"{snippet}\" added-lines=\"0\" />", .message = canvas.ui_markup.code_diff_lines_message },
+        .{ .source = "<code source=\"{snippet}\" removed-lines=\"4-2\" />", .message = canvas.ui_markup.code_diff_lines_message },
+        .{ .source = "<code source=\"{snippet}\" removed-lines=\"{count}\" />", .message = canvas.ui_markup.code_diff_lines_message, .model_agnostic = false },
         .{ .source = "<code source=\"{snippet}\" padding=\"8\" />", .message = canvas.ui_markup.code_attr_message },
         .{ .source = "<code source=\"{snippet}\">text</code>", .message = canvas.ui_markup.code_children_message },
     };

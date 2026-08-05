@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-The CLI's own entry point is the live reference: `tools/native-sdk/main.zig`. Generated apps already have this shape — `main(init: std.process.Init)` passes `init` through to `runner.runWithOptions(app, options, init)` and `init.io` to the markup hot-reload watcher (see any `examples/*/src/main.zig`). `std.heap.page_allocator` still exists for allocations that live for the whole process. Library code that cannot take an `Init` builds its own `Io`: `var threaded = std.Io.Threaded.init(allocator, .{});` then `threaded.io()` (`src/platform/macos/root.zig`).
+The CLI's own entry point is the live reference: `tools/native-sdk/main.zig`. Generated **Zig-core** apps have this shape — `main(init: std.process.Init)` passes `init` through to `runner.runWithOptions(app, options, init)` and `init.io` to the markup hot-reload watcher (see the older Zig-core examples' `src/main.zig`). Default TypeScript apps have no authored Zig entry point. `std.heap.page_allocator` still exists for allocations that live for the whole process. Library code that cannot take an `Init` builds its own `Io`: `var threaded = std.Io.Threaded.init(allocator, .{});` then `threaded.io()` (`src/platform/macos/root.zig`).
 
 ## error: struct 'fs' has no member named 'cwd' — file IO moved to `std.Io.Dir`
 

@@ -1861,15 +1861,17 @@ pub const arena_scalar_equality_message = "arena-computed bindings cannot be com
 pub const binding_text_buffer_message = "this binding names a TextBuffer field - the buffer is the edit model, not the text; bind a pub fn returning its text (pub fn draft(model: *const Model) []const u8 { return model.draft_buffer.text(); })";
 pub const markdown_source_message = "markdown requires a source attribute with one {binding} naming the markdown text (a []const u8 field or fn - arena fns work)";
 pub const markdown_children_message = "markdown takes no children or text content - the source binding provides the markdown";
-pub const markdown_attr_message = "unknown attribute for markdown - it takes source, on-link, on-details, details-expanded, and issue-link-base";
+pub const markdown_attr_message = "unknown attribute for markdown - it takes source, on-link, on-details, details-expanded, issue-link-base, and images";
 pub const markdown_issue_link_base_message = "issue-link-base takes a literal URL prefix or one {binding} producing it - '#123' refs become links to base ++ number (like ghissue:// or https://github.com/owner/repo/issues/)";
 pub const markdown_on_link_message = "on-link takes a bare Msg tag whose payload is the pressed link URL (a []const u8 variant, like open_url: []const u8)";
 pub const markdown_on_details_message = "on-details takes a bare Msg tag whose payload is the details block index (a usize variant, like toggle_details: usize)";
 pub const markdown_details_expanded_message = "details-expanded takes one {binding} naming a []const bool iterable (a model field, pub decl, or fn - the same sources for each accepts)";
+pub const markdown_images_message = "images takes one {binding} naming a []const canvas.markdown.ResolvedImage iterable (source, registered ImageId, width, and height); views never fetch image URLs implicitly";
 pub const code_source_message = "code requires a source attribute with one {binding} naming the source text (a []const u8 field or fn - arena fns work)";
 pub const code_children_message = "code takes no children or text content - the source binding provides the code";
-pub const code_attr_message = "unknown attribute for code - it takes source, language, editable, on-input, line-numbers, wrap, width, height, min-width, grow, key, global-key, and label";
+pub const code_attr_message = "unknown attribute for code - it takes source, language, editable, on-input, line-numbers, added-lines, removed-lines, wrap, width, height, min-width, grow, key, global-key, and label";
 pub const code_language_message = "language takes a literal lexer name: plain, zig, javascript/js/mjs, typescript/ts, jsx/tsx, json, yaml/yml, shell/sh/bash/zsh, python/py, rust/rs, c/cpp/c++/csharp/java/kotlin/swift, go, html/xml/svg, css/scss/less, sql, or markdown/md";
+pub const code_diff_lines_message = "added-lines and removed-lines take one-based lines/ranges up to 128 (for example \"2-4, 7\") or one text {binding} producing that form";
 pub const stepper_active_message = "stepper requires an active attribute (a number or one {binding}) naming the active step index";
 pub const stepper_attr_message = "unknown attribute for stepper - it takes active, key, global-key, and label";
 pub const stepper_children_message = "stepper takes only step children (each step is a text leaf: <step>Work</step>)";
@@ -2207,6 +2209,13 @@ fn validateMarkdown(node: MarkupNode) ?MarkupErrorInfo {
             }
             continue;
         }
+        if (std.mem.eql(u8, attribute.name, "images")) {
+            const expression = parseAttrExpression(attribute.value);
+            if (expression == null or expression.? != .binding) {
+                return attrError(node, attribute, markdown_images_message);
+            }
+            continue;
+        }
         if (std.mem.eql(u8, attribute.name, "issue-link-base")) {
             const expression = parseAttrExpression(attribute.value);
             if (expression == null or expression.? == .equals) {
@@ -2233,6 +2242,27 @@ fn codeLanguageName(name: []const u8) bool {
     return false;
 }
 
+fn codeLineNumberSpec(spec_raw: []const u8) bool {
+    const spec = std.mem.trim(u8, spec_raw, " \t\r\n");
+    if (spec.len == 0) return true;
+    var pieces = std.mem.splitScalar(u8, spec, ',');
+    while (pieces.next()) |piece_raw| {
+        const piece = std.mem.trim(u8, piece_raw, " \t\r\n");
+        if (piece.len == 0) return false;
+        const dash = std.mem.indexOfScalar(u8, piece, '-');
+        const first_text = std.mem.trim(u8, if (dash) |index| piece[0..index] else piece, " \t");
+        const last_text = if (dash) |index| std.mem.trim(u8, piece[index + 1 ..], " \t") else first_text;
+        if (first_text.len == 0 or last_text.len == 0) return false;
+        if (dash) |index| {
+            if (std.mem.indexOfScalar(u8, piece[index + 1 ..], '-') != null) return false;
+        }
+        const first = std.fmt.parseInt(usize, first_text, 10) catch return false;
+        const last = std.fmt.parseInt(usize, last_text, 10) catch return false;
+        if (first == 0 or last < first or last > 128) return false;
+    }
+    return true;
+}
+
 /// `<code>` is a source-bound leaf lowered through `Ui.code`: syntax
 /// language is static markup, while flags and layout values can bind.
 fn validateCode(node: MarkupNode) ?MarkupErrorInfo {
@@ -2249,6 +2279,21 @@ fn validateCode(node: MarkupNode) ?MarkupErrorInfo {
             const expression = parseAttrExpression(attribute.value);
             if (expression == null or expression.? != .literal or !codeLanguageName(expression.?.literal)) {
                 return attrError(node, attribute, code_language_message);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, attribute.name, "added-lines") or
+            std.mem.eql(u8, attribute.name, "removed-lines"))
+        {
+            if (attrExpressionError(attribute.value, code_diff_lines_message)) |message| {
+                return attrError(node, attribute, message);
+            }
+            const expression = parseAttrExpression(attribute.value);
+            if (expression == null or expression.? == .equals) {
+                return attrError(node, attribute, code_diff_lines_message);
+            }
+            if (expression.? == .literal and !codeLineNumberSpec(expression.?.literal)) {
+                return attrError(node, attribute, code_diff_lines_message);
             }
             continue;
         }

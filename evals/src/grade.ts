@@ -9,7 +9,7 @@ import type { Workspace } from "./scaffold.ts";
 
 export interface GradeContext {
   workspace: Workspace;
-  /** SDK repo root (the @native-sdk/core transpiler and rt kernel live here). */
+  /** SDK repo root (the @native-sdk/core frontend and the external core compiler live here). */
   repoRoot: string;
   /** The case directory (cases/<name>): ts_harness reads harness.zig from it. */
   caseDir: string;
@@ -67,7 +67,7 @@ function checkDescription(check: CheckSpec): string {
     case "snapshot_grep":
       return `snapshot: ${check.description}`;
     case "ts_transpile":
-      return `@native-sdk/core transpile ${check.entry ?? "src/core.ts"}`;
+      return `@native-sdk/core check ${check.entry ?? "src/core.ts"}`;
     case "ts_harness":
       return `harness: ${check.description}`;
     case "zig_harness":
@@ -108,24 +108,26 @@ async function runCheck(check: CheckSpec, context: GradeContext): Promise<Pendin
   }
 }
 
-/** Path to the @native-sdk/core transpiler CLI inside the SDK repo. */
-function transpilerCli(repoRoot: string): string {
+/** Path to the @native-sdk/core frontend CLI inside the SDK repo. */
+function frontendCli(repoRoot: string): string {
   return join(repoRoot, "packages", "core", "src", "cli.ts");
 }
 
 /**
  * Compliance grading for ts-core cases: the core module must typecheck (tsc
- * semantics), pass every subset rule, and emit Zig. Failing diagnostics stay
- * in the detail — the NS rule IDs there are the violation taxonomy.
+ * semantics) and pass every subset rule — the frontend's check-only pass,
+ * the exact gate every build runs before the external core compiler takes
+ * the graph. Failing diagnostics stay in the detail — the NS rule IDs there
+ * are the violation taxonomy.
  */
 async function tsTranspile(check: TsTranspileCheck, context: GradeContext): Promise<PendingResult> {
   const entry = check.entry ?? "src/core.ts";
-  const description = `@native-sdk/core transpile ${entry}`;
+  const description = `@native-sdk/core check ${entry}`;
   const entryPath = join(context.workspace.path, entry);
   if (!existsSync(entryPath)) {
     return { type: "ts_transpile", description, status: "fail", detail: `${entry} not found in the workspace` };
   }
-  const result = await exec("node", [transpilerCli(context.repoRoot), entryPath, "-o", "/dev/null"], {
+  const result = await exec("node", [frontendCli(context.repoRoot), entryPath], {
     cwd: context.workspace.path,
     timeoutMs: 2 * 60 * 1000,
   });
@@ -139,10 +141,13 @@ async function tsTranspile(check: TsTranspileCheck, context: GradeContext): Prom
 }
 
 /**
- * Behavioral grading for ts-core cases: transpile the core, assemble a
- * scratch dir with the emitted core.zig, the rt kernel, and the case's
- * harness.zig, then `zig test harness.zig`. The harness drives the real
- * dispatch cycle and asserts the case's required behavior.
+ * Behavioral grading for ts-core cases: compile the core through the
+ * external core compiler (the same pipeline every build runs — frontend
+ * check + contract, corewire facade/profile, staging, the pinned compile,
+ * the mirror over the co-emitted sidecar), assemble a scratch dir with the
+ * mirror as core.zig beside its shim runtime, the archive, and the case's
+ * harness.zig, then `zig test harness.zig <archive> -lc`. The harness
+ * drives the real dispatch cycle and asserts the case's required behavior.
  */
 async function tsHarness(check: TsHarnessCheck, context: GradeContext): Promise<PendingResult> {
   const entry = check.entry ?? "src/core.ts";
@@ -159,23 +164,90 @@ async function tsHarness(check: TsHarnessCheck, context: GradeContext): Promise<
   const scratch = join(context.workspace.path, ".harness");
   rmSync(scratch, { recursive: true, force: true });
   mkdirSync(scratch, { recursive: true });
-  const transpile = await exec(
+  const core = join(context.repoRoot, "packages", "core");
+
+  // 1. Frontend check + the contract sidecar.
+  const contract = join(scratch, "core.contract.json");
+  const checkRun = await exec(
     "node",
-    [transpilerCli(context.repoRoot), entryPath, "-o", join(scratch, "core.zig")],
+    [frontendCli(context.repoRoot), entryPath, "--contract", contract, "--contract-entry", entry.split("\\").join("/")],
     { cwd: context.workspace.path, timeoutMs: 2 * 60 * 1000 },
   );
-  if (transpile.code !== 0) {
-    return {
-      type: "ts_harness",
-      description,
-      status: "fail",
-      detail: `transpile failed:\n${tailLines(transpile)}`,
-    };
+  if (checkRun.code !== 0) {
+    return { type: "ts_harness", description, status: "fail", detail: `frontend check failed:\n${tailLines(checkRun)}` };
   }
-  copyFileSync(join(context.repoRoot, "packages", "core", "rt", "rt.zig"), join(scratch, "rt.zig"));
+
+  // 2. corewire, compiled once into the scratch (facade/profile + mirror).
+  const corewire = join(scratch, "corewire");
+  const buildCorewire = await exec(
+    "zig",
+    ["build-exe", join(context.repoRoot, "tools", "corewire", "main.zig"), `-femit-bin=${corewire}`],
+    { cwd: scratch, timeoutMs: 5 * 60 * 1000 },
+  );
+  if (buildCorewire.code !== 0) {
+    return { type: "ts_harness", description, status: "fail", detail: `corewire build failed:\n${tailLines(buildCorewire)}` };
+  }
+  const facade = join(scratch, "core_facade.ts");
+  const profile = join(scratch, "core_profile.json");
+  const project = await exec(corewire, ["--sidecar", contract, "--facade", facade, "--profile", profile], {
+    cwd: scratch,
+    timeoutMs: 60 * 1000,
+  });
+  if (project.code !== 0) {
+    return { type: "ts_harness", description, status: "fail", detail: `corewire projection failed:\n${tailLines(project)}` };
+  }
+
+  // 3. Stage and compile through the pinned external toolchain.
+  const stage = join(scratch, "stage");
+  const staged = await exec(
+    "node",
+    [
+      join(core, "scripts", "stage_external_core.mjs"),
+      "--src", join(context.workspace.path, "src"),
+      "--sdk", join(core, "sdk"),
+      "--static", join(core, "compile-surface", "core.ts"),
+      "--facade", facade,
+      "--profile", profile,
+      "--out", stage,
+    ],
+    { cwd: scratch, timeoutMs: 60 * 1000 },
+  );
+  if (staged.code !== 0) {
+    return { type: "ts_harness", description, status: "fail", detail: `compile staging failed:\n${tailLines(staged)}` };
+  }
+  const archive = join(scratch, "libeval_core.a");
+  const compiledSidecar = join(scratch, "compiled.contract.json");
+  const compile = await exec(
+    "node",
+    [
+      join(core, "scripts", "run_external_core_compiler.mjs"),
+      "--stage", stage,
+      "--name", "eval_core",
+      "--manifest", join(core, "package.json"),
+      "--out-archive", archive,
+      "--out-sidecar", compiledSidecar,
+      "--compiler-js", join(core, "node_modules", "scriptc", "dist", "main.js"),
+    ],
+    { cwd: scratch, timeoutMs: 10 * 60 * 1000 },
+  );
+  if (compile.code !== 0) {
+    return { type: "ts_harness", description, status: "fail", detail: `external core compile failed:\n${tailLines(compile)}` };
+  }
+
+  // 4. The mirror over the archive's OWN co-emitted contract, staged as
+  // the harness's core.zig beside its shim runtime.
+  const mirror = await exec(corewire, ["--sidecar", compiledSidecar, "--out", join(scratch, "core.zig")], {
+    cwd: scratch,
+    timeoutMs: 60 * 1000,
+  });
+  if (mirror.code !== 0) {
+    return { type: "ts_harness", description, status: "fail", detail: `mirror generation failed:\n${tailLines(mirror)}` };
+  }
+  copyFileSync(join(context.repoRoot, "tools", "corewire", "shim_rt.zig"), join(scratch, "shim_rt.zig"));
+  copyFileSync(join(context.repoRoot, "tools", "corewire", "core_abi.zig"), join(scratch, "core_abi.zig"));
   copyFileSync(harnessPath, join(scratch, "harness.zig"));
   copyHarnessLib(context, scratch);
-  const test = await exec("zig", ["test", "harness.zig"], {
+  const test = await exec("zig", ["test", "harness.zig", archive, "-lc"], {
     cwd: scratch,
     timeoutMs: 10 * 60 * 1000,
   });

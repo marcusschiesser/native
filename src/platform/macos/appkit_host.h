@@ -641,13 +641,13 @@ int native_sdk_appkit_register_font(uint64_t font_id, const uint8_t *bytes, size
 // already gone, which is the state the caller asked for. Returns 1 on
 // accept, 0 only for the invalid id 0.
 int native_sdk_appkit_unregister_font(uint64_t font_id, uint64_t token);
-/* Decode encoded image bytes (PNG, JPEG, ... — whatever ImageIO supports)
- * through CGImageSource into tightly packed, row-major, straight-alpha
+/* Decode encoded image bytes (PNG, JPEG, ... through ImageIO; SVG through
+ * NSImage's system rasterizer) into tightly packed, row-major, straight-alpha
  * (non-premultiplied) RGBA8 written into `pixels`. Returns 1 on success
  * (with `out_width`/`out_height` set), 0 when the bytes cannot be decoded,
  * and -1 when the decoded pixels do not fit `pixels_len` (`out_width`/
- * `out_height` still report the decoded dimensions). Pure CoreGraphics —
- * no AppKit state — so it needs no host and is main-thread independent. */
+ * `out_height` still report the decoded dimensions). It retains no AppKit
+ * state, needs no host, and is main-thread independent. */
 int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height);
 void native_sdk_appkit_clipboard_write(native_sdk_appkit_host_t *host, const char *text, size_t text_len);
 size_t native_sdk_appkit_clipboard_read_data(native_sdk_appkit_host_t *host, const char *mime_type, size_t mime_type_len, char *buffer, size_t buffer_len);

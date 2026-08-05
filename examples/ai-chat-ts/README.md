@@ -1,6 +1,6 @@
 # Native SDK ai-chat-ts example
 
-A chat client for an OpenAI-compatible chat-completions endpoint, authored entirely in **TypeScript + Native markup**. Zero Zig: the logic tier is the app-core subset under `src/`, transpiled to native at build time as one module; `src/app.native` is the whole view tier and `app.zon` the manifest. The build detects `src/core.ts` in the tree and stages the wiring itself; no JS runtime ships in the binary.
+A chat client for an OpenAI-compatible chat-completions endpoint, authored entirely in **TypeScript + Native markup**. Zero Zig: the logic tier is the app-core subset under `src/`, compiled to native code at build time; `src/app.native` is the whole view tier and `app.zon` the manifest. The build detects `src/core.ts` in the tree and stages the wiring itself; no JS runtime ships in the binary.
 
 This is the reference answer to "can a TypeScript core call an AI API?": the network surface is one `Cmd.fetch` with a real `Authorization: Bearer <key>` header built at runtime from the launch environment, the JSON wire format is pure byte math in the subset, and because the whole exchange is effect data, a recorded conversation **replays byte-identically with zero network and zero env reads** — the e2e suite pins the exact request bytes and replays a two-turn conversation, transport failure and retry included, with no endpoint in the room and none of the launch variables set.
 
@@ -8,7 +8,7 @@ The core is two modules plus one SDK library:
 
 - `src/core.ts` — the entry module: Model (the conversation, the composer, the request phase, the launch configuration), Msg, update, the env channel, and every exported binding helper.
 - `src/api.ts` — the chat-completions wire format over bytes: request encoding (JSON escaping included) and response parsing (`choices[0].message.content` on success, `error.message` on failure; anything malformed is `null`, never a half-parsed conversation).
-- `@native-sdk/core/text` — the SDK's byte-splice text engine, transpiled in for the composer's caret/selection/IME fidelity.
+- `@native-sdk/core/text` — the SDK's byte-splice text engine, compiled in for the composer's caret/selection/IME fidelity.
 
 ```sh
 NATIVE_SDK_CHAT_ENDPOINT="http://127.0.0.1:11434/v1/chat/completions" \

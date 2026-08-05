@@ -477,6 +477,7 @@ fn widgetTextInputFontId(widget: Widget, tokens: DesignTokens) FontId {
 }
 
 fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32) bool {
+    if (widget.hasCodeDiff()) return false;
     return widget.code_content_width_generation == text_measure_cache.textMeasureGeneration() and
         widget.code_content_width_font_id == font_id and
         widget.code_content_width_size_bits == @as(u32, @bitCast(text_size)) and
@@ -489,6 +490,7 @@ fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32)
 /// edits invalidate it before caret scrolling recomputes the new document.
 pub fn cacheTextInputContentWidthForWidget(widget: *Widget, tokens: DesignTokens) void {
     if (widget.kind != .textarea or !widget.code_editor or !widget.text_no_wrap) return;
+    if (widget.hasCodeDiff()) return;
     const text_size = widgetTextInputSize(widget.*, tokens);
     const font_id = widgetTextInputFontId(widget.*, tokens);
     if (codeContentWidthCacheCurrent(widget.*, font_id, text_size)) return;

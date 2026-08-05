@@ -484,6 +484,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 .transparent = options.transparent,
                 .bridge_enabled = options.bridge_enabled,
                 .gpu_size = if (options.kind == .gpu_surface) options.frame.size() else geometry.SizeF.init(0, 0),
+                .gpu_requested_backend = if (options.kind == .gpu_surface) options.gpu_surface.backend else .none,
                 .gpu_backend = if (options.kind == .gpu_surface) options.gpu_surface.backend else .none,
                 .gpu_pixel_format = if (options.kind == .gpu_surface) options.gpu_surface.pixel_format else .none,
                 .gpu_present_mode = if (options.kind == .gpu_surface) options.gpu_surface.present_mode else .none,

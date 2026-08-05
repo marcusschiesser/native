@@ -16,6 +16,29 @@ fn spanWithFragment(spans: []const canvas.TextSpan, fragment: []const u8) ?canva
     return null;
 }
 
+test "diff line specs accept one-based values and compact ranges" {
+    var storage: [code_model.max_diff_lines]usize = undefined;
+    const lines = code_model.parseLineNumberSpec("2-4, 7, 3", &storage).?;
+    try testing.expectEqualSlices(usize, &.{ 2, 3, 4, 7 }, lines);
+    try testing.expectEqual(@as(usize, 0), code_model.parseLineNumberSpec("", &storage).?.len);
+
+    const invalid = [_][]const u8{ "0", "4-2", "1-129", "1,,2", "2-", "2-3-4", "nope" };
+    for (invalid) |spec| try testing.expect(code_model.parseLineNumberSpec(spec, &storage) == null);
+}
+
+test "widget diff metadata round-trips both 128-line masks" {
+    var widget = canvas.Widget{ .kind = .text, .code_line_number_digits = 3 };
+    const expected = canvas.CodeDiffLines{
+        .added = (@as(u128, 1) << 127) | (@as(u128, 1) << 64) | 1,
+        .removed = (@as(u128, 1) << 126) | (@as(u128, 1) << 63) | 2,
+    };
+    widget.setCodeDiffLines(expected);
+
+    try testing.expectEqual(@as(u8, 3), widget.codeLineNumberDigits());
+    try testing.expectEqual(expected.added, widget.codeDiffLines().?.added);
+    try testing.expectEqual(expected.removed, widget.codeDiffLines().?.removed);
+}
+
 fn colorAtOffset(spans: []const canvas.TextSpan, offset: usize) ?canvas.TextSpanColor {
     var cursor: usize = 0;
     for (spans) |span| {
@@ -781,6 +804,156 @@ test "line numbers are opt-in and stay paired with logical source lines" {
     try testing.expectEqual(canvas.TextSpanColor.syntax_keyword, spanWithFragment(comment_text.spans, "const").?.color.?);
 }
 
+test "diff lines use Geist washes and renderer-owned markers without changing source" {
+    const source =
+        \\module.exports = {
+        \\  experimental: {
+        \\    appDir: true,
+        \\  },
+        \\  appDir: true,
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const view = try ui.finalize(ui.code(.{
+        .language = .javascript,
+        .line_numbers = true,
+        .added_lines = &.{5},
+        .removed_lines = &.{ 2, 3, 4 },
+        .wrap = false,
+        .width = 360,
+    }, source));
+    const paragraph = findByText(view.root, source).?;
+    try testing.expectEqualStrings(source, paragraph.text);
+    const diff_lines = paragraph.codeDiffLines().?;
+    try testing.expectEqual(@as(u128, 1) << 4, diff_lines.added);
+    try testing.expectEqual((@as(u128, 1) << 1) | (@as(u128, 1) << 2) | (@as(u128, 1) << 3), diff_lines.removed);
+
+    var nodes: [16]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(view.root, geometry.RectF.init(0, 0, 360, 140), &nodes);
+    for ([_]canvas.ThemePack{ .house, .geist }) |pack| {
+        for ([_]canvas.ColorScheme{ .light, .dark }) |scheme| {
+            const tokens = canvas.DesignTokens.theme(.{ .pack = pack, .color_scheme = scheme });
+            const added_background = if (scheme == .dark)
+                canvas.Color.rgb8(18, 54, 27)
+            else
+                canvas.Color.rgb8(218, 246, 218);
+            const removed_background = if (scheme == .dark)
+                canvas.Color.rgb8(86, 26, 30)
+            else
+                canvas.Color.rgb8(255, 230, 230);
+            const added_foreground = if (scheme == .dark)
+                canvas.Color.rgb8(98, 192, 115)
+            else
+                canvas.Color.rgb8(41, 122, 58);
+            const removed_foreground = if (scheme == .dark)
+                canvas.Color.rgb8(255, 97, 102)
+            else
+                canvas.Color.rgb8(203, 42, 47);
+            var commands: [256]canvas.CanvasCommand = undefined;
+            var builder = canvas.Builder.init(&commands);
+            try canvas.emitWidgetLayout(&builder, layout, tokens);
+
+            var added_washes: usize = 0;
+            var removed_washes: usize = 0;
+            var added_markers: usize = 0;
+            var removed_markers: usize = 0;
+            for (builder.displayList().commands) |command| {
+                switch (command) {
+                    .fill_rect => |fill| {
+                        if (std.meta.eql(fill.fill.color, added_background)) added_washes += 1;
+                        if (std.meta.eql(fill.fill.color, removed_background)) removed_washes += 1;
+                    },
+                    .draw_text => |draw| {
+                        if (std.mem.eql(u8, draw.text, "+") and std.meta.eql(draw.color, added_foreground)) added_markers += 1;
+                        if (std.mem.eql(u8, draw.text, "-") and std.meta.eql(draw.color, removed_foreground)) removed_markers += 1;
+                    },
+                    else => {},
+                }
+            }
+            try testing.expectEqual(@as(usize, 1), added_washes);
+            try testing.expectEqual(@as(usize, 3), removed_washes);
+            try testing.expectEqual(@as(usize, 1), added_markers);
+            try testing.expectEqual(@as(usize, 3), removed_markers);
+        }
+    }
+}
+
+test "diff markers reserve a gutter when line numbers are hidden" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const view = try ui.finalize(ui.code(.{ .added_lines = &.{1} }, "added"));
+    const paragraph = findByText(view.root, "added").?;
+    try testing.expectEqual(@as(u8, 0), paragraph.codeLineNumberDigits());
+    try testing.expect(widget_metrics.widgetCodeLineNumberGutterWidth(paragraph, .{}) > 0);
+}
+
+test "unwrapped editable diffs paint markers without line numbers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const view = try ui.finalize(ui.code(.{
+        .editable = true,
+        .wrap = false,
+        .added_lines = &.{1},
+    }, "added"));
+    var editor = findByText(view.root, "added").?;
+    editor.frame = geometry.RectF.init(0, 0, 160, 48);
+
+    var commands: [64]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, editor, .{});
+
+    var added_markers: usize = 0;
+    for (builder.displayList().commands) |command| {
+        if (command == .draw_text and std.mem.eql(u8, command.draw_text.text, "+")) {
+            added_markers += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), added_markers);
+}
+
+test "editable diff washes paint behind text selections" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ui = Ui.init(arena.allocator());
+    const view = try ui.finalize(ui.code(.{
+        .editable = true,
+        .wrap = false,
+        .added_lines = &.{1},
+    }, "added"));
+    var editor = findByText(view.root, "added").?;
+    editor.frame = geometry.RectF.init(0, 0, 160, 48);
+    editor.text_selection = .{ .anchor = 0, .focus = editor.text.len };
+
+    var tokens = canvas.DesignTokens{};
+    const selection_fill = canvas.Color.rgb8(7, 11, 13);
+    const added_wash = canvas.Color.rgb8(218, 246, 218);
+    tokens.colors.accent = selection_fill;
+    tokens.colors.background = canvas.Color.rgb8(255, 255, 255);
+
+    var commands: [128]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, editor, tokens);
+
+    var wash_index: ?usize = null;
+    var selection_index: ?usize = null;
+    for (builder.displayList().commands, 0..) |command, index| {
+        if (command != .fill_rect) continue;
+        if (std.meta.eql(command.fill_rect.fill.color, added_wash) and
+            command.fill_rect.rect.width == editor.frame.width)
+        {
+            wash_index = index;
+        }
+        if (std.meta.eql(command.fill_rect.fill.color, selection_fill)) selection_index = index;
+    }
+    try testing.expect(wash_index != null);
+    try testing.expect(selection_index != null);
+    try testing.expect(wash_index.? < selection_index.?);
+}
+
 test "line number gutter reserves at least three marker columns" {
     const tokens = canvas.DesignTokens{};
     var numbered = canvas.Widget{
@@ -1344,7 +1517,7 @@ test "large code blocks split at the paragraph line capacity without hiding thei
     var group_id: ?canvas.ObjectId = null;
     for (chunk_column.children) |chunk| {
         try testing.expect(chunk.static_text_group_id != 0);
-        try testing.expectEqual(expected_offset, chunk.static_text_group_offset);
+        try testing.expectEqual(@as(u64, @intCast(expected_offset)), chunk.static_text_group_offset);
         if (group_id) |expected| {
             try testing.expectEqual(expected, chunk.static_text_group_id);
         } else {

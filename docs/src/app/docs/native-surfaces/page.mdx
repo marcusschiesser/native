@@ -16,7 +16,7 @@ Native surfaces are the app-owned regions that the Native SDK composes inside a 
     <tr>
       <td>GPU surface</td>
       <td>The canvas your <a href="/docs/native-ui">native UI</a> renders into — plus custom drawing regions for editors, timelines, dashboards, and games</td>
-      <td>Metal-backed on macOS; software (CPU reference renderer) presentation on Linux and Windows system hosts</td>
+      <td>Metal-backed on macOS; retained Direct2D/DirectWrite on Windows; CPU reference-rendered on Linux and as the Windows fallback</td>
     </tr>
     <tr>
       <td>Native chrome</td>
@@ -161,7 +161,7 @@ Existing `App.source`, `runtime.createWebView(...)`, and `window.zero.webviews.*
 
 ## Platform Support
 
-macOS, Linux, and Windows system hosts support native views and controls today. The macOS host presents `gpu_surface` through a Metal-backed child view; Linux and Windows present it through the software reference renderer. See `examples/gpu-surface` for a minimal native controls plus WebView plus GPU surface composition. Chromium hosts and mobile hosts expose the same public vocabulary where useful, but unsupported operations reject explicitly instead of silently falling back.
+macOS, Linux, and Windows system hosts support native views and controls today. The macOS host presents `gpu_surface` through Metal, Windows presents retained representable packets through Direct2D/DirectWrite with an exact software fallback, and Linux presents through the software reference renderer. See `examples/gpu-surface` for a minimal native controls plus WebView plus GPU surface composition. Chromium hosts and mobile hosts expose the same public vocabulary where useful, but unsupported operations reject explicitly instead of silently falling back.
 
 Use support checks before showing optional native affordances:
 

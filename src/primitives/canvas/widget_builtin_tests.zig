@@ -687,15 +687,13 @@ test "buttons draw an inline vector icon and label as one widget with one tint" 
     try std.testing.expect(icon_only_list.findCommandById(widgetPartId(63, 6)) != null);
 }
 
-test "disabled filled buttons mute their border with the fill" {
-    // A disabled primary button washes its fill to half strength; the
-    // border must wash with it, in the SAME hue — a full-strength
-    // accent edge over the washed fill read as a focus ring on every
-    // idle disabled button (the "Comment button wearing an outline at
-    // rest" regression), and the old neutral-gray border made the
-    // faded fill look like a live secondary control. Destructive is
-    // the quiet borderless chip, so its edge stays at width 0 in both
-    // states — nothing to wash.
+test "disabled filled buttons match their reference edge treatment" {
+    // A primary button's implicit structural edge is the same accent as
+    // its opaque fill at rest. shadcn's actual edge is transparent; if
+    // the fill and fallback edge are each washed to half strength, their
+    // overlap becomes darker and invents an outline around the disabled
+    // control. Destructive is already the quiet borderless chip, so its
+    // edge stays at width 0 in both states.
     const tokens = DesignTokens{};
     const button = Widget{
         .id = 71,
@@ -717,9 +715,21 @@ test "disabled filled buttons mute their border with the fill" {
     var disabled_commands: [8]CanvasCommand = undefined;
     var disabled_builder = Builder.init(&disabled_commands);
     try emitWidgetTree(&disabled_builder, disabled, tokens);
-    const washed_border = Color.rgba(tokens.colors.accent.r, tokens.colors.accent.g, tokens.colors.accent.b, 0.5 * tokens.colors.accent.a);
     switch (disabled_builder.displayList().findCommandById(widgetPartId(71, 2)).?.command) {
-        .stroke_rect => |stroke| try expectFillColor(washed_border, stroke.stroke.fill),
+        .stroke_rect => |stroke| try expectFillColor(Color.rgba8(0, 0, 0, 0), stroke.stroke.fill),
+        else => return error.TestUnexpectedResult,
+    }
+    // shadcn applies opacity to the composed button. Its knockout label
+    // therefore lands back near the matching page/surface color instead
+    // of being blended through the already-faded fill a second time.
+    const disabled_label = Color.rgba(
+        tokens.colors.accent_text.r * tokens.states.disabled_alpha + tokens.colors.background.r * (1 - tokens.states.disabled_alpha),
+        tokens.colors.accent_text.g * tokens.states.disabled_alpha + tokens.colors.background.g * (1 - tokens.states.disabled_alpha),
+        tokens.colors.accent_text.b * tokens.states.disabled_alpha + tokens.colors.background.b * (1 - tokens.states.disabled_alpha),
+        1,
+    );
+    switch (disabled_builder.displayList().findCommandById(widgetPartId(71, 4)).?.command) {
+        .draw_text => |text| try std.testing.expectEqualDeep(disabled_label, text.color),
         else => return error.TestUnexpectedResult,
     }
 
@@ -735,6 +745,114 @@ test "disabled filled buttons mute their border with the fill" {
         .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "geist disabled buttons use the reference swap and tertiary registers" {
+    const buttonFillColor = @import("widget_render_style.zig").buttonFillColor;
+    const buttonTextColorForWidget = @import("widget_render_style.zig").buttonTextColorForWidget;
+    const buttonBorderFill = @import("widget_render_style.zig").buttonBorderFill;
+    const schemes = [_]canvas.ColorScheme{ .light, .dark };
+
+    for (schemes) |scheme| {
+        const tokens = DesignTokens.theme(.{ .pack = .geist, .color_scheme = scheme });
+        const disabled_background = if (scheme == .light) Color.rgb8(242, 242, 242) else Color.rgb8(26, 26, 26);
+        const disabled_border = if (scheme == .light) Color.rgb8(235, 235, 235) else Color.rgb8(31, 31, 31);
+        const variants = [_]canvas.WidgetVariant{ .default, .secondary, .outline };
+        for (variants) |variant| {
+            const button = Widget{ .kind = .button, .variant = variant, .state = .{ .disabled = true } };
+            try std.testing.expectEqualDeep(disabled_background, buttonFillColor(button, tokens));
+            try std.testing.expectEqualDeep(Color.rgb8(143, 143, 143), buttonTextColorForWidget(button, tokens));
+            try expectFillColor(disabled_border, buttonBorderFill(button, tokens));
+        }
+
+        const filled_variants = [_]canvas.WidgetVariant{ .primary, .destructive };
+        for (filled_variants) |variant| {
+            const button = Widget{ .kind = .button, .variant = variant, .state = .{ .disabled = true } };
+            try std.testing.expectEqualDeep(disabled_background, buttonFillColor(button, tokens));
+            try std.testing.expectEqualDeep(Color.rgb8(143, 143, 143), buttonTextColorForWidget(button, tokens));
+            try expectFillColor(Color.rgba8(0, 0, 0, 0), buttonBorderFill(button, tokens));
+        }
+
+        const tertiary = Widget{ .kind = .button, .variant = .ghost, .state = .{ .disabled = true } };
+        const tertiary_background = Color.rgba(
+            disabled_background.r * 0.5 + tokens.colors.background.r * 0.5,
+            disabled_background.g * 0.5 + tokens.colors.background.g * 0.5,
+            disabled_background.b * 0.5 + tokens.colors.background.b * 0.5,
+            1,
+        );
+        const tertiary_foreground = Color.rgba(
+            tokens.colors.text.r * 0.5 + tokens.colors.background.r * 0.5,
+            tokens.colors.text.g * 0.5 + tokens.colors.background.g * 0.5,
+            tokens.colors.text.b * 0.5 + tokens.colors.background.b * 0.5,
+            1,
+        );
+        try std.testing.expectEqualDeep(tertiary_background, buttonFillColor(tertiary, tokens));
+        try std.testing.expectEqualDeep(tertiary_foreground, buttonTextColorForWidget(tertiary, tokens));
+    }
+}
+
+test "disabled primary fallback honors the state alpha" {
+    const buttonTextColorForWidget = @import("widget_render_style.zig").buttonTextColorForWidget;
+    const background = Color.rgb8(20, 40, 60);
+    const accent_text = Color.rgb8(220, 180, 140);
+    const disabled_alpha: f32 = 0.25;
+    const tokens = DesignTokens.themeWithOverrides(.{}, .{
+        .colors = .{ .background = background, .accent_text = accent_text },
+        .states = .{ .disabled_alpha = disabled_alpha },
+    });
+    const button = Widget{ .kind = .button, .variant = .primary, .state = .{ .disabled = true } };
+    const expected = Color.rgba(
+        accent_text.r * disabled_alpha + background.r * (1 - disabled_alpha),
+        accent_text.g * disabled_alpha + background.g * (1 - disabled_alpha),
+        accent_text.b * disabled_alpha + background.b * (1 - disabled_alpha),
+        1,
+    );
+    try std.testing.expectEqualDeep(expected, buttonTextColorForWidget(button, tokens));
+
+    var transparent_state = tokens;
+    transparent_state.states.disabled_alpha = 0;
+    try std.testing.expectEqualDeep(background, buttonTextColorForWidget(button, transparent_state));
+}
+
+test "disabled filled buttons preserve explicit token borders" {
+    const buttonFillColor = @import("widget_render_style.zig").buttonFillColor;
+    const buttonBorderFill = @import("widget_render_style.zig").buttonBorderFill;
+    const disabled_background = Color.rgba8(80, 100, 120, 128);
+    const border = Color.rgb8(24, 96, 160);
+    const tokens = DesignTokens.themeWithOverrides(.{}, .{
+        .controls = .{
+            .button_primary = .{ .disabled_background = disabled_background, .border = border },
+            .button_destructive = .{ .disabled_background = disabled_background, .border = border },
+        },
+    });
+    const expected_border = Color.rgba(border.r, border.g, border.b, border.a * tokens.states.disabled_alpha);
+    const variants = [_]canvas.WidgetVariant{ .primary, .destructive };
+    for (variants) |variant| {
+        const button = Widget{ .kind = .button, .variant = variant, .state = .{ .disabled = true } };
+        try std.testing.expectEqualDeep(disabled_background, buttonFillColor(button, tokens));
+        try expectFillColor(expected_border, buttonBorderFill(button, tokens));
+    }
+
+    const implicit_tokens = DesignTokens.themeWithOverrides(.{}, .{
+        .controls = .{ .button_primary = .{ .disabled_background = disabled_background } },
+    });
+    const implicit = Widget{ .kind = .button, .variant = .primary, .state = .{ .disabled = true } };
+    try expectFillColor(Color.rgba8(0, 0, 0, 0), buttonBorderFill(implicit, implicit_tokens));
+}
+
+test "button disabled border override does not require a disabled background" {
+    const buttonBorderFill = @import("widget_render_style.zig").buttonBorderFill;
+    const disabled_border = Color.rgb8(24, 96, 160);
+    const tokens = DesignTokens.themeWithOverrides(.{}, .{
+        .controls = .{ .button_disabled_border = disabled_border },
+    });
+    const button = Widget{
+        .kind = .button,
+        .variant = .outline,
+        .state = .{ .disabled = true },
+    };
+
+    try expectFillColor(disabled_border, buttonBorderFill(button, tokens));
 }
 
 /// The flush-group segment assertions, shared by the tree-walk and

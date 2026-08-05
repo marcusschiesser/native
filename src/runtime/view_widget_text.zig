@@ -1176,7 +1176,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             }
             const selected_index = point_index orelse return null;
             const selected_widget = self.widget_layout_nodes[selected_index].widget;
-            const focus = selected_widget.static_text_group_offset + point_offset;
+            const focus = @as(usize, @intCast(selected_widget.static_text_group_offset)) + point_offset;
             const anchor = if (extend)
                 self.canvas_widget_selected_text_group_anchor
             else
@@ -1191,7 +1191,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 if (candidate.static_text_group_id != group_id) {
                     continue;
                 }
-                const source_start = candidate.static_text_group_offset;
+                const source_start: usize = @intCast(candidate.static_text_group_offset);
                 const source_end = source_start +| candidate.text.len;
                 const next_selection: ?canvas.TextSelection = if (selection_start == selection_end)
                     if (candidate_index == selected_index)
@@ -1321,7 +1321,7 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 if (widget.static_text_group_id != group_id) {
                     continue;
                 }
-                const source_start = widget.static_text_group_offset;
+                const source_start: usize = @intCast(widget.static_text_group_offset);
                 const source_end = source_start +| widget.text.len;
                 const copy_start = @max(start, source_start);
                 const copy_end = @min(end, source_end);
@@ -1378,7 +1378,9 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             self.widget_layout_nodes[edited_index].widget.text_selection = next_state.selection;
             self.widget_layout_nodes[edited_index].widget.text_composition = next_state.composition;
             if (text_changed) {
-                self.widget_layout_nodes[edited_index].widget.code_content_width_generation = 0;
+                if (!self.widget_layout_nodes[edited_index].widget.hasCodeDiff()) {
+                    self.widget_layout_nodes[edited_index].widget.code_content_width_generation = 0;
+                }
                 canvas.cacheTextInputContentWidthForWidget(
                     &self.widget_layout_nodes[edited_index].widget,
                     self.widget_tokens,

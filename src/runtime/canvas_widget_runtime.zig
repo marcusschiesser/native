@@ -654,6 +654,7 @@ pub fn collectCanvasWidgetTextReconcileEntries(
             CanvasWidgetSourceTextFingerprint{ .len = entry.text_len, .hash = entry.text_hash }
         else
             canvasWidgetSourceTextFingerprint(node.widget.text);
+        const has_code_diff = node.widget.hasCodeDiff();
         output[len] = .{
             .id = node.widget.id,
             .kind = node.widget.kind,
@@ -666,10 +667,10 @@ pub fn collectCanvasWidgetTextReconcileEntries(
             .text_composition = node.widget.text_composition,
             .value = node.widget.value,
             .value_x = node.widget.value_x,
-            .code_content_width = node.widget.code_content_width,
-            .code_content_width_generation = node.widget.code_content_width_generation,
-            .code_content_width_font_id = node.widget.code_content_width_font_id,
-            .code_content_width_size_bits = node.widget.code_content_width_size_bits,
+            .code_content_width = if (!has_code_diff) node.widget.code_content_width else 0,
+            .code_content_width_generation = if (!has_code_diff) node.widget.code_content_width_generation else 0,
+            .code_content_width_font_id = if (!has_code_diff) node.widget.code_content_width_font_id else 0,
+            .code_content_width_size_bits = if (!has_code_diff) node.widget.code_content_width_size_bits else 0,
         };
         len += 1;
     }
@@ -879,10 +880,12 @@ pub fn canvasWidgetLayoutNodeWithTextReconcileState(
         if (canvasWidgetEditableTextKind(copy.widget.kind)) copy.widget.value = entry.value;
         if (copy.widget.code_editor) {
             copy.widget.value_x = entry.value_x;
-            copy.widget.code_content_width = entry.code_content_width;
-            copy.widget.code_content_width_generation = entry.code_content_width_generation;
-            copy.widget.code_content_width_font_id = entry.code_content_width_font_id;
-            copy.widget.code_content_width_size_bits = entry.code_content_width_size_bits;
+            if (!copy.widget.hasCodeDiff()) {
+                copy.widget.code_content_width = entry.code_content_width;
+                copy.widget.code_content_width_generation = entry.code_content_width_generation;
+                copy.widget.code_content_width_font_id = entry.code_content_width_font_id;
+                copy.widget.code_content_width_size_bits = entry.code_content_width_size_bits;
+            }
         }
         if (copy.widget.text_selection == null and copy.widget.text_composition == null) {
             copy.widget.text_selection = entry.text_selection;

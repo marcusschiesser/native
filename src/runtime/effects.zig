@@ -13,7 +13,12 @@
 //! operation, one terminal Msg with an explicit outcome
 //! (ok / not_found / io_failed / truncated / rejected / cancelled) —
 //! TEA-friendly persistence without smuggling an `Io` handle into
-//! `update`. Clipboard effects (`writeClipboard`/`readClipboard`) keep
+//! `update`. Desktop notifications (`showNotification`) are the
+//! fire-and-forget exception: the OS owns delivery after the one
+//! loop-thread platform call, so there is no meaningful terminal Msg.
+//! Invalid requests and unavailable services fail closed; fake execution
+//! and session replay never emit a real notification. Clipboard effects
+//! (`writeClipboard`/`readClipboard`) keep
 //! the same shape over the platform pasteboard — the seam the
 //! runtime's cmd+C copy uses — executed synchronously on the loop
 //! thread (pasteboards are main-thread services), so apps stop
@@ -67,6 +72,7 @@ const builtin = @import("builtin");
 const canvas = @import("canvas");
 const canvas_limits = @import("canvas_limits.zig");
 const platform = @import("../platform/root.zig");
+const validation = @import("validation.zig");
 const runtime_clock = @import("clock.zig");
 const pty_transport = @import("pty.zig");
 
@@ -7586,6 +7592,26 @@ pub fn Effects(comptime Msg: type) type {
             pty_transport.nudge(slot.wake_pipe[1]);
         }
 
+        /// Ask the desktop host to show a system notification. This is
+        /// deliberately fire-and-forget: platform acceptance does not
+        /// mean the OS displayed it (Focus / Do Not Disturb and user
+        /// notification settings remain authoritative), so no success
+        /// Msg would be truthful. Invalid or over-bound fields, an
+        /// unavailable notification service, and a host refusal all
+        /// fail closed.
+        ///
+        /// The call runs synchronously on the loop thread, where every
+        /// supported desktop notification API expects to be entered.
+        /// Fake execution and session replay suppress the platform call
+        /// so tests stay hermetic and a replay never repeats an external
+        /// user-visible side effect.
+        pub fn showNotification(self: *Self, options: platform.NotificationOptions) void {
+            if (self.executor == .fake or self.replay) return;
+            validation.validateNotificationOptions(options) catch return;
+            const services = self.services orelse return;
+            services.showNotification(options) catch {};
+        }
+
         /// Put text on the system clipboard through the platform
         /// pasteboard — the same seam the runtime's cmd+C copy uses —
         /// and deliver exactly one terminal Msg with an explicit
@@ -13921,6 +13947,15 @@ pub fn Effects(comptime Msg: type) type {
                 request.transfer_encoding = .{ .content_length = slot.payload_len };
                 var body = try request.sendBodyUnflushed(&.{});
                 try body.writer.writeAll(slot.fetchPayload());
+                try body.end();
+                try request.connection.?.flush();
+            } else if (slot.method.requestHasBody()) {
+                // POST, PUT and PATCH carry a body by definition, so
+                // `sendBodiless` asserts against them. A payload-free
+                // request of one of those methods is still valid HTTP;
+                // send an explicit zero-length body instead.
+                request.transfer_encoding = .{ .content_length = 0 };
+                var body = try request.sendBodyUnflushed(&.{});
                 try body.end();
                 try request.connection.?.flush();
             } else {

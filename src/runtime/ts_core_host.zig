@@ -1,17 +1,18 @@
-//! The native host consumer for transpiled app cores: bridges the
-//! versioned command/subscription wire format a transpiled core emits
-//! (`packages/core/rt/rt.zig`, `cmd_format_version` 5) onto the
-//! real effect engine (`effects.zig`). The transpiler's output is a
-//! pure Model/Msg/update core whose effects are INERT BYTES — this
-//! module is the one place those bytes become engine calls, so the
-//! entire existing effects machinery (executors, keyed slots, the
-//! completion queue, the session journal, replay) carries transpiled
-//! cores without a parallel engine.
+//! The native host consumer for compiled TypeScript app cores: bridges
+//! the versioned command/subscription wire format a compiled core
+//! emits (`cmd_format_version` 5) onto the real effect engine
+//! (`effects.zig`). The TypeScript tier's core module is a pure
+//! Model/Msg/update core whose effects are INERT BYTES — this module is
+//! the one place those bytes become engine calls, so the entire
+//! existing effects machinery (executors, keyed slots, the completion
+//! queue, the session journal, replay) carries TypeScript cores without
+//! a parallel engine.
 //!
-//! `TsCoreHost(core)` is comptime-generic over the emitted core module
-//! and expects the emitted ABI:
+//! `TsCoreHost(core)` is comptime-generic over the core module (the
+//! corewire-generated mirror over a compiled archive, or any
+//! hand-written module of the same shape) and expects:
 //!
-//!   core.rt              the core's rt kernel: `frameAlloc`,
+//!   core.rt              the core's runtime: `frameAlloc`,
 //!                        `frameReset`, `resetAll`
 //!   core.Model           the committed model struct
 //!   core.Msg             the app Msg `union(enum)` (wire tags are the
@@ -22,14 +23,13 @@
 //!   core.commitModelRoot the frame-end commit walker
 //!   core.subscriptions   optional: `fn (*const Model) []const u8`
 //!
-//! Like the rt kernel it drives, a host instance is container-level
-//! state — the v1 contract is ONE LIVE APP PER CORE MODULE: two apps
-//! over the same emitted core in one process would share a committed
-//! root and one set of bridge tables. Two DIFFERENT core modules
-//! coexist fine (each staged core carries its own rt.zig module
-//! instance, so kernels never alias; distinct core types get distinct
-//! hosts) — the e2e suite drives two live cores side by side to pin
-//! exactly that.
+//! Like the runtime it drives, a host instance is container-level
+//! state — the contract is ONE LIVE APP PER CORE MODULE: two apps
+//! over the same core in one process would share a committed root and
+//! one set of bridge tables. A compiled archive additionally owns the
+//! process's fixed-prefix C ABI symbol set, so a process carries ONE
+//! compiled core (each e2e battery is its own binary for exactly that
+//! reason).
 //!
 //! THE DISPATCH CYCLE — every Msg runs update → commit → command walk →
 //! subscription reconcile → frame reset, in that order, because the
@@ -182,7 +182,7 @@
 //!                  are matched by member name, exactly the
 //!                  data/closed/rejected set) — until the one `closed`
 //!                  (or a refused open's `rejected`) terminal retires
-//!                  it. POSTING is not a TS-tier verb: transpiled cores
+//!                  it. POSTING is not a TS-tier verb: TypeScript cores
 //!                  are single-threaded, so the thread-safe posting
 //!                  handle is native-side API (`Effects.channelHandle`)
 //!                  for embedders and platform-services extensions —
@@ -287,6 +287,9 @@
 //!                  frame event carries the state.
 //!   quit_app    -> `fx.quitApp()` — the graceful terminate through the
 //!                  same shutdown path a last-window close takes.
+//!   show_notification -> `fx.showNotification` fire-and-forget; invalid or
+//!                  unavailable requests fail closed, and replay suppresses
+//!                  the external user-visible side effect.
 //!   cancel      -> by wire key, first match wins in this order: the
 //!                  request table (`fx.cancelHostRequest`, silent), the
 //!                  named-op table (the entry is marked dropped and
@@ -349,7 +352,7 @@
 //! frame-resident and copy whatever the model keeps into the heap.
 //!
 //! Malformed wire bytes are teaching panics, not error codes: the only
-//! producer is the transpiler's own rt builders, so a bad record is a
+//! producer is the compiled core's own runtime builders, so a bad record is a
 //! build-pipeline bug the app author must see immediately.
 
 const std = @import("std");
@@ -414,8 +417,8 @@ pub fn videoKeyForTag(event_tag: u8) u64 {
 /// families' one engine key space without ever colliding on a key.
 pub const pty_key_base: u64 = 0x5453_5054_0000_0000;
 
-/// The spawn wire record's "no line routing" tag sentinel (mirrors
-/// rt.zig's `spawn_no_line_tag`).
+/// The spawn wire record's "no line routing" tag sentinel (the wire
+/// format's shared constant).
 pub const spawn_no_line_tag: u8 = 0xFF;
 
 /// Longest wire key (request or timer) the format can carry: the key
@@ -741,7 +744,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// boot model. The command bytes are re-derived by re-running
         /// the PURE `initialModel` (they were frame-resident and did not
         /// survive `boot`'s frame reset; the duplicate model value is
-        /// frame-transient garbage) — purity is the transpiled subset's
+        /// frame-transient garbage) — purity is the app-core subset's
         /// own guarantee, so the bytes are identical by construction.
         pub fn performBoot(fx: *Fx) void {
             if (comptime init_returns_cmd) {
@@ -817,7 +820,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// One full dispatch cycle for `msg`. The `TsUiApp` adapter
         /// wires this to `UiApp.Options.update_fx` (refreshing the
         /// app-held root from `model()` afterwards) so host events and
-        /// drained effect results run the transpiled core through the
+        /// drained effect results run the TypeScript core through the
         /// same path Zig cores use. A Msg flagged by its own result
         /// callback as a dropped entry's terminal is swallowed here —
         /// the silent drop the keyed-effect discipline promises.
@@ -965,7 +968,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const url = takeLongBytes(cmd, &at);
                         const header_count: usize = takeByte(cmd, &at);
                         if (header_count > runtime_effects.max_effect_fetch_headers) {
-                            @panic("ts core host: a fetch wire record carries more headers than the engine accepts - the transpiler's own bound should have stopped this build");
+                            @panic("ts core host: a fetch wire record carries more headers than the engine accepts - the frontend's own bound should have stopped this build");
                         }
                         var headers: [runtime_effects.max_effect_fetch_headers]std.http.Header = undefined;
                         for (0..header_count) |i| {
@@ -1034,7 +1037,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         }
                         const argc: usize = takeByte(cmd, &at);
                         if (argc == 0 or argc > runtime_effects.max_effect_argv) {
-                            @panic("ts core host: a spawn wire record carries more argv elements than the engine accepts - the transpiler's own bound should have stopped this build");
+                            @panic("ts core host: a spawn wire record carries more argv elements than the engine accepts - the frontend's own bound should have stopped this build");
                         }
                         var argv: [runtime_effects.max_effect_argv][]const u8 = undefined;
                         for (0..argc) |i| argv[i] = takeLongBytes(cmd, &at);
@@ -1213,7 +1216,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const term = takeShortBytes(cmd, &at);
                         const argc: usize = takeByte(cmd, &at);
                         if (argc == 0 or argc > runtime_effects.max_effect_argv) {
-                            @panic("ts core host: a pty_spawn wire record carries more argv elements than the engine accepts - the transpiler's own bound should have stopped this build");
+                            @panic("ts core host: a pty_spawn wire record carries more argv elements than the engine accepts - the frontend's own bound should have stopped this build");
                         }
                         var argv: [runtime_effects.max_effect_argv][]const u8 = undefined;
                         for (0..argc) |i| argv[i] = takeLongBytes(cmd, &at);
@@ -1245,9 +1248,22 @@ pub fn TsCoreHost(comptime core: type) type {
                         // retiring the entry in ptyEventMsg.
                         if (findPty(key)) |index| fx.ptyKill(pty_key_base + index);
                     },
+                    // show_notification [op][title_len u32 LE][title]
+                    //                   [subtitle_len u32 LE][subtitle]
+                    //                   [body_len u32 LE][body]
+                    0x1D => {
+                        const title = takeLongBytes(cmd, &at);
+                        const subtitle = takeLongBytes(cmd, &at);
+                        const body = takeLongBytes(cmd, &at);
+                        fx.showNotification(.{
+                            .title = title,
+                            .subtitle = subtitle,
+                            .body = body,
+                        });
+                    },
                     // audio_capture_start [op][key][event][flags][mic kind]
                     // [sample rate u32][channels][buffer duration u32][device id long]
-                    0x1D => {
+                    0x1E => {
                         const key = takeShortBytes(cmd, &at);
                         const event_tag = takeByte(cmd, &at);
                         const flags = takeByte(cmd, &at);
@@ -1278,7 +1294,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         });
                     },
                     // audio_capture_stop [op][key]
-                    0x1E => {
+                    0x1F => {
                         const key = takeShortBytes(cmd, &at);
                         for (&audio_capture_entries) |*entry| {
                             if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) {
@@ -1288,7 +1304,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         }
                     },
                     // microphone_devices [op][key][event]
-                    0x1F => {
+                    0x20 => {
                         const key = takeShortBytes(cmd, &at);
                         const event_tag = takeByte(cmd, &at);
                         const index = allocRoutedStreamEntry(&microphone_device_entries, key, event_tag) orelse
@@ -1296,7 +1312,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         fx.listMicrophoneDevices(.{ .key = microphone_devices_key_base + index, .on_event = microphoneDeviceEventMsg });
                     },
                     // audio_capture_access [op][key][event][source][action]
-                    0x20 => {
+                    0x21 => {
                         const key = takeShortBytes(cmd, &at);
                         const event_tag = takeByte(cmd, &at);
                         const source_byte = takeByte(cmd, &at);
@@ -1311,7 +1327,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         });
                     },
                     // audio_capture_read [op][key][event][max frames u32]
-                    0x21 => {
+                    0x22 => {
                         const key = takeShortBytes(cmd, &at);
                         const event_tag = takeByte(cmd, &at);
                         const frame_bytes = takeBytes(cmd, &at, 4);
@@ -1333,7 +1349,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         });
                     },
                     // audio_capture_discard [op][key]
-                    0x22 => {
+                    0x23 => {
                         const key = takeShortBytes(cmd, &at);
                         for (&audio_capture_entries) |*entry| {
                             if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) {
@@ -2317,7 +2333,7 @@ pub fn TsCoreHost(comptime core: type) type {
         // ------------------------------------------ subscription timers
 
         /// Reconcile the declarative subscription set against the fixed
-        /// timer table — the same algorithm as the transpiler package's
+        /// timer table — the same algorithm as the @native-sdk/core package's
         /// run-fidelity drivers, engine-backed: match by key, arm new
         /// keys into the first free slot, re-arm on interval change,
         /// re-route on tag change, cancel the missing. Slot order
@@ -2493,7 +2509,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// (fetch's `{ status, body }` and a collect spawn's
         /// `{ code, output }`): the arm must be a struct of exactly one
         /// number field and one bytes field, matched BY TYPE (the
-        /// transpiler validates the shape, so field names stay the
+        /// frontend validates the shape, so field names stay the
         /// app's). The bytes copy into the core's frame arena like
         /// every routed payload; the number widens into its field the
         /// way the subset's number model classes it (i64, u64, or f64).
@@ -2574,14 +2590,14 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         /// The arm's `state` member for an engine event kind, matched
-        /// by member NAME (the transpiler pins the member set, so the
+        /// by member NAME (the frontend pins the member set, so the
         /// app's declaration order never matters to the wire).
         fn audioStateValue(comptime E: type, kind: runtime_effects.EffectAudioEventKind) E {
             const name = @tagName(kind);
             inline for (@typeInfo(E).@"enum".fields) |f| {
                 if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
             }
-            @panic("ts core host: an audio event kind has no member in the event arm's state union - the transpiler's own shape check should have stopped this build");
+            @panic("ts core host: an audio event kind has no member in the event arm's state union - the frontend's own shape check should have stopped this build");
         }
 
         /// Build the six-field audio event arm at index `tag` from an
@@ -2860,7 +2876,7 @@ pub fn TsCoreHost(comptime core: type) type {
             inline for (@typeInfo(E).@"enum".fields) |f| {
                 if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
             }
-            @panic("ts core host: a video event kind has no member in the event arm's state union - the transpiler's own shape check should have stopped this build");
+            @panic("ts core host: a video event kind has no member in the event arm's state union - the frontend's own shape check should have stopped this build");
         }
 
         /// Build the seven-field video event arm at index `tag` from an
@@ -2925,7 +2941,7 @@ pub fn TsCoreHost(comptime core: type) type {
             inline for (@typeInfo(E).@"enum".fields) |f| {
                 if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
             }
-            @panic("ts core host: an image outcome has no member in the result arm's state union - the transpiler's own shape check should have stopped this build");
+            @panic("ts core host: an image outcome has no member in the result arm's state union - the frontend's own shape check should have stopped this build");
         }
 
         /// Build the five-field image result arm at index `tag` from an
@@ -2990,7 +3006,7 @@ pub fn TsCoreHost(comptime core: type) type {
             inline for (@typeInfo(E).@"enum".fields) |f| {
                 if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
             }
-            @panic("ts core host: a channel event kind has no member in the event arm's state union - the transpiler's own shape check should have stopped this build");
+            @panic("ts core host: a channel event kind has no member in the event arm's state union - the frontend's own shape check should have stopped this build");
         }
 
         /// Build the five-field channel event arm at index `tag` from
@@ -3075,7 +3091,7 @@ pub fn TsCoreHost(comptime core: type) type {
             inline for (@typeInfo(E).@"enum".fields) |f| {
                 if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
             }
-            @panic("ts core host: a pty event kind has no member in the event arm's state union - the transpiler's own shape check should have stopped this build");
+            @panic("ts core host: a pty event kind has no member in the event arm's state union - the frontend's own shape check should have stopped this build");
         }
 
         /// The arm's `reason` member for an engine exit reason, matched
@@ -3085,7 +3101,7 @@ pub fn TsCoreHost(comptime core: type) type {
             inline for (@typeInfo(E).@"enum".fields) |f| {
                 if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
             }
-            @panic("ts core host: a pty exit reason has no member in the event arm's reason union - the transpiler's own shape check should have stopped this build");
+            @panic("ts core host: a pty exit reason has no member in the event arm's reason union - the frontend's own shape check should have stopped this build");
         }
 
         /// Build the six-field pty event arm at index `tag` from an

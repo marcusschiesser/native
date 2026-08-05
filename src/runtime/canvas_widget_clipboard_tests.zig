@@ -540,7 +540,7 @@ test "grouped code paragraphs select and copy across chunk boundaries" {
             .text = second,
             .spans = &second_spans,
             .static_text_group_id = group_id,
-            .static_text_group_offset = first.len,
+            .static_text_group_offset = @intCast(first.len),
         },
         .{
             .id = 4,

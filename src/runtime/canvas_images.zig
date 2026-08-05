@@ -192,8 +192,14 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
             // Best-effort drop of the platform-side texture: platforms
             // without the upload seam report UnsupportedService, and a
             // failed removal only costs the host a stale (unreferenced)
-            // texture until the id is re-uploaded — never a wrong frame,
-            // since packets key uploads by content fingerprint.
+            // texture until the id is re-uploaded. Invalidate the
+            // planner's per-view mirror FIRST: the platform resource's
+            // lifetime is independent of the fingerprint key, so an
+            // unregister followed by an identical registration must
+            // plan `.upload`, never `.retain` against a removed texture.
+            for (self.views[0..self.view_count]) |*view| {
+                view.removeCanvasFrameImageCacheId(id);
+            }
             self.options.platform.services.removeGpuSurfaceImage(id) catch {};
             noteCanvasImagesChanged(self);
             return true;

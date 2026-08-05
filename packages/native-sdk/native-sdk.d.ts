@@ -178,7 +178,10 @@ export type NativeSdkViewKind =
   | "progress_indicator"
   | "progressIndicator";
 
-export type NativeSdkGpuSurfaceBackend = "none" | "metal";
+/** Concrete backend reported by GPU surface view and frame state. */
+export type NativeSdkGpuSurfaceBackend = "none" | "metal" | "direct2d" | "software";
+/** Portable backend request accepted when creating a GPU surface. */
+export type NativeSdkGpuSurfaceBackendRequest = "metal" | "software";
 export type NativeSdkGpuSurfacePixelFormat = "none" | "bgra8_unorm";
 export type NativeSdkGpuSurfacePresentMode = "none" | "timer";
 export type NativeSdkGpuSurfaceAlphaMode = "none" | "opaque" | "premultiplied";
@@ -327,8 +330,8 @@ export interface NativeSdkCreateNativeViewOptions extends NativeSdkCreateViewBas
   kind: NativeSdkNativeViewKind;
   frame?: NativeSdkRect;
   url?: never;
-  /** Only valid for gpu_surface views. Defaults to the first supported backend. */
-  gpuBackend?: NativeSdkGpuSurfaceBackend;
+  /** Only valid for gpu_surface views. Omit to use the first supported backend. */
+  gpuBackend?: NativeSdkGpuSurfaceBackendRequest;
   /** Only valid for gpu_surface views. */
   gpuPixelFormat?: NativeSdkGpuSurfacePixelFormat;
   /** Only valid for gpu_surface views. */

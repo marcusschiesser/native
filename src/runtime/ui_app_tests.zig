@@ -66,6 +66,25 @@ fn counterOptions() CounterApp.Options {
     };
 }
 
+const software_counter_views = [_]app_manifest.ShellView{
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .software },
+};
+const software_counter_windows = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "Software Counter",
+    .width = 400,
+    .height = 300,
+    .views = &software_counter_views,
+}};
+const software_counter_scene: app_manifest.ShellConfig = .{ .windows = &software_counter_windows };
+
+fn softwareCounterOptions() CounterApp.Options {
+    var options = counterOptions();
+    options.name = "ui-app-software-counter";
+    options.scene = software_counter_scene;
+    return options;
+}
+
 fn findWidgetIdByText(tree: anytype, kind: canvas.WidgetKind, text: []const u8) ?canvas.ObjectId {
     return findIn(tree.root, kind, text);
 }
@@ -478,6 +497,54 @@ test "ui app presents pixels when the packet service is unsupported" {
     try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_present_count);
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
     try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+}
+
+test "ui app explicit software canvas bypasses the production packet path" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.pixel_present_retained_baseline = true;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.testing.allocator, .{}, softwareCounterOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+
+    // Packet services are available and would accept this frame. The
+    // immutable software request must still send it directly to the
+    // reference renderer without recording a packet fallback.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+    } });
+
+    try std.testing.expect(app_state.installed);
+    try std.testing.expectEqual(zero_platform.GpuSurfaceBackend.software, harness.runtime.views[0].gpu_requested_backend);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_packet_present_count);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.gpu_surface_image_upload_count);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.gpu_surface_present_count);
+    try std.testing.expectEqual(zero_platform.GpuPresentPath.pixels, harness.runtime.views[0].gpu_present_path);
+    try std.testing.expectEqual(zero_platform.GpuPresentFallbackReason.none, harness.runtime.views[0].info().gpu_present_fallback_reason);
+
+    // A changed follow-up frame remains incremental. Treating the central
+    // software-policy rejection as a failed packet attempt would force this
+    // pixel present back to the full surface.
+    try app_state.dispatch(&harness.runtime, 1, .increment);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 2,
+        .timestamp_ns = 17_000_000,
+    } });
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.gpu_surface_present_count);
+    const dirty = harness.null_platform.gpu_surface_present_dirty_bounds orelse return error.TestUnexpectedResult;
+    try std.testing.expect(dirty.width < 400 or dirty.height < 300);
 }
 
 // ---------------------------------- reflow stale-pixel oracle fixture

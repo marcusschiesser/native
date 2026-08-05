@@ -298,6 +298,7 @@ pub const CanvasRenderPass = frame_model.CanvasRenderPass;
 pub const CanvasFrame = frame_model.CanvasFrame;
 pub const max_canvas_frame_dirty_rects = frame_model.max_canvas_frame_dirty_rects;
 pub const buildCanvasFrame = frame_model.buildCanvasFrame;
+pub const incrementalDamageIntersectsBackdropBlur = frame_model.incrementalDamageIntersectsBackdropBlur;
 
 // Canvas GPU packet and encoder data live in `gpu.zig`; root keeps the public API stable.
 pub const CanvasRenderPassLoadAction = gpu_model.CanvasRenderPassLoadAction;
@@ -449,6 +450,7 @@ pub const builtinComponentDescriptor = widget_model.builtinComponentDescriptor;
 pub const WidgetActions = widget_model.WidgetActions;
 pub const WidgetSemantics = widget_model.WidgetSemantics;
 pub const WidgetContextMenuItem = widget_model.WidgetContextMenuItem;
+pub const CodeDiffLines = widget_model.CodeDiffLines;
 pub const Widget = widget_model.Widget;
 pub const BuiltinComponentOptions = widget_model.BuiltinComponentOptions;
 pub const WidgetCommandPart = widget_model.WidgetCommandPart;

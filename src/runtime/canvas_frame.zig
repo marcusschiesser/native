@@ -33,6 +33,16 @@ pub const canvasRenderAnimationActive = canvas_frame_helpers.canvasRenderAnimati
 pub const platformCanvasFrameProfileRisk = canvas_frame_helpers.platformCanvasFrameProfileRisk;
 pub const gpuSurfaceFrameEventFromGpuFrame = canvas_frame_helpers.gpuSurfaceFrameEventFromGpuFrame;
 
+/// Whether presentation for this view should use the GPU packet path. A
+/// missing view stays eligible so the presentation entry point can report
+/// its normal validation error instead of masking it as a backend choice.
+pub fn canvasGpuPacketPresentationRequested(runtime: anytype, window_id: platform.WindowId, label: []const u8) bool {
+    return if (runtimeFindViewIndex(runtime, window_id, label)) |index|
+        runtime.views[index].gpu_requested_backend != .software
+    else
+        true;
+}
+
 const runtime_api = @import("api.zig");
 const runtime_clock = @import("clock.zig");
 const validation = @import("validation.zig");
@@ -254,7 +264,16 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             packet_json_buffer: []u8,
             packet_scale: ?f32,
         ) anyerror!canvas.CanvasGpuPacket {
-            var canvas_frame = try self.nextCanvasFrame(window_id, label, options, storage);
+            // An explicit software request is a presentation policy, not a
+            // host refusal. Stop before planning or encoding a packet (and
+            // before uploading any packet image resources); callers that
+            // offer a pixel fallback handle UnsupportedService as usual.
+            try validateRuntimeViewParent(self, window_id);
+            try validateViewLabel(label);
+            const view_index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
+            if (self.views[view_index].kind != .gpu_surface) return error.InvalidViewOptions;
+            if (self.views[view_index].gpu_requested_backend == .software) return error.UnsupportedService;
+            var canvas_frame = try planCanvasFrameForView(self, view_index, options, storage, true);
             recordCanvasClearColor(self, window_id, label, clear_color);
             const presentation_scale = normalizedCanvasPresentationScale(packet_scale, canvas_frame.scale);
             // Widen BEFORE the packet build so the scissor-culled
@@ -318,9 +337,11 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             widenCanvasFrameDirtyForPresentationScale(&canvas_frame, presentation_scale);
 
             const services = self.options.platform.services;
-            const packet_service_available = services.present_gpu_surface_packet_fn != null or
-                services.present_gpu_surface_packet_binary_fn != null;
-            if (gpu_commands.len > 0 and packet_json_buffer.len > 0) {
+            const packet_requested = canvasGpuPacketPresentationRequested(self, window_id, label);
+            const packet_service_available = packet_requested and
+                (services.present_gpu_surface_packet_fn != null or
+                    services.present_gpu_surface_packet_binary_fn != null);
+            if (packet_requested and gpu_commands.len > 0 and packet_json_buffer.len > 0) {
                 if (packet_service_available) {
                     var packet = try canvas_frame.gpuPacket(gpu_commands);
                     packet.scale = presentation_scale;
@@ -1029,17 +1050,17 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                     storage.text_layout_cache_actions,
                 );
 
-            const full_repaint = frame_options.full_repaint or
+            var full_repaint = frame_options.full_repaint or
                 !self.views[index].presented_canvas_valid or
                 canvas_surface_changed or
                 (canvas_changed and (self.views[index].presented_canvas_has_unkeyed or self.views[index].currentCanvasHasUnkeyed()));
-            const changes = if (full_repaint)
+            var changes: []const canvas.DiffChange = if (full_repaint)
                 storage.changes[0..0]
             else
                 try self.views[index].diffPresentedCanvasSummary(storage.changes);
             var dirty_rects: [canvas.max_canvas_frame_dirty_rects]geometry.RectF = undefined;
             var dirty_rect_count: usize = 0;
-            const dirty_bounds = if (full_repaint)
+            var dirty_bounds: ?geometry.RectF = if (full_repaint)
                 canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds)
             else dirty: {
                 // Every incremental dirty rect leaves here through
@@ -1109,6 +1130,23 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 }
                 break :dirty bleedAlignedCanvasDirtyBounds(unionRects(canvasDirtyBoundsFromChanges(changes), overrides_dirty), frame_options.scale, 1, frame_options.surface_size);
             };
+            if (!full_repaint and incrementalCanvasDamageIntersectsBackdropBlur(
+                render_plan.commands,
+                dirty_bounds,
+                dirty_rects[0..dirty_rect_count],
+            )) {
+                // A blur's apron must be reconstructed from the scene as
+                // it existed before that command. Retained pixels beyond
+                // an incremental scissor are already fully composited,
+                // so widening only the output rect would still sample
+                // stale blur/later-command pixels at its edge. Replay the
+                // whole ordered list when damage reaches the blur's read
+                // footprint; damage elsewhere remains incremental.
+                full_repaint = true;
+                changes = storage.changes[0..0];
+                dirty_bounds = canvasFullRepaintBounds(frame_options.surface_size, render_plan.bounds);
+                dirty_rect_count = 0;
+            }
 
             const canvas_frame = canvas.CanvasFrame{
                 .frame_index = frame_options.frame_index,
@@ -1269,6 +1307,21 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             if (!emitted_dirty_region and changes.len > 0) self.invalidateFor(.state, view_frame);
         }
     };
+}
+
+/// Refined patch damage is a set, not its bounding box: two distant edits
+/// can straddle a blur without either edit reaching the blur's read apron.
+/// When refinement is unavailable, retain the conservative union check.
+fn incrementalCanvasDamageIntersectsBackdropBlur(
+    commands: []const canvas.RenderCommand,
+    dirty_bounds: ?geometry.RectF,
+    dirty_rects: []const geometry.RectF,
+) bool {
+    if (dirty_rects.len == 0) return canvas.incrementalDamageIntersectsBackdropBlur(commands, dirty_bounds);
+    for (dirty_rects) |dirty_rect| {
+        if (canvas.incrementalDamageIntersectsBackdropBlur(commands, dirty_rect)) return true;
+    }
+    return false;
 }
 
 /// Rework a planned frame's incremental damage for the present's

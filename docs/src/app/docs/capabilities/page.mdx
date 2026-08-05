@@ -1,6 +1,6 @@
 # Capabilities
 
-Native SDK capabilities are native OS services and app events exposed through `PlatformServices`, runtime methods, lifecycle events, and — for apps that [embed web content](/docs/frontend) — guarded bridge commands. Native code reaches them directly; web content does not receive capability access by default. In a [`UiApp`](/docs/app-model), clipboard access rides the effects channel (`fx.writeClipboard` / `fx.readClipboard`) so `update` never needs a runtime handle.
+Native SDK capabilities are native OS services and app events exposed through `PlatformServices`, runtime methods, lifecycle events, and — for apps that [embed web content](/docs/frontend) — guarded bridge commands. Native code reaches them directly; web content does not receive capability access by default. In a [model core](/docs/app-model), notifications and clipboard access ride the effects channel (`Cmd.showNotification` / `Cmd.clipboardWrite` in TypeScript, `fx.showNotification` / `fx.writeClipboard` in Zig) so `update` never needs a runtime handle.
 
 Web content itself is declare-to-use: an app ships the embedded web layer only when it declares web intent — `"webview"` in `.capabilities`, a `.frontend` block, a `.shell` webview view, or a web engine resolved to Chromium (`.web_engine = "chromium"` in app.zon, or the `-Dweb-engine`/`--web-engine` flags) — and an app that declares none of them builds native-only, where any attempt to create a webview fails with a teaching error instead of loading a layer the app never asked for. The [`webview_layer`](/docs/app-zon) manifest field overrides the inference in either direction. Native-only builds shed the platform web stack for real: the Windows executable carries no `WebView2Loader.dll` reference, and the Linux host neither links WebKitGTK nor requires `libwebkitgtk` on user machines.
 
@@ -10,7 +10,7 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
   <thead>
     <tr>
       <th>Capability</th>
-      <th>Zig API</th>
+      <th>Native API</th>
       <th>JavaScript command</th>
       <th>Bridge permission</th>
       <th>Current native support</th>
@@ -26,10 +26,10 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
     </tr>
     <tr>
       <td>System notification</td>
-      <td><code>runtime.showNotification(options)</code></td>
+      <td><code>Cmd.showNotification(spec)</code> / <code>fx.showNotification(options)</code> / <code>runtime.showNotification(options)</code></td>
       <td><code>native-sdk.os.showNotification</code></td>
       <td><code>notifications</code></td>
-      <td>macOS, Linux, and Windows system WebView; macOS Chromium</td>
+      <td>macOS, Linux, and Windows model cores and system WebView; macOS Chromium</td>
     </tr>
     <tr>
       <td>Native dialogs</td>
@@ -226,5 +226,32 @@ window.zero.on("app:activate", () => {
   refreshForegroundState();
 });
 ```
+
+## Model cores
+
+Model-driven apps request notifications as effects. Delivery is fire-and-forget because OS focus modes and user settings remain authoritative after the host accepts the request; fake-executor tests and session replay do not display notifications.
+
+### TypeScript
+
+```ts
+case "build_finished":
+  return [model, Cmd.showNotification({
+    title: asciiBytes("Build finished"),
+    subtitle: asciiBytes("native-sdk"),
+    body: asciiBytes("All checks passed."),
+  })];
+```
+
+### Zig
+
+```zig
+.build_finished => fx.showNotification(.{
+    .title = "Build finished",
+    .subtitle = "native-sdk",
+    .body = "All checks passed.",
+}),
+```
+
+Apps using the lower-level runtime can call the same platform seam directly with `try runtime.showNotification(options)`.
 
 See also: [Builtin Commands](/docs/bridge/builtin-commands) and [Security](/docs/security).

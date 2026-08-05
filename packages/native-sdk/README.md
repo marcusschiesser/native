@@ -2,7 +2,7 @@
 
 The command line for [Native SDK](https://native-sdk.dev): the complete toolkit for building native desktop applications.
 
-Views are declarative markup in `.native` files, logic is plain Zig, and Native SDK's own engine draws every pixel into real OS windows — no browser, no WebView, no interpreter in the binary.
+Apps are authored in TypeScript + declarative Native markup by default. The TypeScript core compiles ahead of time to native code, and Native SDK's own engine draws every pixel into real OS windows — no browser, WebView, JS runtime, or interpreter in the binary. Zig is a first-class app-core alternative by explicit choice and the language the toolkit itself is built in.
 
 ## Install
 
@@ -20,7 +20,7 @@ cd my_app
 native dev
 ```
 
-A native window opens with a working counter. The scaffold is a native-rendered markup app with no build files — `native dev|build|test` own the build — and `src/app.native` hot-reloads while the app runs, keeping your state. `native check` validates every view in milliseconds without building.
+A native window opens with a working counter. The primary scaffold is three files of truth and no build config: `src/core.ts` (`Model`, `Msg`, `update`), `src/app.native` (the UI), and `app.zon` (the manifest). `native dev|build|test` own the generated build; `src/app.native` hot-reloads while the app runs, keeping your state; `native dev --core` runs the TypeScript logic loop under node; and `native check` validates the core and every view in milliseconds without building. Prefer a Zig core? Use `native init my_app --template zig-core`.
 
 When part of your product is the web, WebView surfaces coexist with the native canvas; web-frontend scaffolds (`--frontend next`, `--frontend vite`, and more) install their generated frontend dependencies automatically on first run.
 
@@ -30,7 +30,7 @@ Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/quick
 
 | Command | Description |
 |---------|-------------|
-| `native init [path] [--frontend <native\|next\|vite\|react\|svelte\|vue>] [--full]` | Scaffold a new Native SDK app |
+| `native init [path] [--template <ts-core\|zig-core>] [--frontend <native\|next\|vite\|react\|svelte\|vue>] [--full]` | Scaffold a new Native SDK app (TypeScript core + Native markup by default) |
 | `native dev [dir]` | Build and run the app (markup hot reload; managed frontend dev server when configured) |
 | `native build [dir]` | Build a ReleaseFast binary into `zig-out/bin/` |
 | `native test [dir]` | Run the app's test suite |
@@ -47,6 +47,6 @@ Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/quick
 
 ## More
 
-The full documentation is at [native-sdk.dev](https://native-sdk.dev) — the [app model](https://native-sdk.dev/app-model), [native UI authoring](https://native-sdk.dev/native-ui), [components](https://native-sdk.dev/components), [testing](https://native-sdk.dev/testing), [automation](https://native-sdk.dev/automation), [capabilities](https://native-sdk.dev/capabilities), [packaging](https://native-sdk.dev/packaging), and [platform support](https://native-sdk.dev/platform-support).
+The full documentation is at [native-sdk.dev](https://native-sdk.dev) — the [quick start](https://native-sdk.dev/quick-start), [TypeScript cores](https://native-sdk.dev/typescript), [native UI authoring](https://native-sdk.dev/native-ui), [app model](https://native-sdk.dev/app-model), [components](https://native-sdk.dev/components), [testing](https://native-sdk.dev/testing), [automation](https://native-sdk.dev/automation), [capabilities](https://native-sdk.dev/capabilities), [packaging](https://native-sdk.dev/packaging), and [platform support](https://native-sdk.dev/platform-support).
 
 Native SDK is pre-1.0 and Apache-2.0 licensed; the source lives at [github.com/vercel-labs/native](https://github.com/vercel-labs/native).

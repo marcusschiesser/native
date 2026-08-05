@@ -599,7 +599,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
             storage.text_layout_cache_actions,
         );
 
-    const full_repaint = options.full_repaint or previous == null;
+    var full_repaint = options.full_repaint or previous == null;
     var changes: []const DiffChange = storage.changes[0..0];
     var dirty_bounds: ?geometry.RectF = null;
 
@@ -615,6 +615,18 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         // pixels so a fractional dirty edge cannot erase an unchanged
         // neighbor's boundary-pixel coverage without redrawing it.
         dirty_bounds = bleedAlignedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.scale, 1, options.surface_size);
+        if (incrementalDamageIntersectsBackdropBlur(render_plan.commands, dirty_bounds)) {
+            // A backdrop blur reads pixels around its output from the
+            // destination as it existed at this point in draw order.
+            // Retained pixels outside an incremental scissor already
+            // contain the PREVIOUS frame's blur and later commands, so
+            // they cannot supply that pre-blur backdrop. Reconstruct it
+            // by replaying the complete list whenever damage reaches a
+            // blur's resolved read footprint.
+            full_repaint = true;
+            changes = storage.changes[0..0];
+            dirty_bounds = fullRepaintBounds(options.surface_size, render_plan.bounds);
+        }
     }
 
     return .{
@@ -647,6 +659,38 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         .dirty_bounds = dirty_bounds,
         .budget = options.budget,
     };
+}
+
+/// Whether incremental damage reaches a backdrop blur's resolved read
+/// footprint. Replaying only the dirty output is not sufficient: pixels
+/// outside the scissor hold the previous fully composited frame rather
+/// than the backdrop at the blur command's position in draw order.
+pub fn incrementalDamageIntersectsBackdropBlur(commands: []const RenderCommand, dirty_bounds: ?geometry.RectF) bool {
+    const dirty = dirty_bounds orelse return false;
+    const normalized_dirty = dirty.normalized();
+    for (commands) |command| {
+        switch (command.command) {
+            .blur => |blur| {
+                if (!(blur.radius > 0) or !(command.opacity > 0)) continue;
+                var output = command.transform.transformRect(blur.rect.normalized());
+                if (command.clip) |clip| output = geometry.RectF.intersection(output, clip.normalized());
+                if (output.isEmpty()) continue;
+
+                // Do not use `command.bounds` here: the render planner
+                // intersects that inflated bound with the output clip,
+                // while a clipped output pixel still samples backdrop
+                // pixels up to `radius` OUTSIDE the clip. Transforming
+                // the full local read footprint is a conservative AABB
+                // for every sample the surviving output can consume.
+                const read_footprint = command.transform.transformRect(
+                    blur.rect.normalized().inflate(geometry.InsetsF.all(@max(0, blur.radius))),
+                ).normalized();
+                if (read_footprint.intersects(normalized_dirty)) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
 }
 
 fn dirtyBoundsFromChanges(changes: []const DiffChange) ?geometry.RectF {

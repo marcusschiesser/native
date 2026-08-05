@@ -228,6 +228,22 @@ const BinaryCursor = struct {
             try self.skip(8 + 4 + 8 + 16); // font + size + origin + color
             const text_len = try self.readU32();
             try self.skip(text_len);
+            const has_positioned_glyphs = try self.readU8();
+            if (has_positioned_glyphs != 0) {
+                const glyph_count = try self.readU32();
+                for (0..glyph_count) |_| {
+                    try self.skip(2); // glyph id
+                    const glyph_flags = try self.readU8();
+                    if (glyph_flags & 0x01 != 0) try self.skip(8); // font override
+                    try self.skip(12); // x + baseline + advance
+                }
+                const fragment_count = try self.readU32();
+                for (0..fragment_count) |_| {
+                    try self.skip(8); // x + baseline
+                    const fragment_len = try self.readU32();
+                    try self.skip(fragment_len);
+                }
+            }
             const has_layout = try self.readU8();
             if (has_layout != 0) {
                 try self.skip(4 + 4 + 1 + 1); // max width + line height + wrap + align

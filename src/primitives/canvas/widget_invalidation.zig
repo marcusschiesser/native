@@ -260,6 +260,8 @@ fn terminalBindingClean(previous: widget_model.TerminalBinding, next: widget_mod
 }
 
 fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_index: usize, next_index: usize, tokens: DesignTokens) WidgetInvalidation {
+    const previous_diff_lines = previous.widget.codeDiffLines();
+    const next_diff_lines = next.widget.codeDiffLines();
     const layout_dirty =
         previous.widget.kind != next.widget.kind or
         previous.depth != next.depth or
@@ -271,7 +273,9 @@ fn widgetChange(previous: WidgetLayoutNode, next: WidgetLayoutNode, previous_ind
         !textSpansEqual(previous.widget.spans, next.widget.spans) or
         previous.widget.code_language != next.widget.code_language or
         previous.widget.static_text_group_id != next.widget.static_text_group_id or
-        previous.widget.static_text_group_offset != next.widget.static_text_group_offset or
+        !codeDiffLinesEqual(previous_diff_lines, next_diff_lines) or
+        (previous_diff_lines == null and next_diff_lines == null and
+            previous.widget.static_text_group_offset != next.widget.static_text_group_offset) or
         !chartDataEqual(previous.widget.chart, next.widget.chart) or
         !std.mem.eql(u8, previous.widget.placeholder, next.widget.placeholder) or
         !std.mem.eql(u8, previous.widget.icon, next.widget.icon) or
@@ -444,6 +448,11 @@ fn optionalPointsEqual(a: ?geometry.PointF, b: ?geometry.PointF) bool {
         return point_a.x == point_b.x and point_a.y == point_b.y;
     }
     return b == null;
+}
+
+fn codeDiffLinesEqual(a: ?widget_model.CodeDiffLines, b: ?widget_model.CodeDiffLines) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return a.?.added == b.?.added and a.?.removed == b.?.removed;
 }
 
 /// The paint bounds of every `.input_group` ancestor's focus ring for a

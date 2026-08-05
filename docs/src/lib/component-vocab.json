@@ -214,11 +214,11 @@
     },
     {
       "name": "code",
-      "doc": "Bare highlighted source content with no background, border, radius, shadow, or padding. source is one required text {binding}; language is a literal lexer name. Wraps by default, line-numbers opts into logical line numbers, wrap=\"false\" keeps lines intact, and a definite height makes overflow scrollable. Wrap in a panel or card when chrome is wanted."
+      "doc": "Bare highlighted source content with no background, border, radius, shadow, or padding. source is one required text {binding}; language is a literal lexer name. Wraps by default, line-numbers opts into logical line numbers, added-lines/removed-lines add Geist-style diff rows, wrap=\"false\" keeps lines intact, and a definite height makes overflow scrollable. Wrap in a panel or card when chrome is wanted."
     },
     {
       "name": "markdown",
-      "doc": "Renders a markdown string (GFM subset, pipe tables included) as widgets; source is one {binding}, links dispatch on-link (bare URLs autolink), <details> blocks toggle via on-details + details-expanded, #123 refs linkify via issue-link-base."
+      "doc": "Renders a markdown string (GFM subset, pipe tables and safe presentational HTML included) as widgets; source is one {binding}, preloaded leading images map through images, links dispatch on-link (bare URLs autolink), <details> blocks toggle via on-details + details-expanded, #123 refs linkify via issue-link-base."
     },
     {
       "name": "stepper",
@@ -566,6 +566,10 @@
         "doc": "markdown: one {binding} producing the markdown text (a []const u8 field or fn; arena fns work). Required."
       },
       {
+        "name": "images",
+        "doc": "markdown: one {binding} producing []const canvas.markdown.ResolvedImage (arena fns work). Each mapping pairs a leading image source with an image id already loaded and registered through fx.loadImage plus its decoded dimensions; views never perform image I/O."
+      },
+      {
         "name": "on-link",
         "doc": "markdown: bare Msg tag dispatched on link press; its payload is the URL ([]const u8 variant)."
       },
@@ -598,6 +602,14 @@
       {
         "name": "line-numbers",
         "doc": "code: opt into muted logical line numbers. Off by default; a wrapped logical line stays paired with its number."
+      },
+      {
+        "name": "added-lines",
+        "doc": "code: one-based comma/range spec (for example 5 or 5, 9-11), or one text {binding}; applies Geist's green full-line wash and renderer-owned + without changing copied source. Lines 1-128."
+      },
+      {
+        "name": "removed-lines",
+        "doc": "code: one-based comma/range spec (for example 2-4), or one text {binding}; applies Geist's red full-line wash and renderer-owned - without changing copied source. Lines 1-128."
       },
       {
         "name": "wrap",
@@ -1195,6 +1207,10 @@
     "code": {
       "width": 1120,
       "height": 600
+    },
+    "code-diff": {
+      "width": 1120,
+      "height": 440
     },
     "markdown": {
       "width": 1120,

@@ -29,6 +29,10 @@ pub const Metadata = struct {
     /// inferred from the manifest's web declarations), "include", or
     /// "exclude". See `webLayer` for the inference.
     webview_layer: []const u8 = "auto",
+    /// How a TypeScript core compiles: "external" (the default and only
+    /// lane — the external core compiler). The removed transpiled
+    /// lane's spelling is refused with a teaching at validation.
+    core_compiler: []const u8 = "external",
     /// The built-in theme pack the app selects (`theme = "geist"`).
     /// Optional — absent keeps the house register. Validated against
     /// the known pack names so a typo is a check error, never a silent
@@ -65,6 +69,7 @@ pub const Metadata = struct {
         allocator.free(self.version);
         allocator.free(self.web_engine);
         allocator.free(self.webview_layer);
+        allocator.free(self.core_compiler);
         allocator.free(self.cef.dir);
         for (self.icons) |value| allocator.free(value);
         if (self.icons.len > 0) allocator.free(self.icons);
@@ -438,6 +443,12 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer allocator.free(url_schemes);
     const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app.zon web engine is invalid" };
     const manifest_webview_layer = parseWebViewLayer(metadata.webview_layer) catch return .{ .ok = false, .message = "app.zon webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"" };
+    if (!std.mem.eql(u8, metadata.core_compiler, "external")) {
+        if (std.mem.eql(u8, metadata.core_compiler, "transpiler")) {
+            return .{ .ok = false, .message = "app.zon core_compiler = \"transpiler\" names the removed TS-to-Zig transpiled lane (v0.7.0 removed it) - TypeScript cores compile through the external core compiler now; delete the setting (or spell it \"external\")" };
+        }
+        return .{ .ok = false, .message = "app.zon core_compiler is invalid - expected \"external\" (the default and only lane)" };
+    }
     const platform_settings = parsePlatformSettings(allocator, metadata.platforms) catch return .{ .ok = false, .message = "app.zon platforms are invalid" };
     defer allocator.free(platform_settings);
 
@@ -530,6 +541,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .bridge_commands = try convertRawBridgeCommands(allocator, raw.bridge.commands),
         .web_engine = try allocator.dupe(u8, raw.web_engine),
         .webview_layer = try allocator.dupe(u8, raw.webview_layer),
+        .core_compiler = try allocator.dupe(u8, raw.core_compiler),
         .cef = .{
             .dir = try allocator.dupe(u8, raw.cef.dir),
             .auto_install = raw.cef.auto_install,
@@ -1986,6 +1998,26 @@ test "manifest parser reads window close policies" {
     const shell = try parseShell(std.testing.allocator, metadata.shell);
     defer deinitParsedShell(std.testing.allocator, shell);
     try std.testing.expectEqual(app_manifest.WindowClosePolicy.hide, shell.windows[0].close_policy);
+}
+
+test "manifest parser reads the core-compiler setting and defaults it to external" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.2.3",
+        \\  .core_compiler = "external",
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("external", metadata.core_compiler);
+
+    // Undeclared is the external lane — the one lane there is.
+    const defaulted = try parseText(std.testing.allocator,
+        \\.{ .id = "com.example.app", .name = "example", .version = "1.2.3" }
+    );
+    defer defaulted.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("external", defaulted.core_compiler);
 }
 
 test "manifest parser rejects unknown window close policy" {

@@ -61,15 +61,13 @@ if (typeof module.registerHooks !== 'function') {
     load(url, context, nextLoad) {
       if (url.startsWith('file:') && url.endsWith('.ts')) {
         const filePath = fileURLToPath(url);
-        // The transpiler's own pinned compiler, resolved from the target
+        // The frontend's own pinned compiler, resolved from the target
         // module's location (packages/core/node_modules after the taught
-        // `npm ci`, or the dependency npm installed beside the CLI). The
-        // ALIAS is required directly — not the @typescript/typescript6
-        // wrapper — because the wrapper's re-export resolves
-        // "@typescript/old" from the WRAPPER's own location, where a
-        // consumer tree's conflicting hoisted copy would win nearest-wins
-        // over our exact pin; resolving from the target finds our own
-        // nested/hoisted pin first (same reasoning as typed_ast.ts).
+        // `npm ci`, or the dependency npm installed beside the CLI):
+        // resolving from the target finds our own nested/hoisted exact
+        // pin first, so a consumer tree's conflicting hoisted typescript
+        // never wins nearest-wins over it (same reasoning as
+        // typed_ast.ts).
         if (ts === null) {
           try {
             ts = createRequire(targetPath)('@typescript/old');

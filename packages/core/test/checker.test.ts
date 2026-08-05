@@ -2,7 +2,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { checkOnly, ruleIds, transpile, transpileFiles } from "./helpers.ts";
+import { checkOnly, ruleIds, check, checkFiles } from "./helpers.ts";
 
 const core = `
 export interface Model { readonly count: number; }
@@ -267,7 +267,7 @@ test("NS1013 eval and dynamic import", () => {
 });
 
 test("NS1035 runtime npm import (module boundary rules live in the graph resolver)", () => {
-  const result = transpile(`import x from "some-npm-package";\nexport const y = x;`);
+  const result = check(`import x from "some-npm-package";\nexport const y = x;`);
   assert.equal(result.ok, false);
   const d = result.diagnostics.find((x) => x.id === "NS1035");
   assert.ok(d, `got ${result.diagnostics.map((x) => x.id)}`);
@@ -277,12 +277,12 @@ test("NS1035 runtime npm import (module boundary rules live in the graph resolve
 test("type-only npm imports are allowed by the graph resolver", () => {
   // The type-only edge erases at the boundary: no NS103x code fires (the
   // unresolvable package then surfaces as an ordinary tsc error).
-  const result = transpile(`import type { X } from "some-npm-package";\nexport const y = 1;`);
+  const result = check(`import type { X } from "some-npm-package";\nexport const y = 1;`);
   assert.equal(result.diagnostics.length, 0, `got ${result.diagnostics.map((x) => x.id)}`);
 });
 
 test("NS1037 a relative import must name a real .ts file", () => {
-  const result = transpile(`import { helper } from "./helper_mod";\nexport const y = helper;`);
+  const result = check(`import { helper } from "./helper_mod";\nexport const y = helper;`);
   assert.equal(result.ok, false);
   const d = result.diagnostics.find((x) => x.id === "NS1037");
   assert.ok(d, `got ${result.diagnostics.map((x) => x.id)}`);
@@ -1031,7 +1031,7 @@ export function update(model: Model, msg: Msg): Model {
 
   // An unexported reserved const in an imported module is inert
   // configuration and refuses like the exported form.
-  const imported = transpileFiles({
+  const imported = checkFiles({
     "core.ts": `
 import { other } from "./lists.ts";
 export interface Model { readonly n: number; readonly hidden: number; }
@@ -1044,35 +1044,41 @@ export function update(model: Model, msg: Msg): Model { return model; }
   assert.equal(imported.ok, false);
   assert.ok(imported.diagnostics.some((d) => d.id === "NS1014"), JSON.stringify(imported.diagnostics));
 
-  // The split pair restates viewUnbound's facts: an unresolvable entry
-  // and a missing one both refuse.
-  const unresolvable = transpile(`
+  // An unresolvable viewUnbound entry refuses at check time — the
+  // opt-out lint stays honest for state only update logic touches.
+  const unresolvable = check(`
 export interface Model { readonly n: number; readonly hidden: number; }
 export type Msg = { readonly kind: "a" } | { readonly kind: "b" };
-export const viewUnbound = ["hidden"] as const;
-export const modelUnbound = ["nope"] as const;
+export const viewUnbound = ["hidden", "nope"] as const;
 export function initialModel(): Model { return { n: 0, hidden: 1 }; }
 export function update(model: Model, msg: Msg): Model { return model; }
 `);
   assert.equal(unresolvable.ok, false);
   assert.ok(unresolvable.diagnostics.some((d) => d.id === "NS1032"), JSON.stringify(unresolvable.diagnostics));
 
-  const missing = transpile(`
+  // Entries resolve by side: a msg-arm spelling lands on the msg list.
+  const split = check(
+    `
 export interface Model { readonly n: number; readonly hidden: number; }
 export type Msg = { readonly kind: "a" } | { readonly kind: "probe"; readonly value: number };
 export const viewUnbound = ["hidden", "probe"] as const;
-export const msgUnbound = [] as const;
 export function initialModel(): Model { return { n: 0, hidden: 1 }; }
 export function update(model: Model, msg: Msg): Model { return model; }
-`);
-  assert.equal(missing.ok, false);
-  assert.ok(missing.diagnostics.some((d) => d.id === "NS1032"), JSON.stringify(missing.diagnostics));
+`,
+    { contractEntry: "core.ts" },
+  );
+  assert.equal(split.ok, true);
+  assert.ok(split.contract!.includes('"model_unbound": ["hidden"]'), split.contract!);
+  assert.ok(split.contract!.includes('"unbound": ["probe"]'), split.contract!);
 });
 
 test("NS1061: generic and literal-asserted identity stop; enum-kind records stay structs", () => {
-  // Identity through a generic instantiation stops at emission with the
-  // same teaching the checker gives directly.
-  const generic = transpile(`
+  // Identity through a generic instantiation used to stop at emission
+  // (the removed TS-to-Zig emitter re-derived NS1061 during
+  // monomorphization); the frontend accepts the generic form now — the
+  // external core compiler carries the real JS reference-identity
+  // semantics — while the direct form below still teaches at check.
+  const generic = check(`
 export type Pos = { readonly x: number };
 export interface Model { readonly pos: Pos; readonly n: number; }
 export type Msg = { readonly kind: "moved"; readonly pos: Pos } | { readonly kind: "b" };
@@ -1085,8 +1091,7 @@ export function update(model: Model, msg: Msg): Model {
   return model;
 }
 `);
-  assert.equal(generic.ok, false);
-  assert.ok(generic.diagnostics.some((d) => d.id === "NS1061"), JSON.stringify(generic.diagnostics));
+  assert.equal(generic.ok, true);
 
   // An assertion may be what NAMES the record: both views are read, so
   // literal-asserted operands refuse at check time.

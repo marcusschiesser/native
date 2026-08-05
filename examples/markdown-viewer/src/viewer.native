@@ -79,7 +79,7 @@
            keeps its place across every rebuild. -->
       <scroll grow="1" value="{doc_scroll}" on-scroll="doc_scrolled" label="Preview">
         <column padding="24">
-          <markdown source="{document}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" />
+          <markdown source="{document}" on-link="open_url" on-details="toggle_details" details-expanded="{details_expanded}" images="{markdownImages}" />
         </column>
       </scroll>
     </column>

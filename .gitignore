@@ -22,6 +22,7 @@ packages/native-sdk/build.zig.zon
 packages/native-sdk/app.zon
 packages/native-sdk/third_party/
 packages/native-sdk/packages/
+packages/native-sdk/tools/
 packages/native-sdk/LICENSE
 # npm pack output
 packages/native-sdk/*.tgz
