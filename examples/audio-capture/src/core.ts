@@ -39,6 +39,8 @@ export interface Model {
   readonly deviceListState: DeviceListState;
   readonly microphoneAccess: AccessStatus;
   readonly systemAccess: AccessStatus;
+  readonly microphoneRequestCompleted: boolean;
+  readonly captureAccessPending: boolean;
   readonly restartRequired: boolean;
 }
 
@@ -55,9 +57,10 @@ export type Msg =
   | { readonly kind: "capture_event"; readonly key: Uint8Array; readonly state: CaptureState; readonly reason: CaptureReason; readonly sampleRate: number; readonly channels: number; readonly availableFrames: number; readonly capacityFrames: number; readonly framesProduced: number }
   | { readonly kind: "capture_read"; readonly key: Uint8Array; readonly state: ReadState; readonly reason: ReadReason; readonly sequence: number; readonly frameOffset: number; readonly frames: number; readonly systemPcm: Uint8Array; readonly microphonePcm: Uint8Array; readonly systemGapFrames: number; readonly microphoneGapFrames: number; readonly remainingFrames: number; readonly endOfStream: boolean }
   | { readonly kind: "microphone_device"; readonly key: Uint8Array; readonly state: DeviceState; readonly id: Uint8Array; readonly name: Uint8Array; readonly isDefault: boolean; readonly index: number; readonly total: number }
-  | { readonly kind: "capture_access"; readonly key: Uint8Array; readonly source: AccessSource; readonly status: AccessStatus; readonly restartRequired: boolean };
+  | { readonly kind: "capture_access_status"; readonly key: Uint8Array; readonly source: AccessSource; readonly status: AccessStatus; readonly restartRequired: boolean }
+  | { readonly kind: "microphone_access_requested"; readonly key: Uint8Array; readonly source: AccessSource; readonly status: AccessStatus; readonly restartRequired: boolean };
 
-export const viewUnbound = ["microphones_changed", "capture_event", "capture_read", "microphone_device", "capture_access", "readPending", "terminalSeen"] as const;
+export const viewUnbound = ["microphones_changed", "capture_event", "capture_read", "microphone_device", "capture_access_status", "microphone_access_requested", "readPending", "terminalSeen", "microphoneRequestCompleted", "captureAccessPending"] as const;
 
 function emptyModel(): Model {
   return {
@@ -79,6 +82,8 @@ function emptyModel(): Model {
     deviceListState: "loading",
     microphoneAccess: "not_determined",
     systemAccess: "not_determined",
+    microphoneRequestCompleted: false,
+    captureAccessPending: true,
     restartRequired: false,
   };
 }
@@ -117,7 +122,7 @@ function pcmPeak(pcm: Uint8Array): number {
 }
 
 export function combinedStartDisabled(model: Model): boolean {
-  return model.captureMode !== "none" || model.systemAccess !== "authorized" || model.microphoneAccess !== "authorized";
+  return model.captureMode !== "none" || model.systemAccess !== "authorized" || model.microphoneAccess !== "authorized" || !model.microphoneRequestCompleted;
 }
 
 export function systemStartDisabled(model: Model): boolean {
@@ -125,7 +130,11 @@ export function systemStartDisabled(model: Model): boolean {
 }
 
 export function microphoneStartDisabled(model: Model): boolean {
-  return model.captureMode !== "none" || model.microphoneAccess !== "authorized";
+  return model.captureMode !== "none" || model.microphoneAccess !== "authorized" || !model.microphoneRequestCompleted;
+}
+
+export function captureAccessActionDisabled(model: Model): boolean {
+  return model.captureAccessPending;
 }
 
 export function stopDisabled(model: Model): boolean {
@@ -152,8 +161,7 @@ export function initialModel(): [Model, Command<Msg>] {
   return [
     emptyModel(),
     Cmd.batch([
-      Cmd.captureAccess("mic-access", "microphone", "status", { event: "capture_access" }),
-      Cmd.captureAccess("system-access", "system_audio", "status", { event: "capture_access" }),
+      Cmd.captureAccess("mic-access", "microphone", "status", { event: "capture_access_status" }),
       Cmd.microphoneDevices("microphones", { event: "microphone_device" }),
     ]),
   ];
@@ -204,9 +212,9 @@ export function update(model: Model, msg: Msg): [Model, Command<Msg>] {
     case "microphones_changed":
       return [{ ...model, microphones: [], deviceListState: "loading" }, Cmd.microphoneDevices("microphones", { event: "microphone_device" })];
     case "request_microphone":
-      return [model, Cmd.captureAccess("mic-access", "microphone", "request", { event: "capture_access" })];
+      return [{ ...model, microphoneRequestCompleted: false, captureAccessPending: true }, Cmd.captureAccess("mic-access", "microphone", "request", { event: "microphone_access_requested" })];
     case "request_system_audio":
-      return [model, Cmd.captureAccess("system-access", "system_audio", "request", { event: "capture_access" })];
+      return [{ ...model, captureAccessPending: true }, Cmd.captureAccess("system-access", "system_audio", "request", { event: "capture_access_status" })];
     case "capture_event": {
       const terminal = msg.state === "stopped" || msg.state === "failed";
       const next: Model = {
@@ -253,11 +261,13 @@ export function update(model: Model, msg: Msg): [Model, Command<Msg>] {
         }, Cmd.none];
       }
       return [{ ...model, deviceListState: msg.state }, Cmd.none];
-    case "capture_access":
+    case "capture_access_status":
       if (msg.source === "microphone") {
-        return [{ ...model, microphoneAccess: msg.status }, Cmd.none];
+        return [{ ...model, microphoneAccess: msg.status }, Cmd.captureAccess("system-access", "system_audio", "status", { event: "capture_access_status" })];
       }
-      return [{ ...model, systemAccess: msg.status, restartRequired: msg.restartRequired }, Cmd.none];
+      return [{ ...model, systemAccess: msg.status, captureAccessPending: false, restartRequired: msg.restartRequired }, Cmd.none];
+    case "microphone_access_requested":
+      return [{ ...model, microphoneAccess: msg.status, microphoneRequestCompleted: true, captureAccessPending: false }, Cmd.none];
   }
 }
 
