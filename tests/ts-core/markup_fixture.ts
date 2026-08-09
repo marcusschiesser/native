@@ -19,6 +19,7 @@ import {
   type FrameEvent,
   type KeyEvent,
   type PinchEvent,
+  type FileDropEvent,
   type ColorScheme,
   type ChromeInsets,
   type ChromeButtons,
@@ -126,6 +127,16 @@ function pinchMsg(pinch: PinchEvent): Msg | null {
   return { kind: "zoomed", factor: 1 + pinch.scale, windowId: pinch.windowId, fromBoard: pinch.label === "ts-markup-canvas" };
 }
 export { pinchMsg };
+
+/// The app-level file-drop channel carries source identity, an optional
+/// view-local point, and every path as byte text. Gate on all structural
+/// fields here so the e2e delivery proves the whole record crossed.
+export function dropMsg(drop: FileDropEvent): Msg | null {
+  if (drop.windowId !== 1 || drop.viewLabel !== "ts-markup-canvas") return null;
+  if (drop.point === null || drop.point.x !== 12.5 || drop.point.y !== 24.25) return null;
+  if (drop.paths.length === 0) return null;
+  return { kind: "banner_set", value: drop.paths[0] };
+}
 
 export const appearanceMsg = "appearance_changed";
 export const chromeMsg = "chrome_changed";

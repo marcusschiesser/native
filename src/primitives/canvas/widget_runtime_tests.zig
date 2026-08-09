@@ -224,6 +224,7 @@ const DesignTokens = support.DesignTokens;
 const WidgetKind = support.WidgetKind;
 const WidgetCursor = support.WidgetCursor;
 const WidgetState = support.WidgetState;
+const WidgetLayoutMotion = support.WidgetLayoutMotion;
 const WidgetRenderState = support.WidgetRenderState;
 const WidgetMainAlignment = support.WidgetMainAlignment;
 const WidgetCrossAlignment = support.WidgetCrossAlignment;
@@ -604,6 +605,10 @@ test "widget render state dirty bounds tracks changed runtime states" {
     );
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 2 }, .{ .focused_id = 2 }) == null);
     try std.testing.expect(layout.renderStateDirtyBounds(.{ .focused_id = 99 }, .{ .focused_id = 100 }) == null);
+    try expectRect(
+        geometry.RectF.init(0, 0, 160, 140),
+        layout.renderStateDirtyBounds(.{}, .{ .drag_preview_id = 2, .drag_preview_offset = geometry.OffsetF.init(80, 4) }),
+    );
 }
 
 test "widget render state dirty bounds tracks terminal logical focus" {
@@ -2622,6 +2627,173 @@ test "widget layout emission can render runtime focus state" {
     }
     try std.testing.expect(saw_runtime_focus);
     try std.testing.expect(!saw_stale_focus);
+}
+
+test "widget layout emission paints the opaque dragged item with distinct ids" {
+    const item_children = [_]Widget{.{
+        .id = 3,
+        .kind = .text,
+        .text = "Drag me",
+    }};
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .row,
+        .frame = geometry.RectF.init(12, 16, 120, 36),
+        .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+        .children = &item_children,
+    }};
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{
+        .drag_preview_id = 2,
+        .drag_preview_origin = geometry.PointF.init(32, 25),
+        .drag_preview_offset = geometry.OffsetF.init(48, 7),
+    });
+    const display_list = builder.displayList();
+
+    var saw_preview_opacity = false;
+    var saw_preview_translation = false;
+    var saw_preview_inverse = false;
+    for (display_list.commands) |command| switch (command) {
+        .push_opacity => |opacity| saw_preview_opacity = saw_preview_opacity or opacity == 0.82,
+        .transform => |transform| {
+            saw_preview_translation = saw_preview_translation or affinesEqual(transform, Affine.translate(68, 16));
+            saw_preview_inverse = saw_preview_inverse or affinesEqual(transform, Affine.translate(-68, -16));
+        },
+        else => {},
+    };
+    try std.testing.expect(!saw_preview_opacity);
+    try std.testing.expect(saw_preview_translation);
+    try std.testing.expect(saw_preview_inverse);
+
+    // Diff validation rejects duplicate object ids. The source and its
+    // preview therefore occupy independent retained-command namespaces.
+    var changes: [16]DiffChange = undefined;
+    const added = try DisplayList.diff(.{}, display_list, &changes);
+    try std.testing.expect(added.len > 0);
+}
+
+test "floating drag preview preserves its ancestor transform stack" {
+    const card_children = [_]Widget{.{
+        .id = 4,
+        .kind = .text,
+        .text = "Scaled card",
+    }};
+    const transformed_children = [_]Widget{.{
+        .id = 3,
+        .kind = .row,
+        .frame = geometry.RectF.init(12, 16, 120, 36),
+        .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+        .children = &card_children,
+    }};
+    const ancestor_transform = Affine.translate(24, 11).multiply(Affine.scale(1.25, 0.8));
+    const root_children = [_]Widget{.{
+        .id = 2,
+        .kind = .column,
+        .frame = geometry.RectF.init(0, 0, 180, 90),
+        .transform = ancestor_transform,
+        .children = &transformed_children,
+    }};
+    var nodes: [4]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &root_children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+
+    var commands: [24]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{
+        .drag_preview_id = 3,
+        .drag_preview_origin = geometry.PointF.init(nodes[2].frame.x, nodes[2].frame.y),
+        .drag_preview_offset = geometry.OffsetF.init(38, 7),
+    });
+
+    // The ordinary transformed container contributes one pair. The hoisted
+    // preview must contribute a second pair around its copied subtree; the
+    // previous window-level emission only carried the pointer translation.
+    const inverse = ancestor_transform.inverse().?;
+    var ancestor_count: usize = 0;
+    var inverse_count: usize = 0;
+    for (builder.displayList().commands) |command| switch (command) {
+        .transform => |transform| {
+            if (affinesEqual(transform, ancestor_transform)) ancestor_count += 1;
+            if (affinesEqual(transform, inverse)) inverse_count += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 2), ancestor_count);
+    try std.testing.expectEqual(@as(usize, 2), inverse_count);
+}
+
+test "widget layout emission applies presentation motion to a keyed draggable" {
+    const children = [_]Widget{.{
+        .id = 2,
+        .kind = .row,
+        .frame = geometry.RectF.init(12, 16, 120, 36),
+        .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+    }};
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &children }, geometry.RectF.init(0, 0, 240, 120), &nodes);
+    const layout_motions = [_]WidgetLayoutMotion{.{
+        .id = 2,
+        .offset = geometry.OffsetF.init(0, 9),
+    }};
+
+    var commands: [12]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{ .layout_motions = &layout_motions });
+
+    var saw_motion = false;
+    var saw_motion_inverse = false;
+    for (builder.displayList().commands) |command| switch (command) {
+        .transform => |transform| {
+            saw_motion = saw_motion or affinesEqual(transform, Affine.translate(0, 9));
+            saw_motion_inverse = saw_motion_inverse or affinesEqual(transform, Affine.translate(0, -9));
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_motion);
+    try std.testing.expect(saw_motion_inverse);
+}
+
+test "drag landing layout motion escapes its scroll lane clip" {
+    const cards = [_]Widget{.{
+        .id = 3,
+        .kind = .row,
+        .frame = geometry.RectF.init(12, 16, 120, 36),
+        .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+    }};
+    const columns = [_]Widget{.{
+        .id = 2,
+        .kind = .scroll_view,
+        .frame = geometry.RectF.init(10, 10, 140, 80),
+        .children = &cards,
+    }};
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .id = 1, .kind = .panel, .children = &columns }, geometry.RectF.init(0, 0, 320, 140), &nodes);
+    const layout_motions = [_]WidgetLayoutMotion{.{
+        .id = 3,
+        .offset = geometry.OffsetF.init(180, 0),
+        .escape_ancestor_clips = true,
+    }};
+
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{ .layout_motions = &layout_motions });
+
+    var clip_depth: usize = 0;
+    var saw_landing_motion = false;
+    for (builder.displayList().commands) |command| switch (command) {
+        .push_clip => clip_depth += 1,
+        .pop_clip => clip_depth -= 1,
+        .transform => |transform| {
+            if (!affinesEqual(transform, Affine.translate(180, 0))) continue;
+            saw_landing_motion = true;
+            try std.testing.expectEqual(@as(usize, 0), clip_depth);
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_landing_motion);
 }
 
 test "input-group wears the focus ring for its focused descendant" {

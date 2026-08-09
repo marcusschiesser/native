@@ -69,6 +69,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // so accordion reveals replay frame for frame exactly
                 // like split fractions do.
                 try self.advanceCanvasWidgetDisclosureTweenForFrame(index, frame_event.timestamp_ns);
+                // Drag-reflow FLIP offsets share the recorded clock. They
+                // move only presentation transforms; the retained layout is
+                // already the exact drop result used by hit testing.
+                try self.advanceCanvasWidgetDragLayoutMotionForFrame(index, frame_event.timestamp_ns);
                 // The anchored-tooltip hover-intent delay fires on the
                 // same recorded clock: a dwell past the delay shows its
                 // tooltip on a deterministic frame, replayed exactly.
@@ -296,6 +300,30 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 => null,
                 else => return err,
             };
+            // Resolve a draggable ancestor BEFORE the interaction pass can
+            // clear the raw pressed text id on release. A live widget drag
+            // owns text motion, so the text-selection pass below stands
+            // down instead of selecting the card label.
+            var widget_drag_event = CanvasWidgetEventMethods().routeCanvasWidgetDragInput(self, input_event, &self.widget_drag_event_route_entries) catch |err| switch (err) {
+                error.WindowNotFound,
+                error.ViewNotFound,
+                error.InvalidViewOptions,
+                => null,
+                else => return err,
+            };
+            // A terminal drag event exists only after the gesture crossed the
+            // runtime's drag slop. Pointer capture also routes this release to
+            // the original press target, so retire its click now: otherwise an
+            // element with both on_press and on_drag would activate before its
+            // drop Msg. A sub-slop release produces no drag event and keeps the
+            // ordinary press path intact.
+            const widget_drag_terminal = if (widget_drag_event) |drag_event|
+                drag_event.drag.phase == .end or drag_event.drag.phase == .cancel
+            else
+                false;
+            if (widget_drag_terminal) {
+                if (widget_pointer_event) |*pointer_event| pointer_event.press_target = null;
+            }
             var dismissed_surface_id: canvas.ObjectId = 0;
             var window_drag_started = false;
             if (widget_pointer_event) |*pointer_event| {
@@ -324,22 +352,21 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     // pointer really went down.
                     try CanvasWidgetEventMethods().reconcileCanvasTooltipIntentForConsumedPointerInput(self, input_event);
                 } else {
-                    try CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event.*);
+                    // The same click-vs-drag arbitration covers runtime-owned
+                    // activation (checkbox/toggle state), not only app Msgs and
+                    // commands. Geometry controls applied their live resize on
+                    // move; a terminal drag owes no release mutation.
+                    if (!widget_drag_terminal) try CanvasWidgetEventMethods().updateCanvasWidgetControlFromPointer(self, pointer_event.*);
                     try CanvasWidgetEventMethods().updateCanvasWidgetInteractionFromPointer(self, pointer_event.*);
                     // The text pass may stamp a caret/selection or clear
                     // edit onto the event for the app dispatch below.
-                    try CanvasWidgetEventMethods().updateCanvasWidgetTextFromPointer(self, pointer_event);
+                    if (widget_drag_event == null) {
+                        try CanvasWidgetEventMethods().updateCanvasWidgetTextFromPointer(self, pointer_event);
+                    }
                     try CanvasWidgetEventMethods().updateCanvasWidgetScrollFromPointer(self, pointer_event.*);
                     try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromPointer(self, pointer_event.*);
                 }
             }
-            const widget_drag_event = CanvasWidgetEventMethods().routeCanvasWidgetDragInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
-                error.WindowNotFound,
-                error.ViewNotFound,
-                error.InvalidViewOptions,
-                => null,
-                else => return err,
-            };
             // A live target-less composition owns its surface's
             // UNCHORDED keys wholesale, and it owns them BEFORE any
             // widget pass runs: on hosts that surface the key ahead of
@@ -372,17 +399,36 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 CanvasWidgetEventMethods().consumeCanvasWidgetTerminalPasteKeyLifetime(self, input_event);
             const widget_key_lifetime_suppressed =
                 tab_input_focus_entry_suppressed or terminal_paste_release_suppressed;
-            const keyboard_dismissed_id = if (targetless_composition_owns_keys or widget_key_lifetime_suppressed)
+            // Once an actual drag is live, plain Escape is its cancellation
+            // gesture. Resolve it after the input-method ownership test, but
+            // before dismissal/focus/widget-key routing, so one Escape has
+            // exactly one meaning and the app receives phase 2.
+            const widget_drag_escape_cancelled = drag_cancelled: {
+                if (targetless_composition_owns_keys or widget_key_lifetime_suppressed) break :drag_cancelled false;
+                const drag_cancel = CanvasWidgetEventMethods().routeCanvasWidgetDragCancelFromKeyboardInput(self, input_event, &self.widget_drag_event_route_entries) catch |err| switch (err) {
+                    error.WindowNotFound,
+                    error.ViewNotFound,
+                    error.InvalidViewOptions,
+                    => null,
+                    else => return err,
+                };
+                if (drag_cancel) |event| {
+                    widget_drag_event = event;
+                    break :drag_cancelled true;
+                }
+                break :drag_cancelled false;
+            };
+            const keyboard_dismissed_id = if (targetless_composition_owns_keys or widget_key_lifetime_suppressed or widget_drag_escape_cancelled)
                 0
             else
                 try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromKeyboardInput(self, input_event);
             if (keyboard_dismissed_id != 0) dismissed_surface_id = keyboard_dismissed_id;
             const widget_surface_dismissed = keyboard_dismissed_id != 0;
-            const widget_focus_moved = if (widget_surface_dismissed or targetless_composition_owns_keys or widget_key_lifetime_suppressed)
+            const widget_focus_moved = if (widget_surface_dismissed or targetless_composition_owns_keys or widget_key_lifetime_suppressed or widget_drag_escape_cancelled)
                 false
             else
                 try CanvasWidgetEventMethods().updateCanvasWidgetFocusFromKeyboardInput(self, input_event);
-            var widget_keyboard_event = if (widget_surface_dismissed or targetless_composition_owns_keys or widget_key_lifetime_suppressed)
+            var widget_keyboard_event = if (widget_surface_dismissed or targetless_composition_owns_keys or widget_key_lifetime_suppressed or widget_drag_escape_cancelled)
                 null
             else
                 CanvasWidgetEventMethods().routeCanvasWidgetKeyboardInput(self, input_event, &self.widget_event_route_entries) catch |err| switch (err) {
@@ -403,7 +449,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // may stamp a paste/cut edit onto the routed keyboard event;
             // the pasted bytes live in this frame until dispatch returns.
             var clipboard_paste_buffer: [platform.max_clipboard_data_bytes]u8 = undefined;
-            if (!widget_surface_dismissed) {
+            if (!widget_surface_dismissed and !widget_drag_escape_cancelled) {
                 try CanvasWidgetEventMethods().applyCanvasWidgetClipboardShortcut(
                     self,
                     input_event,
@@ -682,7 +728,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     try self.dispatchEvent(app, .{ .canvas_widget_keyboard = followup });
                 }
             } else if ((input_event.kind == .key_down or input_event.kind == .key_up) and
-                !widget_surface_dismissed and !widget_key_lifetime_suppressed)
+                !widget_surface_dismissed and !widget_key_lifetime_suppressed and !widget_drag_escape_cancelled)
             {
                 // No focused widget routed this key (nothing is
                 // focused, or the focused id is gone from the tree): the

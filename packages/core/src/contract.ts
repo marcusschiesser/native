@@ -584,6 +584,7 @@ class ContractEmitter {
     const hasFrame = this.entryExportedFunction("frameMsg") !== null;
     const hasKey = this.entryExportedFunction("keyMsg") !== null;
     const hasPinch = this.entryExportedFunction("pinchMsg") !== null;
+    const hasDrop = this.entryExportedFunction("dropMsg") !== null;
     const envMsgs = this.envMsgEntries()
       .map((e) => `{"env": ${js(e.env)}, "msg": ${js(e.msg)}}`)
       .join(", ");
@@ -610,6 +611,7 @@ class ContractEmitter {
     if (hasFrame) abiExports += ', "frame_msg"';
     if (hasKey) abiExports += ', "key_msg"';
     if (hasPinch) abiExports += ', "pinch_msg"';
+    if (hasDrop) abiExports += ', "drop_msg"';
 
     const typesJson =
       `{\n    "structs": [\n      ${structs}\n    ],\n` +
@@ -637,7 +639,7 @@ class ContractEmitter {
       `\x00exports=${abiExports}` +
       `\x00flags=${boolJson(initReturnsCmd)}${boolJson(updateReturnsCmd)}` +
       `${boolJson(hasSubscriptions)}${boolJson(hasCommand)}${boolJson(hasFrame)}` +
-      `${boolJson(hasKey)}${boolJson(hasPinch)}`;
+      `${boolJson(hasKey)}${boolJson(hasPinch)}${boolJson(hasDrop)}`;
     const surfaceBytes = new TextEncoder().encode(surface);
     const sourceHash = wyhashHex(0x5eedc0den, surfaceBytes);
     const buildId = wyhashHex(0xb11d1d00n, surfaceBytes);
@@ -666,6 +668,7 @@ class ContractEmitter {
       `    "frame_msg": ${boolJson(hasFrame)},\n` +
       `    "key_msg": ${boolJson(hasKey)},\n` +
       `    "pinch_msg": ${boolJson(hasPinch)},\n` +
+      `    "drop_msg": ${boolJson(hasDrop)},\n` +
       `    "appearance_msg": ${appearance},\n` +
       `    "chrome_msg": ${chrome},\n` +
       `    "env_msgs": [${envMsgs}]\n` +

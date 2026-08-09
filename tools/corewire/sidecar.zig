@@ -158,6 +158,7 @@ pub const Channels = struct {
     frame_msg: bool,
     key_msg: bool,
     pinch_msg: bool,
+    drop_msg: bool,
     appearance_msg: ?[]const u8,
     chrome_msg: ?[]const u8,
     env_msgs: []const EnvMsg,
@@ -217,7 +218,7 @@ pub const Sidecar = struct {
 /// canonical order the sidecar's `abi.exports` must list them: the two
 /// identity getters, then the mode-provided entries (sink registration,
 /// init, collect, result reset), then the program's entry-point map
-/// (core_abi.zig binds the matching extern signatures). The four
+/// (core_abi.zig binds the matching extern signatures). The five
 /// conditional channel-entry suffixes follow, present exactly when the
 /// matching channel is wired.
 pub const unconditional_exports = [_][]const u8{
@@ -247,6 +248,7 @@ pub const conditional_exports = [_][]const u8{
     "frame_msg",
     "key_msg",
     "pinch_msg",
+    "drop_msg",
 };
 
 // ------------------------------------------------------------ reading
@@ -489,6 +491,8 @@ const Mapper = struct {
             return self.diags.fail("format", "this reader implements sidecar format {d}, found {d} — upgrade the SDK tooling or pin the compiler release that matches it", .{ supported_format, format });
         }
 
+        const abi = try self.mapAbi(try top.get("abi"));
+        const channels = try self.mapChannels(try top.get("channels"), abiHasExport(abi, "drop_msg"));
         return .{
             .format = format,
             .wire_version = try self.integer(try top.get("wire_version"), "wire_version"),
@@ -507,8 +511,8 @@ const Mapper = struct {
             .init_returns_bare = try self.optionalBoolean(top.map, "init_returns_bare", "", false),
             .update_returns_bare = try self.optionalBoolean(top.map, "update_returns_bare", "", false),
             .has_subscriptions = try self.boolean(try top.get("has_subscriptions"), "has_subscriptions"),
-            .channels = try self.mapChannels(try top.get("channels")),
-            .abi = try self.mapAbi(try top.get("abi")),
+            .channels = channels,
+            .abi = abi,
             .integer_slots = try self.mapIntegerSlots(try top.get("integer_slots")),
             .deterministic = try self.boolean(try top.get("deterministic"), "deterministic"),
             .async_free = try self.boolean(try top.get("async_free"), "async_free"),
@@ -777,9 +781,9 @@ const Mapper = struct {
         return self.diags.fail(self.path("{s}.kind", .{at}), "unknown payload descriptor kind \"{s}\" — this reader is too old for this sidecar; upgrade the SDK tooling or pin the compiler release it was built for (half-understanding a message arm is how wrong dispatch ships)", .{kind});
     }
 
-    fn mapChannels(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }!Channels {
+    fn mapChannels(self: *Mapper, value: std.json.Value, drop_default: bool) error{ Refused, OutOfMemory }!Channels {
         const entry = try self.members(value, "channels", &.{
-            "command_msg", "frame_msg", "key_msg", "pinch_msg", "appearance_msg", "chrome_msg", "env_msgs",
+            "command_msg", "frame_msg", "key_msg", "pinch_msg", "drop_msg", "appearance_msg", "chrome_msg", "env_msgs",
         });
         entry.warnUnknown();
         const env_value = try self.array(try entry.get("env_msgs"), "channels.env_msgs");
@@ -798,6 +802,11 @@ const Mapper = struct {
             .frame_msg = try self.boolean(try entry.get("frame_msg"), "channels.frame_msg"),
             .key_msg = try self.boolean(try entry.get("key_msg"), "channels.key_msg"),
             .pinch_msg = try self.boolean(try entry.get("pinch_msg"), "channels.pinch_msg"),
+            // Additive over the pinned compiler's format-1 emitter: older
+            // compilers preserve the profile-declared ABI export but do not
+            // know this channel fact yet, so the export list is its honest
+            // compatibility default. New frontend sidecars state it directly.
+            .drop_msg = try self.optionalBoolean(entry.map, "drop_msg", "channels", drop_default),
             .appearance_msg = try self.armNameOrNull(try entry.get("appearance_msg"), "channels.appearance_msg"),
             .chrome_msg = try self.armNameOrNull(try entry.get("chrome_msg"), "channels.chrome_msg"),
             .env_msgs = env_msgs,
@@ -1391,7 +1400,11 @@ pub fn findArm(msg: Msg, name: []const u8) ?*const MsgArm {
 }
 
 fn exportListed(sidecar: Sidecar, suffix: []const u8) bool {
-    for (sidecar.abi.exports) |entry| {
+    return abiHasExport(sidecar.abi, suffix);
+}
+
+fn abiHasExport(abi: Abi, suffix: []const u8) bool {
+    for (abi.exports) |entry| {
         if (std.mem.eql(u8, entry, suffix)) return true;
     }
     return false;
@@ -1431,6 +1444,7 @@ fn validateChannels(sidecar: Sidecar, diags: *Diagnostics) void {
         .{ .name = "frame_msg", .wired = sidecar.channels.frame_msg },
         .{ .name = "key_msg", .wired = sidecar.channels.key_msg },
         .{ .name = "pinch_msg", .wired = sidecar.channels.pinch_msg },
+        .{ .name = "drop_msg", .wired = sidecar.channels.drop_msg },
     };
     for (function_channels) |channel| {
         const listed = exportListed(sidecar, channel.name);
@@ -1844,6 +1858,7 @@ pub const minimal_valid_json =
     \\    "frame_msg": false,
     \\    "key_msg": false,
     \\    "pinch_msg": false,
+    \\    "drop_msg": false,
     \\    "appearance_msg": null,
     \\    "chrome_msg": null,
     \\    "env_msgs": []
@@ -1864,6 +1879,21 @@ pub const minimal_valid_json =
     \\  "async_free": true
     \\}
 ;
+
+test "drop_msg infers from the ABI export for older format-1 emitters" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // The pinned external compiler predates the additive channel flag but
+    // preserves profile-declared exports in the authoritative ABI list.
+    var source = try std.mem.replaceOwned(u8, arena, minimal_valid_json, "    \"drop_msg\": false,\n", "");
+    source = try std.mem.replaceOwned(u8, arena, source, "      \"helper_call\"]", "      \"helper_call\", \"drop_msg\"]");
+    var diags = Diagnostics{ .arena = arena };
+    const parsed = try read(arena, source, &diags);
+    try std.testing.expect(parsed.channels.drop_msg);
+    try std.testing.expectEqual(@as(usize, 0), diags.list.items.len);
+}
 
 test "effective sidecar carries f64 demotions into its type table and attestations" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);

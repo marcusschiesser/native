@@ -164,8 +164,69 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
     scrim_viewport = widgetLayoutRootBounds(layout);
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
+    try emitWidgetLayoutClipEscapingMotions(builder, layout, tokens, state);
     try emitWidgetLayoutAnchored(builder, layout, tokens, state);
     try emitWidgetLayoutChartHoverDetails(builder, layout, tokens, state);
+    try emitWidgetLayoutDragPreview(builder, layout, tokens, state);
+}
+
+/// Pointer-up replaces the window-level drag preview with a FLIP landing.
+/// Paint that one moving subtree in the same unclipped coordinate space until
+/// its offset reaches zero, so crossing into another scroll lane does not crop
+/// the card at the destination lane's bounds. Other layout motions stay in the
+/// ordinary tree walk and retain their scroll clipping.
+fn emitWidgetLayoutClipEscapingMotions(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    for (layout.nodes, 0..) |node, index| {
+        if (widget_tree.widgetIsAnchored(node.widget)) continue;
+        if (!state.layoutMotionEscapesAncestorClips(node.widget.id)) continue;
+        if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
+        if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
+
+        const ancestor_transform = widgetLayoutNodeAncestorEmissionTransform(layout, index) orelse return error.InvalidTransform;
+        const wrap_ancestor_transform = !affinesEqual(ancestor_transform, Affine.identity());
+        const inverse_ancestor_transform = if (wrap_ancestor_transform) ancestor_transform.inverse() orelse return error.InvalidTransform else Affine.identity();
+        if (wrap_ancestor_transform) try builder.transform(ancestor_transform);
+        try emitWidgetLayoutNode(builder, layout, index, tokens, state, .none);
+        if (wrap_ancestor_transform) try builder.transform(inverse_ancestor_transform);
+    }
+}
+
+/// Paint the active drag source in a late, window-level pass so the card under
+/// the pointer escapes its column's clip. Normal emission suppresses this
+/// subtree, leaving its one current layout slot blank.
+fn emitWidgetLayoutDragPreview(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    const source_id = state.drag_preview_id orelse return;
+    const source_index = widget_tree.widgetIndexById(layout, source_id) orelse return;
+    // Resizable panels and split dividers use semantic drag for their built-in
+    // geometry controls. Their retained frame already follows the pointer;
+    // painting a generic translated preview would duplicate the control.
+    if (!widgetKindUsesFloatingDragPreview(layout.nodes[source_index].widget.kind)) return;
+    if (widget_tree.isWidgetHiddenInAncestors(layout, source_index)) return;
+    if (widget_tree.isWidgetConcealedByDisclosure(layout, source_index)) return;
+
+    var preview_state = WidgetRenderState{
+        .rendering_drag_preview = true,
+    };
+    // Keep disclosure content in the preview in the same visible phase as
+    // the standing tree, while dropping focus/hover/press chrome from the
+    // floating copy itself.
+    preview_state.revealing_disclosure_ids = state.revealing_disclosure_ids;
+
+    const ancestor_transform = widgetLayoutNodeAncestorEmissionTransform(layout, source_index) orelse return error.InvalidTransform;
+    const wrap_ancestor_transform = !affinesEqual(ancestor_transform, Affine.identity());
+    const inverse_ancestor_transform = if (wrap_ancestor_transform) ancestor_transform.inverse() orelse return error.InvalidTransform else Affine.identity();
+    const current_frame = layout.nodes[source_index].frame.normalized();
+    const current_origin = ancestor_transform.transformPoint(geometry.PointF.init(current_frame.x, current_frame.y));
+    const source_layout_origin = state.drag_preview_origin orelse geometry.PointF.init(current_frame.x, current_frame.y);
+    const source_origin = ancestor_transform.transformPoint(source_layout_origin);
+    const translate_x = source_origin.x + state.drag_preview_offset.dx - current_origin.x;
+    const translate_y = source_origin.y + state.drag_preview_offset.dy - current_origin.y;
+    const translation = Affine.translate(translate_x, translate_y);
+    try builder.transform(translation);
+    if (wrap_ancestor_transform) try builder.transform(ancestor_transform);
+    try emitWidgetLayoutNode(builder, layout, source_index, tokens, preview_state, .none);
+    if (wrap_ancestor_transform) try builder.transform(inverse_ancestor_transform);
+    try builder.transform(Affine.translate(-translate_x, -translate_y));
 }
 
 /// The union of the layout's root-node frames: the whole laid-out
@@ -202,6 +263,18 @@ fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine
         transform = transform.multiply(widgetTransform(layout.nodes[indices[len]].widget));
     }
     return transform;
+}
+
+/// The transform stack a node inherits at its ordinary paint position. A
+/// drag preview is hoisted to the window-level late pass to escape clipping,
+/// so it must explicitly restore this stack before painting the source.
+/// Anchored nodes were already hoisted and therefore inherit no original
+/// ancestors there.
+fn widgetLayoutNodeAncestorEmissionTransform(layout: anytype, node_index: usize) ?Affine {
+    if (node_index >= layout.nodes.len) return null;
+    if (widget_tree.widgetIsAnchored(layout.nodes[node_index].widget)) return Affine.identity();
+    const parent_index = layout.nodes[node_index].parent_index orelse return Affine.identity();
+    return widgetLayoutNodeEmissionTransform(layout, parent_index);
 }
 
 /// The rectangular part of one layout node that can reach the surface,
@@ -535,7 +608,9 @@ fn emitWidgetLayoutChildren(
         const child_index = nextWidgetLayoutPaintChild(layout, parent_index, tokens, previous) orelse return;
         // Anchored floating children paint in the late z-pass
         // (`emitWidgetLayoutAnchored`), never in tree position.
-        if (!widget_tree.widgetIsAnchored(layout.nodes[child_index].widget)) {
+        if (!widget_tree.widgetIsAnchored(layout.nodes[child_index].widget) and
+            !state.layoutMotionEscapesAncestorClips(layout.nodes[child_index].widget.id))
+        {
             const segment = if (group_index) |index|
                 layoutButtonGroupSegment(layout, index, child_index)
             else
@@ -571,20 +646,38 @@ fn emitWidgetLayoutNode(
 ) Error!void {
     const node = layout.nodes[node_index];
     if (node.widget.semantics.hidden) return;
+    // During a drag the retained source remains in flow as the exact blank
+    // source slot. Its one visible rendering happens in the late floating
+    // pass above, fully opaque under the pointer.
+    if (!state.rendering_drag_preview and
+        state.drag_preview_id != null and
+        state.drag_preview_id.? == node.widget.id and
+        widgetKindUsesFloatingDragPreview(node.widget.kind)) return;
 
     var widget = widgetWithRenderState(widgetWithFrame(node.widget, node.frame), state);
     widget.group_segment = segment;
     const opacity = widgetOpacity(widget);
     if (opacity <= 0) return;
+    const layout_motion = state.layoutMotionOffset(widget.id);
+    const wrap_layout_motion = layout_motion.dx != 0 or layout_motion.dy != 0;
     const wrap_opacity = opacity < 1;
     const transform = widgetTransform(widget);
     const wrap_transform = !affinesEqual(transform, Affine.identity());
     const inverse_transform = if (wrap_transform) transform.inverse() orelse return error.InvalidTransform else Affine.identity();
     if (wrap_opacity) try builder.pushOpacity(opacity);
+    if (wrap_layout_motion) try builder.transform(Affine.translate(layout_motion.dx, layout_motion.dy));
     if (wrap_transform) try builder.transform(transform);
     try emitWidgetLayoutNodeContent(builder, layout, node_index, tokens, state, widget);
     if (wrap_transform) try builder.transform(inverse_transform);
+    if (wrap_layout_motion) try builder.transform(Affine.translate(-layout_motion.dx, -layout_motion.dy));
     if (wrap_opacity) try builder.popOpacity();
+}
+
+fn widgetKindUsesFloatingDragPreview(kind: WidgetKind) bool {
+    return switch (kind) {
+        .resizable, .split_divider => false,
+        else => true,
+    };
 }
 
 fn emitWidgetLayoutNodeContent(
@@ -4032,7 +4125,19 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
     if (state.pressed_id) |pressed_id| {
         copy.state.pressed = copy.id != 0 and copy.id == pressed_id;
     }
+    if (state.rendering_drag_preview and copy.id != 0) {
+        copy.id = dragPreviewWidgetId(copy.id);
+    }
     return copy;
+}
+
+/// A separate deterministic object-id namespace for preview paint commands.
+/// Widget emitters derive every command id from the widget id, so remapping
+/// each node before emission keeps the copied subtree valid for display-list
+/// diffing without changing its retained/accessibility identity.
+fn dragPreviewWidgetId(id: ObjectId) ObjectId {
+    const mapped = std.hash.Wyhash.hash(0x5eed_59a2_d6a6_0001, std.mem.asBytes(&id));
+    return if (mapped == 0) 0x5eed_59a2_d6a6_0001 else mapped;
 }
 
 /// The terminal cursor follows logical keyboard focus, not merely

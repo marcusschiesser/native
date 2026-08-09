@@ -574,6 +574,19 @@ test "the wiring channels drive the core: frame, key, appearance, and chrome" {
     try std.testing.expectEqual(@as(f64, 1), Bridge.model().zoomWindowId);
     try std.testing.expect(Bridge.model().zoomFromBoard);
 
+    // dropMsg: the runtime's app-level file-drop event crosses the final
+    // TS-core tier with its source, optional view-local point, and byte-text
+    // path list intact. The fixture gates on every field before mapping the
+    // first path into its existing banner Msg.
+    const dropped_paths = [_][]const u8{ "/tmp/first.txt", "/tmp/second.txt" };
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .files_dropped = .{
+        .window_id = 1,
+        .view_label = canvas_label,
+        .point = geometry.PointF.init(12.5, 24.25),
+        .paths = &dropped_paths,
+    } });
+    try std.testing.expectEqualStrings("/tmp/first.txt", Bridge.model().banner);
+
     // The automation pinch verb dispatches the same real events into the
     // compiled core: one gesture whose single change carries scale - 1
     // (the verb's <scale> is the FINAL multiplicative zoom).

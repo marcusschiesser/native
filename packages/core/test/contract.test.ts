@@ -32,6 +32,7 @@ function contractOf(source: string): Record<string, unknown> {
 
 const smallCore = `
 import { asciiBytes } from "@native-sdk/core";
+import { type FileDropEvent } from "@native-sdk/core/events";
 export type Role = "user" | "assistant";
 export interface Turn { id: number; role: Role; text: Uint8Array; }
 export interface Model { turns: readonly Turn[]; nextId: number; title: Uint8Array; }
@@ -41,6 +42,9 @@ export type Msg =
   | { kind: "fetched"; status: number; body: Uint8Array }
   | { kind: "role_set"; role: Role };
 export const envMsgs = [{ env: "APP_TITLE", msg: "rename" }] as const;
+export function dropMsg(drop: FileDropEvent): Msg | null {
+  return drop.paths.length > 0 ? { kind: "rename", title: drop.paths[0] } : null;
+}
 export function turnCount(model: Model): number { return model.turns.length; }
 export function initialModel(): Model {
   return { turns: [], nextId: 1, title: asciiBytes("hi") };
@@ -107,6 +111,7 @@ test("a small core's contract carries types, arms, slots, and channels", () => {
   const channels = doc.channels as Record<string, unknown>;
   assert.deepEqual(channels.env_msgs, [{ env: "APP_TITLE", msg: "rename" }]);
   assert.equal(channels.command_msg, false);
+  assert.equal(channels.drop_msg, true);
   assert.equal(doc.init_returns_cmd, false);
   assert.equal(doc.update_returns_cmd, false);
   assert.equal(doc.has_subscriptions, false);
@@ -114,6 +119,7 @@ test("a small core's contract carries types, arms, slots, and channels", () => {
   const abi = doc.abi as { prefix: string; exports: string[] };
   assert.equal(abi.prefix, "nsc_core_");
   assert.ok(!abi.exports.includes("command_msg"));
+  assert.ok(abi.exports.includes("drop_msg"));
 });
 
 test("multi-field arm payloads table under the synthesized record name", () => {

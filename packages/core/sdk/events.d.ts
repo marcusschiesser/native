@@ -31,6 +31,16 @@ export interface PinchEvent {
     readonly x: number;
     readonly y: number;
 }
+export interface FileDropPoint {
+    readonly x: number;
+    readonly y: number;
+}
+export interface FileDropEvent {
+    readonly windowId: number;
+    readonly viewLabel: string;
+    readonly point: FileDropPoint | null;
+    readonly paths: readonly Uint8Array[];
+}
 export type ColorScheme = "light" | "dark";
 export interface AppearanceEvent {
     readonly colorScheme: ColorScheme;

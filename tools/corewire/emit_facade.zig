@@ -111,7 +111,8 @@ const fixed_exports = [_][]const u8{
     "dispatch_bool",         "dispatch_enum",     "dispatch_record",   "dispatch_text_input",
     "dispatch_scroll_state", "abi_subscriptions", "model_snapshot",    "helper_call",
     "abi_command_msg",       "abi_frame_msg",     "abi_key_msg",       "abi_pinch_msg",
-    "appearanceMsg",         "chromeMsg",         "envMsgs",           "viewUnbound",
+    "abi_drop_msg",          "appearanceMsg",     "chromeMsg",         "envMsgs",
+    "viewUnbound",
 };
 
 /// Ambient VALUE bindings generated code calls directly. A model helper is
@@ -418,6 +419,9 @@ const FacadeEmitter = struct {
             }
             if (self.sidecar.channels.pinch_msg and std.mem.eql(u8, name, "PinchPhase")) {
                 self.diags.flag("types", "\"PinchPhase\" collides with the SDK vocabulary the wired pinch channel imports; rename the type in the core source", .{});
+            }
+            if (self.sidecar.channels.drop_msg and std.mem.eql(u8, name, "FileDropPoint")) {
+                self.diags.flag("types", "\"FileDropPoint\" collides with the SDK vocabulary the wired file-drop channel imports; rename the type in the core source", .{});
             }
         }
         // Arm, member, and field names become the compiled module's
@@ -764,6 +768,7 @@ const FacadeEmitter = struct {
         if (self.sidecar.channels.frame_msg) try values.append(self.arena, "frameMsg as nscfChanFrameMsg");
         if (self.sidecar.channels.key_msg) try values.append(self.arena, "keyMsg as nscfChanKeyMsg");
         if (self.sidecar.channels.pinch_msg) try values.append(self.arena, "pinchMsg as nscfChanPinchMsg");
+        if (self.sidecar.channels.drop_msg) try values.append(self.arena, "dropMsg as nscfChanDropMsg");
         for (self.sidecar.model_helpers) |helper| {
             try values.append(self.arena, try std.fmt.allocPrint(self.arena, "{s} as nscfH_{s}", .{ helper.name, helper.name }));
         }
@@ -811,6 +816,9 @@ const FacadeEmitter = struct {
         // events module, outside the contract tables).
         if (body.needs_pinch_phase) {
             try self.raw("import type { PinchPhase } from \"./sdk/events.ts\";\n");
+        }
+        if (self.sidecar.channels.drop_msg) {
+            try self.raw("import type { FileDropPoint } from \"./sdk/events.ts\";\n");
         }
         self.needs_pinch_phase = body.needs_pinch_phase;
     }
@@ -1542,7 +1550,7 @@ const FacadeEmitter = struct {
 
     fn channelEntries(self: *FacadeEmitter) Error!void {
         const chan = self.sidecar.channels;
-        if (!(chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg)) return;
+        if (!(chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg)) return;
         self.use(.sink);
         self.use(.trap);
         try self.print(
@@ -1643,6 +1651,53 @@ const FacadeEmitter = struct {
                 \\
             );
             self.needs_member_trap = true;
+        }
+        if (chan.drop_msg) {
+            self.use(.read_f64);
+            self.use(.read_u32);
+            self.use(.read_bool);
+            self.use(.read_bytes_body);
+            self.use(.assert_consumed);
+            self.use(.ascii_string);
+            try self.raw(
+                \\
+                \\export function abi_drop_msg(event: Uint8Array): Uint8Array {
+                \\  let at = 0;
+                \\  const windowId = nscfReadF64(event, at);
+                \\  at += 8;
+                \\  const viewLabelLen = nscfReadU32(event, at);
+                \\  at += 4;
+                \\  const viewLabel = nscfReadBytesBody(event, at, viewLabelLen);
+                \\  at += viewLabelLen;
+                \\  const pointPresent = nscfReadBool(event, at);
+                \\  at += 1;
+                \\  let point: FileDropPoint | null = null;
+                \\  if (pointPresent) {
+                \\    const x = nscfReadF64(event, at);
+                \\    at += 8;
+                \\    const y = nscfReadF64(event, at);
+                \\    at += 8;
+                \\    point = { x: x, y: y };
+                \\  }
+                \\  const pathCount = nscfReadU32(event, at);
+                \\  at += 4;
+                \\  const paths: Uint8Array[] = [];
+                \\  for (let i = 0; i < pathCount; i++) {
+                \\    const pathLen = nscfReadU32(event, at);
+                \\    at += 4;
+                \\    paths.push(nscfReadBytesBody(event, at, pathLen));
+                \\    at += pathLen;
+                \\  }
+                \\  nscfAssertConsumed(event, at);
+                \\  return nscfPackMsg(nscfChanDropMsg({
+                \\    windowId: windowId,
+                \\    viewLabel: nscfAsciiString(viewLabel),
+                \\    point: point,
+                \\    paths: paths,
+                \\  }));
+                \\}
+                \\
+            );
         }
     }
 

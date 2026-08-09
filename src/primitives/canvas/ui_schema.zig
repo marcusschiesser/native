@@ -112,7 +112,7 @@ pub const AttrInfo = struct {
 /// with an optional `{binding}` payload; the others require a bare tag
 /// whose payload the RUNTIME supplies (TextInputEvent, ScrollState, the
 /// split fraction, TerminalState).
-pub const EventPayload = enum { message, text_input, scroll_state, fraction, terminal_state };
+pub const EventPayload = enum { message, text_input, scroll_state, fraction, terminal_state, drag_drop };
 
 pub const EventInfo = struct {
     /// Stable code, assigned at birth, never reused. Nonzero.
@@ -617,6 +617,10 @@ pub const events = [_]EventInfo{
     // whose runtime-derived click count reached two dispatches this
     // channel in place of a second press.
     .{ .code = 14, .name = "double-press" },
+    // Release-time widget drag. The authored binding supplies sourceId;
+    // the runtime injects x/y and the receiving view dimensions into the
+    // closed drag-drop Msg record.
+    .{ .code = 15, .name = "drag", .payload = .drag_drop },
 };
 
 // ------------------------------------------------------- token vocabulary
