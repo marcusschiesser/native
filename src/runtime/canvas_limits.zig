@@ -315,6 +315,11 @@ pub const max_canvas_widget_loop_animations_per_view: usize = 64;
 /// dropping the state change (motion degrades, truth never does).
 pub const max_canvas_widget_layout_tweens_per_view: usize = 8;
 
+/// Draggable keyed widgets that may be displaced by one live insertion
+/// preview. This matches the practical card/list scale and, on overflow,
+/// extra items simply snap while the layout result still lands exactly.
+pub const max_canvas_widget_drag_layout_motions_per_view: usize = 64;
+
 /// Nodes one disclosure tween may move per view: a disclosure flip
 /// reflows the flipped item plus everything stacked below it (siblings,
 /// content-hugging ancestors, and THEIR following siblings), and the

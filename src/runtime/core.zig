@@ -330,6 +330,11 @@ pub const Runtime = struct {
     /// provenance table exists (builder-only apps, release engines).
     automation_provenance_published: bool = false,
     widget_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
+    /// Pointer and drag events from one physical input are dispatched
+    /// separately, so both routed paths must stay live until their dispatch.
+    /// In particular, the drag source can be an ancestor of the raw pointer
+    /// target and therefore has a different capture/target/bubble route.
+    widget_drag_event_route_entries: [canvas.max_widget_depth * 2]canvas.WidgetEventRouteEntry = undefined,
     /// The in-flight IME preedit for the TARGETLESS text path (an app
     /// consuming committed text with no focused text widget — a terminal
     /// grid): updated by `ime_set_composition`, delivered as committed
@@ -933,6 +938,7 @@ pub const Runtime = struct {
     pub const startCanvasWidgetLayoutTween = CanvasWidgetStateMethods.startCanvasWidgetLayoutTween;
     pub const advanceCanvasWidgetLayoutTweensForFrame = CanvasWidgetStateMethods.advanceCanvasWidgetLayoutTweensForFrame;
     pub const advanceCanvasWidgetDisclosureTweenForFrame = CanvasWidgetStateMethods.advanceCanvasWidgetDisclosureTweenForFrame;
+    pub const advanceCanvasWidgetDragLayoutMotionForFrame = CanvasWidgetStateMethods.advanceCanvasWidgetDragLayoutMotionForFrame;
     pub const setCanvasWidgetDesignTokens = CanvasWidgetStateMethods.setCanvasWidgetDesignTokens;
     pub const canvasWidgetDesignTokens = CanvasWidgetStateMethods.canvasWidgetDesignTokens;
     pub const canvasWidgetTextGeometry = CanvasWidgetStateMethods.canvasWidgetTextGeometry;

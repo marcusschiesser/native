@@ -388,9 +388,17 @@ pub const WidgetFileDropEvent = struct {
     paths: []const []const u8 = &.{},
 };
 
+pub const WidgetDragPhase = enum {
+    change,
+    end,
+    cancel,
+};
+
 pub const WidgetDragEvent = struct {
     source_id: ObjectId = 0,
+    phase: WidgetDragPhase = .change,
     point: geometry.PointF,
+    /// Total displacement from the pointer-down that began the gesture.
     delta: geometry.OffsetF = .{},
 };
 

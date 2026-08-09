@@ -124,6 +124,7 @@
     "frame_msg": true,
     "key_msg": true,
     "pinch_msg": true,
+    "drop_msg": true,
     "appearance_msg": "appearance_changed",
     "chrome_msg": "chrome_changed",
     "env_msgs": [
@@ -136,7 +137,7 @@
       "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
       "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
       "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-      "helper_call", "frame_msg", "key_msg", "pinch_msg"],
+      "helper_call", "frame_msg", "key_msg", "pinch_msg", "drop_msg"],
     "snapshot_format": 1
   },
   "integer_slots": [

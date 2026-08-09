@@ -51,6 +51,16 @@ const canvas_widget_multi_click_interval_ns: u64 = 500 * std.time.ns_per_ms;
 /// hand tremor keeps the chain, a click somewhere else breaks it.
 const canvas_widget_multi_click_slop: f32 = 4.0;
 
+/// Movement per axis (canvas points) that promotes a pressed draggable
+/// candidate into a live drag. Below this threshold pointer motion remains
+/// observable to the low-level drag channel, but it owns no floating preview,
+/// terminal phase, or landing animation — the release is still a click.
+pub const canvas_widget_drag_slop: f32 = 6.0;
+
+pub fn canvasWidgetDragCrossedSlop(delta: geometry.OffsetF) bool {
+    return @abs(delta.dx) >= canvas_widget_drag_slop or @abs(delta.dy) >= canvas_widget_drag_slop;
+}
+
 pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
     return struct {
         pub fn routeCanvasWidgetPointerInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetPointerEvent {
@@ -268,22 +278,251 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             };
         }
 
-        pub fn routeCanvasWidgetDragInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetDragEvent {
+        pub fn routeCanvasWidgetDragInput(self: *Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetDragEvent {
             try validateRuntimeViewParent(self, input_event.window_id);
-            if (input_event.kind != .pointer_drag) return null;
             try validateViewLabel(input_event.label);
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
-            const source_id = self.views[index].canvas_widget_pressed_id;
-            if (source_id == 0) return null;
+            const previous_render_state = self.views[index].canvasWidgetRenderState();
 
-            const drag = canvas.WidgetDragEvent{
-                .source_id = source_id,
-                .point = geometry.PointF.init(input_event.x, input_event.y),
-                .delta = geometry.OffsetF.init(input_event.delta_x, input_event.delta_y),
+            if (input_event.kind == .pointer_down) {
+                // A live drag belongs to the pointer that crossed slop. A
+                // second contact may still run the ordinary pointer pipeline,
+                // but it cannot silently erase the first contact's preview or
+                // strand the app after its phase-0 Msg.
+                if (self.views[index].canvas_widget_drag_source_id != 0) return null;
+                self.views[index].canvas_widget_drag_source_id = 0;
+                self.views[index].canvas_widget_drag_source_attached = false;
+                self.views[index].canvas_widget_drag_pointer_id = input_event.pointer_id;
+                self.views[index].canvas_widget_drag_start_point = geometry.PointF.init(input_event.x, input_event.y);
+                self.views[index].canvas_widget_drag_source_origin = .{};
+                self.views[index].canvas_widget_drag_delta = .{};
+                self.views[index].canvas_widget_drag_source_hit = null;
+                self.views[index].canvas_widget_drag_route_len = 0;
+                self.views[index].canvas_widget_drag_layout_motion_armed = false;
+                self.views[index].canvas_widget_drag_landing_source_id = 0;
+                self.views[index].canvas_widget_drag_landing_origin = .{};
+                const next_render_state = self.views[index].canvasWidgetRenderState();
+                if (!canvasWidgetRenderStatesEqual(previous_render_state, next_render_state)) {
+                    try invalidateForCanvasWidgetRenderStateChange(self, index, previous_render_state, next_render_state);
+                }
+                return null;
+            }
+            if (input_event.kind != .pointer_drag and input_event.kind != .pointer_up and input_event.kind != .pointer_cancel) return null;
+            // Pointer capture is per sequence. An unrelated touch/pen/mouse
+            // edge must not move or terminate the candidate/live drag.
+            if (input_event.pointer_id != self.views[index].canvas_widget_drag_pointer_id) return null;
+
+            const active_source = self.views[index].canvas_widget_drag_source_id;
+            // A release/cancel belongs to the drag channel only after motion
+            // crossed the slop and installed an active source. Until then it
+            // is the terminal edge of an ordinary click (or an abandoned
+            // press), so it must not arm a landing from the zero origin.
+            if (active_source == 0 and input_event.kind != .pointer_drag) {
+                self.views[index].canvas_widget_drag_pointer_id = 0;
+                return null;
+            }
+            const candidate_source = if (active_source != 0) active_source else self.views[index].canvas_widget_pressed_id;
+            if (candidate_source == 0) return null;
+
+            const point = geometry.PointF.init(input_event.x, input_event.y);
+            const phase: canvas.WidgetDragPhase = switch (input_event.kind) {
+                .pointer_drag => .change,
+                .pointer_up => .end,
+                .pointer_cancel => .cancel,
+                else => unreachable,
+            };
+
+            var drag = canvas.WidgetDragEvent{
+                .source_id = candidate_source,
+                .phase = phase,
+                .point = point,
+                .delta = geometry.OffsetF.init(
+                    point.x - self.views[index].canvas_widget_drag_start_point.x,
+                    point.y - self.views[index].canvas_widget_drag_start_point.y,
+                ),
             };
             const route = try self.views[index].widgetLayoutTree().routeDragEvent(drag, output);
-            if (route.target == null) return null;
+            if (route.target == null) {
+                // A source removed, hidden, or disabled after a live change
+                // still owes the consumer one terminal phase. Its last valid
+                // hit/route are POD snapshots owned by the view, so they stay
+                // usable after the retained layout was replaced.
+                const captured_source = self.views[index].canvas_widget_drag_source_hit;
+                const captured_route = self.views[index].canvas_widget_drag_route_entries[0..self.views[index].canvas_widget_drag_route_len];
+                self.views[index].canvas_widget_drag_source_id = 0;
+                self.views[index].canvas_widget_drag_source_attached = false;
+                self.views[index].canvas_widget_drag_pointer_id = 0;
+                self.views[index].canvas_widget_drag_source_origin = .{};
+                self.views[index].canvas_widget_drag_delta = .{};
+                self.views[index].canvas_widget_drag_source_hit = null;
+                self.views[index].canvas_widget_drag_route_len = 0;
+                if (active_source != 0) self.views[index].canvas_widget_pressed_id = 0;
+                self.views[index].canvas_widget_drag_landing_source_id = 0;
+                self.views[index].canvas_widget_drag_landing_origin = .{};
+                const next_render_state = self.views[index].canvasWidgetRenderState();
+                if (!canvasWidgetRenderStatesEqual(previous_render_state, next_render_state)) {
+                    try invalidateForCanvasWidgetRenderStateChange(self, index, previous_render_state, next_render_state);
+                }
+                if (active_source != 0 and captured_source != null) {
+                    drag.source_id = captured_source.?.id;
+                    drag.phase = .cancel;
+                    return .{
+                        .window_id = input_event.window_id,
+                        .view_label = self.views[index].label,
+                        .drag = drag,
+                        .source = captured_source,
+                        .route = captured_route,
+                    };
+                }
+                return null;
+            }
+            drag.source_id = route.target.?.id;
+            // Keep sub-slop motion on the low-level channel so draggable text
+            // still owns its selection gesture and existing observers retain
+            // pointer-drag fidelity. Do not promote it into runtime drag state:
+            // UiApp filters these change messages, and a matching release
+            // remains a press because no active source was installed.
+            if (active_source == 0 and !canvasWidgetDragCrossedSlop(drag.delta)) {
+                return .{
+                    .window_id = input_event.window_id,
+                    .view_label = self.views[index].label,
+                    .drag = drag,
+                    .source = route.target,
+                    .route = route.entries,
+                };
+            }
+            self.views[index].canvas_widget_drag_source_hit = route.target;
+            self.views[index].canvas_widget_drag_route_len = @min(route.entries.len, self.views[index].canvas_widget_drag_route_entries.len);
+            @memcpy(
+                self.views[index].canvas_widget_drag_route_entries[0..self.views[index].canvas_widget_drag_route_len],
+                route.entries[0..self.views[index].canvas_widget_drag_route_len],
+            );
+            // The app's Msg may rebuild into a different insertion pose.
+            // Arm exactly that adoption for FLIP motion, including terminal
+            // phases where the source itself moves into (or back from) the
+            // reserved slot.
+            self.views[index].canvas_widget_drag_layout_motion_armed = true;
+            if (phase == .change) {
+                self.views[index].canvas_widget_drag_landing_source_id = 0;
+                self.views[index].canvas_widget_drag_landing_origin = .{};
+                if (active_source == 0) {
+                    const source_bounds = route.target.?.bounds.normalized();
+                    self.views[index].canvas_widget_drag_source_origin = geometry.PointF.init(source_bounds.x, source_bounds.y);
+                }
+                self.views[index].canvas_widget_drag_source_id = drag.source_id;
+                self.views[index].canvas_widget_drag_source_attached = true;
+                self.views[index].canvas_widget_drag_delta = drag.delta;
+            } else {
+                const source_origin = self.views[index].canvas_widget_drag_source_origin;
+                self.views[index].canvas_widget_drag_landing_source_id = drag.source_id;
+                self.views[index].canvas_widget_drag_landing_origin = geometry.PointF.init(
+                    source_origin.x + drag.delta.dx,
+                    source_origin.y + drag.delta.dy,
+                );
+                self.views[index].canvas_widget_drag_source_id = 0;
+                self.views[index].canvas_widget_drag_source_attached = false;
+                self.views[index].canvas_widget_drag_pointer_id = 0;
+                self.views[index].canvas_widget_drag_source_origin = .{};
+                self.views[index].canvas_widget_drag_delta = .{};
+                self.views[index].canvas_widget_drag_source_hit = null;
+                self.views[index].canvas_widget_drag_route_len = 0;
+            }
+            const next_render_state = self.views[index].canvasWidgetRenderState();
+            if (!canvasWidgetRenderStatesEqual(previous_render_state, next_render_state)) {
+                try invalidateForCanvasWidgetRenderStateChange(self, index, previous_render_state, next_render_state);
+            }
+            return .{
+                .window_id = input_event.window_id,
+                .view_label = self.views[index].label,
+                .drag = drag,
+                .source = route.target,
+                .route = route.entries,
+            };
+        }
+
+        /// Plain Escape owns an active widget drag before the ordinary
+        /// keyboard pipeline can dismiss a surface or route the key. The
+        /// cancel carries the last pointer geometry, clears the physical
+        /// press latch so later motion/release cannot revive the gesture,
+        /// and hands the floating origin to the normal landing FLIP. The
+        /// app's phase-2 rebuild can therefore restore the source slot while
+        /// the card under the pointer eases back into it.
+        pub fn routeCanvasWidgetDragCancelFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetDragEvent {
+            if (input_event.kind != .key_down or !canvasWidgetEscapeKey(input_event.key)) return null;
+            const modifiers = canvasWidgetKeyboardModifiers(input_event.modifiers);
+            if (modifiers.shift or modifiers.hasNavigationModifier()) return null;
+
+            try validateRuntimeViewParent(self, input_event.window_id);
+            try validateViewLabel(input_event.label);
+            const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return error.ViewNotFound;
+            if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
+            const source_id = self.views[index].canvas_widget_drag_source_id;
+            if (source_id == 0) return null;
+
+            const previous_render_state = self.views[index].canvasWidgetRenderState();
+            const delta = self.views[index].canvas_widget_drag_delta;
+            const point = geometry.PointF.init(
+                self.views[index].canvas_widget_drag_start_point.x + delta.dx,
+                self.views[index].canvas_widget_drag_start_point.y + delta.dy,
+            );
+            var drag = canvas.WidgetDragEvent{
+                .source_id = source_id,
+                .phase = .cancel,
+                .point = point,
+                .delta = delta,
+            };
+            const route = try self.views[index].widgetLayoutTree().routeDragEvent(drag, output);
+            if (route.target == null) {
+                const captured_source = self.views[index].canvas_widget_drag_source_hit;
+                const captured_route = self.views[index].canvas_widget_drag_route_entries[0..self.views[index].canvas_widget_drag_route_len];
+                self.views[index].canvas_widget_drag_source_id = 0;
+                self.views[index].canvas_widget_drag_source_attached = false;
+                self.views[index].canvas_widget_drag_pointer_id = 0;
+                self.views[index].canvas_widget_drag_source_origin = .{};
+                self.views[index].canvas_widget_drag_delta = .{};
+                self.views[index].canvas_widget_drag_source_hit = null;
+                self.views[index].canvas_widget_drag_route_len = 0;
+                self.views[index].canvas_widget_pressed_id = 0;
+                self.views[index].canvas_widget_drag_landing_source_id = 0;
+                self.views[index].canvas_widget_drag_landing_origin = .{};
+                const next_render_state = self.views[index].canvasWidgetRenderState();
+                if (!canvasWidgetRenderStatesEqual(previous_render_state, next_render_state)) {
+                    try invalidateForCanvasWidgetRenderStateChange(self, index, previous_render_state, next_render_state);
+                }
+                if (captured_source) |source| {
+                    drag.source_id = source.id;
+                    return .{
+                        .window_id = input_event.window_id,
+                        .view_label = self.views[index].label,
+                        .drag = drag,
+                        .source = source,
+                        .route = captured_route,
+                    };
+                }
+                return null;
+            }
+
+            drag.source_id = route.target.?.id;
+            const source_origin = self.views[index].canvas_widget_drag_source_origin;
+            self.views[index].canvas_widget_drag_layout_motion_armed = true;
+            self.views[index].canvas_widget_drag_landing_source_id = drag.source_id;
+            self.views[index].canvas_widget_drag_landing_origin = geometry.PointF.init(
+                source_origin.x + delta.dx,
+                source_origin.y + delta.dy,
+            );
+            self.views[index].canvas_widget_drag_source_id = 0;
+            self.views[index].canvas_widget_drag_source_attached = false;
+            self.views[index].canvas_widget_drag_pointer_id = 0;
+            self.views[index].canvas_widget_drag_source_origin = .{};
+            self.views[index].canvas_widget_drag_delta = .{};
+            self.views[index].canvas_widget_drag_source_hit = null;
+            self.views[index].canvas_widget_drag_route_len = 0;
+            self.views[index].canvas_widget_pressed_id = 0;
+            const next_render_state = self.views[index].canvasWidgetRenderState();
+            if (!canvasWidgetRenderStatesEqual(previous_render_state, next_render_state)) {
+                try invalidateForCanvasWidgetRenderStateChange(self, index, previous_render_state, next_render_state);
+            }
             return .{
                 .window_id = input_event.window_id,
                 .view_label = self.views[index].label,
@@ -1817,6 +2056,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 .focus_visible_id = if (previous.focus_visible_id) |id| if (next_focused_id != null and next_focused_id.? == id and layout.focusTargetById(id) != null) id else null else null,
                 .hovered_id = if (previous.hovered_id) |id| if (canvasWidgetInteractionTargetExists(layout, id)) id else null else null,
                 .pressed_id = if (previous.pressed_id) |id| if (canvasWidgetInteractionTargetExists(layout, id)) id else null else null,
+                .drag_preview_id = if (previous.drag_preview_id) |id| if (canvasWidgetInteractionTargetExists(layout, id)) id else null else null,
+                .drag_preview_origin = if (previous.drag_preview_id) |id| if (canvasWidgetInteractionTargetExists(layout, id)) previous.drag_preview_origin else null else null,
+                .drag_preview_offset = previous.drag_preview_offset,
+                .layout_motions = previous.layout_motions,
                 // The hover point rides with the hovered widget: it
                 // survives exactly when the hover survives.
                 .hover_point = if (previous.hovered_id) |id| if (canvasWidgetInteractionTargetExists(layout, id)) previous.hover_point else null else null,
@@ -1829,6 +2072,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 a.focus_visible_id == b.focus_visible_id and
                 a.hovered_id == b.hovered_id and
                 a.pressed_id == b.pressed_id and
+                a.drag_preview_id == b.drag_preview_id and
+                canvasOptionalPointsEqual(a.drag_preview_origin, b.drag_preview_origin) and
+                a.drag_preview_offset.dx == b.drag_preview_offset.dx and
+                a.drag_preview_offset.dy == b.drag_preview_offset.dy and
                 canvasOptionalPointsEqual(a.hover_point, b.hover_point);
         }
 

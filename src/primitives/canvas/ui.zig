@@ -312,6 +312,10 @@ pub const UiHandlerEvent = enum {
     /// (select, then open/play), the way list selection conventions
     /// expect.
     double_press,
+    /// A draggable element moved, ended, or was cancelled. The handler's
+    /// sourceId comes from markup; live phase, coordinates, and view size
+    /// are injected by `Tree.msgForDrag`.
+    drag,
     toggle,
     change,
     submit,
@@ -618,7 +622,7 @@ pub fn Ui(comptime Msg: type) type {
             min_width: f32 = 0,
             grow: f32 = 0,
             gap: f32 = 0,
-            padding: f32 = 0,
+            padding: ?f32 = null,
             main: canvas.WidgetMainAlignment = .start,
             cross: canvas.WidgetCrossAlignment = .stretch,
             /// Line policy for `text` leaves. `true`: word-wrap through
@@ -766,6 +770,12 @@ pub fn Ui(comptime Msg: type) type {
             /// the live bottom. Meaningless on every other element.
             scrollback: u32 = 0,
             on_press: ?Msg = null,
+            /// Live widget drag message (markup: `on-drag`). Its payload
+            /// is the closed `{ sourceId, phase, x, y, viewWidth,
+            /// viewHeight }` record: markup supplies `sourceId`, while the
+            /// runtime supplies phase (0 change, 1 end, 2 cancel) and the
+            /// four geometry fields.
+            on_drag: ?Msg = null,
             /// Double-click Msg (markup: `on-double-press`): dispatched
             /// on a release whose click count reached 2, in place of
             /// `on_press` for that release. The FIRST click of the double
@@ -923,6 +933,7 @@ pub fn Ui(comptime Msg: type) type {
             wrap: ?bool = null,
             style_tokens: StyleTokenRefs = .{},
             on_press: ?Msg = null,
+            on_drag: ?Msg = null,
             on_double_press: ?Msg = null,
             on_toggle: ?Msg = null,
             on_change: ?Msg = null,
@@ -1229,6 +1240,41 @@ pub fn Ui(comptime Msg: type) type {
                 return null;
             }
 
+            /// Build a live drag Msg by copying the handler's authored
+            /// source payload and injecting runtime phase + geometry.
+            pub fn msgForDrag(self: Tree, id: ObjectId, drag: canvas.WidgetDragEvent, view_size: geometry.SizeF) ?Msg {
+                for (self.handlers) |handler| {
+                    if (handler.id != id or handler.event != .drag or handler.action != .message) continue;
+                    return msgForDragTemplate(handler.action.message, drag, view_size);
+                }
+                return null;
+            }
+
+            /// Rehydrate a previously captured drag handler template with the
+            /// terminal phase and geometry. UiApp uses this when the source's
+            /// phase-0 update unmounted the live handler before cancellation.
+            pub fn msgForDragTemplate(template: Msg, drag: canvas.WidgetDragEvent, view_size: geometry.SizeF) ?Msg {
+                return switch (template) {
+                    inline else => |payload, tag| if (comptime reflect.declaredWidgetDragDropRecord(@TypeOf(payload))) blk: {
+                        var out = payload;
+                        out.phase = dragNumber(@FieldType(@TypeOf(payload), "phase"), @floatFromInt(@intFromEnum(drag.phase)));
+                        out.x = dragNumber(@FieldType(@TypeOf(payload), "x"), drag.point.x);
+                        out.y = dragNumber(@FieldType(@TypeOf(payload), "y"), drag.point.y);
+                        out.viewWidth = dragNumber(@FieldType(@TypeOf(payload), "viewWidth"), view_size.width);
+                        out.viewHeight = dragNumber(@FieldType(@TypeOf(payload), "viewHeight"), view_size.height);
+                        break :blk @unionInit(Msg, @tagName(tag), out);
+                    } else null,
+                };
+            }
+
+            fn dragNumber(comptime Number: type, value: f32) Number {
+                return switch (@typeInfo(Number)) {
+                    .float => @floatCast(value),
+                    .int => @intFromFloat(@round(value)),
+                    else => unreachable,
+                };
+            }
+
             /// Typed dispatch for text edits: builds the message through the
             /// widget's `on_input` constructor.
             pub fn msgForTextEdit(self: Tree, id: ObjectId, edit: canvas.TextInputEvent) ?Msg {
@@ -1469,6 +1515,7 @@ pub fn Ui(comptime Msg: type) type {
                 .wrap = options.wrap,
                 .style_tokens = options.style_tokens,
                 .on_press = options.on_press,
+                .on_drag = options.on_drag,
                 .on_double_press = options.on_double_press,
                 .on_toggle = options.on_toggle,
                 .on_change = options.on_change,
@@ -3335,6 +3382,7 @@ pub fn Ui(comptime Msg: type) type {
             // Typed handlers imply the matching accessibility actions, the
             // same way a stringly `command` does for engine-owned dispatch.
             if (node.on_press != null) widget.semantics.actions.press = true;
+            if (node.on_drag != null) widget.semantics.actions.drag = true;
             // A double-press handler makes the element pressable too:
             // the double-click's first release must land somewhere, and
             // an element that acts on double click without claiming
@@ -3383,6 +3431,7 @@ pub fn Ui(comptime Msg: type) type {
                 widget.children = child_widgets;
             }
             appendHandler(handlers, handler_len, widget.id, .press, node.on_press);
+            appendHandler(handlers, handler_len, widget.id, .drag, node.on_drag);
             appendHandler(handlers, handler_len, widget.id, .double_press, node.on_double_press);
             appendHandler(handlers, handler_len, widget.id, .toggle, node.on_toggle);
             appendHandler(handlers, handler_len, widget.id, .change, node.on_change);
@@ -3534,6 +3583,7 @@ pub fn Ui(comptime Msg: type) type {
         fn countHandlers(node: Node) usize {
             var total: usize = 0;
             if (node.on_press != null) total += 1;
+            if (node.on_drag != null) total += 1;
             if (node.on_double_press != null) total += 1;
             if (node.on_toggle != null) total += 1;
             if (node.on_change != null) total += 1;
@@ -3614,7 +3664,7 @@ pub fn Ui(comptime Msg: type) type {
         /// default gap. Explicit spacing always wins for its own field.
         fn applyKindDefaultLayout(kind: WidgetKind, options: ElementOptions, layout: *canvas.WidgetLayoutStyle) void {
             const defaults = canvas.widgetKindDefaultLayout(kind, options.size) orelse return;
-            if (options.padding == 0) {
+            if (options.padding == null) {
                 layout.padding = defaults.padding;
                 layout.padding_is_kind_default = true;
             }
@@ -3654,12 +3704,7 @@ pub fn Ui(comptime Msg: type) type {
                     .disabled = options.disabled,
                 },
                 .layout = .{
-                    .padding = .{
-                        .top = options.padding,
-                        .right = options.padding,
-                        .bottom = options.padding,
-                        .left = options.padding,
-                    },
+                    .padding = geometry.InsetsF.all(options.padding orelse 0),
                     .gap = options.gap,
                     .grow = options.grow,
                     .main_alignment = options.main,

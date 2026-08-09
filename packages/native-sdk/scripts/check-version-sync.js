@@ -140,7 +140,7 @@ if (coreLock.version !== expectedVersion || coreLock.packages?.['']?.version !==
   console.error(`Version mismatch: packages/core/package-lock.json=${coreLock.version}/${coreLock.packages?.['']?.version}, expected ${expectedVersion}`);
   errors++;
 }
-for (const example of ['examples/soundboard-ts', 'examples/system-monitor-ts']) {
+for (const example of ['examples/kanban', 'examples/soundboard-ts', 'examples/system-monitor-ts']) {
   const exampleJson = JSON.parse(readFileSync(join(repoRoot, ...example.split('/'), 'package.json'), 'utf-8'));
   const pin = exampleJson.dependencies?.['@native-sdk/core'];
   if (pin !== expectedVersion) {

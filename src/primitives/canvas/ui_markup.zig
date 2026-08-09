@@ -1122,6 +1122,7 @@ pub const on_scroll_legacy_payload_message = "on-scroll payloads are two-axis no
 
 pub const on_resize_element_message = "on-resize is only supported on split - the runtime emits fraction changes for split dividers, so the handler belongs on the split element itself";
 pub const on_resize_payload_message = "on-resize takes a bare Msg tag whose payload is the new first-pane fraction (an f32 variant, like sidebar_resized: f32; transpiled cores declare a one-number float arm)";
+pub const on_drag_payload_message = "on-drag takes a Msg tag plus one integer source binding (for example card_dragged:{card.id}); that Msg arm must be exactly { sourceId, phase, x, y, viewWidth, viewHeight } - sourceId is numeric, phase is numeric and must represent 0..2, and the four live geometry fields are f32/f64 (or wider floats) so captured out-of-view coordinates cannot overflow; markup fills sourceId and the runtime fills the rest";
 pub const split_children_message = "split takes exactly two element children (the panes) - put conditional or repeated content inside a pane container, and nest splits for more panes";
 
 /// Elements the runtime's dismissal machinery closes (Escape, click

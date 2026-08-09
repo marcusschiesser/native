@@ -31,9 +31,11 @@
 //!                    its exports (export exists -> wired): `frameMsg`
 //!                    (presented frames), `keyMsg` (the app-level key
 //!                    fallback), `appearanceMsg`/`chromeMsg` (Msg arms
-//!                    the host fills structurally).
+//!                    the host fills structurally), and `dropMsg`
+//!                    (native file drops with source, point, and paths).
 //!   images           app.zon's `.assets.images` entries (`.{ .id = 1,
 //!                    .path = "assets/..." }`) are read once at launch
+//!                    (from `Contents/Resources` in a packaged macOS app)
 //!                    and registered on the installing frame — the ids
 //!                    are the `ImageId`s markup avatar bindings use. A
 //!                    missing file or failed decode skips the entry
@@ -111,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
     var boot_images_buffer: [manifest_images.len]Adapter.BootImage = undefined;
     var boot_image_count: usize = 0;
     inline for (manifest_images) |asset| {
-        if (std.Io.Dir.cwd().readFileAlloc(init.io, asset.path, std.heap.page_allocator, .limited(max_boot_image_bytes))) |bytes| {
+        if (runner.app_assets.readFileAlloc(init.io, asset.path, std.heap.page_allocator, .limited(max_boot_image_bytes))) |bytes| {
             boot_images_buffer[boot_image_count] = .{ .id = asset.id, .bytes = bytes };
             boot_image_count += 1;
         } else |_| {}

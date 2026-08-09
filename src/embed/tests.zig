@@ -933,7 +933,9 @@ test "mobile C ABI dispatches GPU widget accessibility actions" {
         .text_len = drag_delta.len,
     };
     try std.testing.expectEqual(@as(c_int, 1), native_sdk_app_widget_action(app, &action));
-    try std.testing.expectEqual(platform.GpuSurfaceInputKind.pointer_drag, self.last_input_kind);
+    // Drag automation is a complete gesture: the movement is followed by
+    // the release that lets markup `on-drag` handlers commit the drop.
+    try std.testing.expectEqual(platform.GpuSurfaceInputKind.pointer_up, self.last_input_kind);
     try std.testing.expectApproxEqAbs(@as(f32, 276), self.last_touch_x, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 74), self.last_touch_y, 0.001);
 

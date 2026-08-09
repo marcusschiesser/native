@@ -6,8 +6,8 @@
 // Every record here matches, field for field, the structural shape a
 // runtime matcher expects — markup's `on-input`/`on-scroll` mirrors
 // (`declaredTextInputUnion`/`declaredScrollStateRecord`), the generated
-// wiring's channel builders (`frameMsg`/`keyMsg`/`appearanceMsg`/
-// `chromeMsg`), and the audio event arm validator. Matching stays
+// wiring's channel builders (`frameMsg`/`keyMsg`/`pinchMsg`/`dropMsg`/
+// `appearanceMsg`/`chromeMsg`), and the audio event arm validator. Matching stays
 // STRUCTURAL either way (type identity cannot cross the emission
 // boundary), so declaring the same shape in your own core remains legal;
 // these exports exist so no core has to re-type the vocabulary and no
@@ -26,9 +26,10 @@
 //   - `TextInputEvent`, `ScrollState`: Msg-arm PAYLOAD fields —
 //     `{ kind: "draft_edit"; edit: TextInputEvent }`,
 //     `{ kind: "scrolled"; scroll: ScrollState }`.
-//   - `FrameEvent`, `KeyEvent`, `PinchEvent`: the wiring channels'
+//   - `FrameEvent`, `KeyEvent`, `PinchEvent`, `FileDropEvent`: the wiring channels'
 //     parameter records — `frameMsg(model, frame: FrameEvent)`,
-//     `keyMsg(key: KeyEvent)`, `pinchMsg(pinch: PinchEvent)`.
+//     `keyMsg(key: KeyEvent)`, `pinchMsg(pinch: PinchEvent)`,
+//     `dropMsg(drop: FileDropEvent)`.
 //   - `ColorScheme`, `ChromeInsets`, `ChromeButtons`, `AudioState`: field
 //     types INSIDE the arm records the `appearanceMsg`/`chromeMsg`/audio
 //     routes name (the arms themselves stay inline unions of `kind` plus
@@ -116,6 +117,25 @@ export interface PinchEvent {
   readonly scale: number;
   readonly x: number;
   readonly y: number;
+}
+
+/// A file drop's optional point in view-local canvas coordinates. Desktop
+/// hosts that only know the target window leave `FileDropEvent.point` null.
+export interface FileDropPoint {
+  readonly x: number;
+  readonly y: number;
+}
+
+/// The app-level file-drop channel's record (`dropMsg(drop)`). `windowId`
+/// and `viewLabel` identify the source; `point` is present when the host can
+/// resolve view-local coordinates. Paths are byte text so arbitrary UTF-8
+/// filesystem names cross without becoming runtime JS strings. Return null
+/// from `dropMsg` to ignore a drop, or map it to an ordinary Msg.
+export interface FileDropEvent {
+  readonly windowId: number;
+  readonly viewLabel: string;
+  readonly point: FileDropPoint | null;
+  readonly paths: readonly Uint8Array[];
 }
 
 /// The appearance vocabulary — a NAMED light/dark alias (the host matches

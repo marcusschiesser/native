@@ -169,6 +169,10 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // where it can restore the previous pose onto the freshly
             // retained nodes.
             const disclosure_plan = planCanvasWidgetDisclosureTween(self, index, previous_layout, reconciled_layout);
+            // Drag reflow uses the same two-pose planning seam, but keeps
+            // the adopted layout at its truthful final geometry and records
+            // presentation-only offsets for keyed draggable widgets.
+            const drag_layout_motion_plan = planCanvasWidgetDragLayoutMotion(self, index, previous_layout, reconciled_layout);
             const previous_cursor = self.views[index].canvas_widget_cursor;
             const previous_widget_revision = self.views[index].widget_revision;
             // The adoption witness (`canvas_widget_layout_adoptions`)
@@ -216,6 +220,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // the user was looking at, and the tween walks it to the
             // declared pose one presented frame at a time.
             try applyCanvasWidgetDisclosureTweenPlan(self, index, disclosure_plan);
+            const drag_layout_motion_changed = applyCanvasWidgetDragLayoutMotionPlan(self, index, drag_layout_motion_plan);
             // Re-hit-test the stationary pointer against the ADOPTED
             // tree, after every pose restore above settles the frames
             // the user actually sees and BEFORE the display refresh
@@ -227,7 +232,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // point-blind scroll paths do.
             try CanvasWidgetEventMethods(Runtime).reconcileCanvasWidgetInteractionAfterLayoutAdoption(self, index, adoption_tooltip_bindings);
             const requested_frame = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
-            if ((layout_dirty or widget_revision_changed) and !requested_frame) try CanvasFrameMethods(Runtime).requestCanvasFrameForView(self, index);
+            if ((layout_dirty or widget_revision_changed or drag_layout_motion_changed) and !requested_frame) try CanvasFrameMethods(Runtime).requestCanvasFrameForView(self, index);
             return self.views[index].info();
         }
 
@@ -504,6 +509,98 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         ///   - `none`: nothing armed, nothing to arm.
         const CanvasWidgetDisclosureAction = enum { none, arm, refresh, retire };
 
+        const CanvasWidgetDragLayoutMotionPlan = struct {
+            apply: bool = false,
+            motions: [canvas_limits.max_canvas_widget_drag_layout_motions_per_view]canvas.WidgetLayoutMotion = undefined,
+            motion_count: usize = 0,
+        };
+
+        /// FLIP planning for drag-driven list/board reflow. Each keyed
+        /// draggable begins at its CURRENTLY PRESENTED origin (including an
+        /// in-flight offset) and eases toward the newly declared frame. New
+        /// placeholders have no previous pose and therefore appear as the
+        /// honest blank destination immediately.
+        fn planCanvasWidgetDragLayoutMotion(self: *Runtime, view_index: usize, previous: canvas.WidgetLayoutTree, next: canvas.WidgetLayoutTree) CanvasWidgetDragLayoutMotionPlan {
+            const view = &self.views[view_index];
+            var plan = CanvasWidgetDragLayoutMotionPlan{};
+            if (!view.canvas_widget_drag_layout_motion_armed) return plan;
+            plan.apply = true;
+
+            const duration_ms = view.widget_tokens.motion.durationMs(.normal);
+            if (self.appearance.reduce_motion or duration_ms == 0) return plan;
+
+            for (next.nodes) |next_node| {
+                const id = next_node.widget.id;
+                if (id == 0 or !next_node.widget.semantics.actions.drag) continue;
+                const previous_node = previous.findById(id) orelse continue;
+                const old_motion = findCanvasWidgetDragLayoutMotion(view.canvas_widget_drag_layout_motions[0..view.canvas_widget_drag_layout_motion_count], id);
+                const previous_frame = previous_node.frame.normalized();
+                const next_frame = next_node.frame.normalized();
+                const old_offset = if (old_motion) |motion| motion.offset else geometry.OffsetF{};
+                const landing_origin = if (view.canvas_widget_drag_landing_source_id == id)
+                    view.canvas_widget_drag_landing_origin
+                else
+                    geometry.PointF.init(previous_frame.x + old_offset.dx, previous_frame.y + old_offset.dy);
+                const offset = geometry.OffsetF.init(
+                    landing_origin.x - next_frame.x,
+                    landing_origin.y - next_frame.y,
+                );
+
+                // An unchanged target keeps its existing clock and pose;
+                // changing the insertion point retargets from the exact
+                // pixels currently on screen, with no pop between gestures.
+                const target_unchanged = view.canvas_widget_drag_landing_source_id != id and previous_frame.x == next_frame.x and previous_frame.y == next_frame.y;
+                if (target_unchanged) {
+                    if (old_motion) |motion| {
+                        if (plan.motion_count >= plan.motions.len) break;
+                        plan.motions[plan.motion_count] = motion;
+                        plan.motion_count += 1;
+                    }
+                    continue;
+                }
+                if (offset.dx == 0 and offset.dy == 0) continue;
+                if (plan.motion_count >= plan.motions.len) break;
+                plan.motions[plan.motion_count] = .{
+                    .id = id,
+                    .from_offset = offset,
+                    .offset = offset,
+                    // The terminal source replaces a window-level floating
+                    // preview, so keep it above both its old and new lane's
+                    // clips until it reaches the committed slot.
+                    .escape_ancestor_clips = view.canvas_widget_drag_landing_source_id == id,
+                    .duration_ms = duration_ms,
+                    .easing = .emphasized,
+                    .spring = view.widget_tokens.motion.spring,
+                };
+                plan.motion_count += 1;
+            }
+            return plan;
+        }
+
+        fn findCanvasWidgetDragLayoutMotion(motions: []const canvas.WidgetLayoutMotion, id: canvas.ObjectId) ?canvas.WidgetLayoutMotion {
+            for (motions) |motion| {
+                if (motion.id == id) return motion;
+            }
+            return null;
+        }
+
+        /// Applies only after the fallible retained-tree copy succeeds, so a
+        /// rejected adoption cannot consume the drag arm or mutate the pose
+        /// of the still-current tree.
+        fn applyCanvasWidgetDragLayoutMotionPlan(self: *Runtime, view_index: usize, plan: CanvasWidgetDragLayoutMotionPlan) bool {
+            if (!plan.apply) return false;
+            const view = &self.views[view_index];
+            view.canvas_widget_drag_layout_motion_armed = false;
+            view.canvas_widget_drag_landing_source_id = 0;
+            view.canvas_widget_drag_landing_origin = .{};
+            const previous_count = view.canvas_widget_drag_layout_motion_count;
+            if (plan.motion_count > 0) {
+                @memcpy(view.canvas_widget_drag_layout_motions[0..plan.motion_count], plan.motions[0..plan.motion_count]);
+            }
+            view.canvas_widget_drag_layout_motion_count = plan.motion_count;
+            return previous_count > 0 or plan.motion_count > 0;
+        }
+
         const CanvasWidgetDisclosurePlan = struct {
             action: CanvasWidgetDisclosureAction = .none,
             duration_ms: u32 = 0,
@@ -735,6 +832,35 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 _ = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, view_index);
             }
             if (!done) try CanvasFrameMethods(Runtime).requestCanvasFrameForView(self, view_index);
+        }
+
+        /// Advances presentation-only drag reflow. The retained layout is
+        /// already final, so each frame only changes renderer transforms;
+        /// hit testing, accessibility, and the eventual zero-offset settle
+        /// always agree with the model.
+        pub fn advanceCanvasWidgetDragLayoutMotionForFrame(self: *Runtime, view_index: usize, timestamp_ns: u64) anyerror!void {
+            if (view_index >= self.view_count) return;
+            if (self.views[view_index].kind != .gpu_surface) return;
+            const view = &self.views[view_index];
+            if (view.canvas_widget_drag_layout_motion_count == 0) return;
+
+            var write_index: usize = 0;
+            for (view.canvas_widget_drag_layout_motions[0..view.canvas_widget_drag_layout_motion_count]) |motion_value| {
+                if (view.canvasWidgetNodeIndexById(motion_value.id) == null) continue;
+                var motion = motion_value;
+                if (motion.start_ns == 0 or timestamp_ns < motion.start_ns) motion.start_ns = timestamp_ns;
+                const progress = canvas.layoutTweenProgress(motion.easing, motion.spring, motion.start_ns, motion.duration_ms, timestamp_ns);
+                if (progress >= 1) continue;
+                motion.offset = geometry.OffsetF.init(
+                    motion.from_offset.dx * (1 - progress),
+                    motion.from_offset.dy * (1 - progress),
+                );
+                view.canvas_widget_drag_layout_motions[write_index] = motion;
+                write_index += 1;
+            }
+            view.canvas_widget_drag_layout_motion_count = write_index;
+            _ = try CanvasWidgetDisplayMethods(Runtime).refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility(self, view_index);
+            if (write_index > 0) try CanvasFrameMethods(Runtime).requestCanvasFrameForView(self, view_index);
         }
 
         /// One presented frame's worth of layout-tween motion for a

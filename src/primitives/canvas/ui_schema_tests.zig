@@ -23,7 +23,7 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // schema-version-bump events, not silent edits.
     try testing.expectEqual(@as(usize, 70), schema.elements.len);
     try testing.expectEqual(@as(usize, 96), schema.attrs.len);
-    try testing.expectEqual(@as(usize, 14), schema.events.len);
+    try testing.expectEqual(@as(usize, 15), schema.events.len);
     // The element table runs through the span composite (64), the
     // bubble-reactions composite (65), the media surface (66), the
     // runtime-image leaf (67), the video playback composite (68), and
@@ -54,9 +54,9 @@ test "registry codes are stable: assigned at birth, never renumbered or renamed"
     // The event table runs through the pointer-hover containment pair
     // hover-enter (11) and hover-leave (12), the terminal view-state
     // echo terminal (13), and the desktop gesture channel
-    // double-press (14).
+    // double-press (14), and release-time widget drag drag (15).
     try testing.expectEqual(
-        @as(u64, 0x0cdda4a2d5a85101),
+        @as(u64, 0x7f7efb77727a18cd),
         tableFingerprint(schema.EventInfo, &schema.events),
     );
 }

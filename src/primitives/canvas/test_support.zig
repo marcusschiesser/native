@@ -227,6 +227,7 @@ pub const DesignTokens = canvas.DesignTokens;
 pub const WidgetKind = canvas.WidgetKind;
 pub const WidgetCursor = canvas.WidgetCursor;
 pub const WidgetState = canvas.WidgetState;
+pub const WidgetLayoutMotion = canvas.WidgetLayoutMotion;
 pub const WidgetRenderState = canvas.WidgetRenderState;
 pub const WidgetMainAlignment = canvas.WidgetMainAlignment;
 pub const WidgetCrossAlignment = canvas.WidgetCrossAlignment;

@@ -858,13 +858,15 @@ export function atFractionLiteral(model: Model): boolean {
 
 const structuralCases: Case[] = [
   {
-    // The five wiring channels together: the emitted module must carry
+    // The host-event wiring channels together: the emitted module must carry
     // compilable fns, arm consts, and the envMsgs tuple.
     name: "the host-event wiring channels emit and compile",
     src: `
 export type ColorScheme = "light" | "dark";
 export interface FrameEvent { readonly width: number; readonly height: number; readonly timestampMs: number; readonly intervalMs: number; }
 export interface KeyEvent { readonly key: string; readonly shift: boolean; readonly control: boolean; readonly alt: boolean; readonly super: boolean; }
+export interface FileDropPoint { readonly x: number; readonly y: number; }
+export interface FileDropEvent { readonly windowId: number; readonly viewLabel: string; readonly point: FileDropPoint | null; readonly paths: readonly Uint8Array[]; }
 export interface ChromeInsets { readonly top: number; readonly right: number; readonly bottom: number; readonly left: number; }
 export interface ChromeButtons { readonly x: number; readonly y: number; readonly width: number; readonly height: number; }
 export interface Model { readonly width: number; readonly dark: boolean; readonly chromeTop: number; readonly base: Uint8Array; }
@@ -881,6 +883,10 @@ export function frameMsg(model: Model, frame: FrameEvent): Msg | null {
 export function keyMsg(key: KeyEvent): Msg | null {
   if (key.control || key.alt || key.super || key.shift) return null;
   if (key.key === "space") return { kind: "toggled" };
+  return null;
+}
+export function dropMsg(drop: FileDropEvent): Msg | null {
+  if (drop.paths.length > 0) return { kind: "base_set", value: drop.paths[0] };
   return null;
 }
 export const appearanceMsg = "appearance_changed";

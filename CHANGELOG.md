@@ -2,9 +2,48 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.8.1
+## 0.8.3
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **Packaged TypeScript app assets**: Runtime asset lookup now finds bundled macOS resources before the process working directory, so Native markup boot images such as the Kanban agent avatars render after launch (#297).
+- **Unclipped drag landing motion**: Dropped cards now stay in the lifted drag layer through their landing animation while neighboring reflow remains clipped within its swimlane (#297).
+
+### Improvements
+
+- **Denser Kanban showcase**: The seeded board now includes twice as many Jira-style tickets and removes redundant issue glyphs from card metadata (#297).
+
+### Contributors
+
+- @ctate
+
+<!-- release:end -->
+
+## 0.8.2
+
+### New Features
+
+- **Native drag and drop for TypeScript apps**: Native markup's new `on-drag` channel delivers live, release, and cancellation geometry to compiled cores while the renderer lifts the source under the pointer, preserves one globally keyed insertion slot, animates neighboring items, and supports Escape cancellation; TypeScript cores can also map native multi-file drops into ordinary deterministic messages through `dropMsg` (#285).
+- **Desktop notifications from model cores**: TypeScript apps can return fire-and-forget `Cmd.showNotification` effects and Zig apps can call `fx.showNotification`, with bounded validation and suppression during fake execution and session replay (#283).
+
+### Bug Fixes
+
+- **Explicit zero canvas padding**: Programmatic and compiled or interpreted Native markup views now preserve `padding="0"` instead of replacing it with the widget kind's default padding (#288).
+
+### Improvements
+
+- **TypeScript-first app authoring guidance**: Repository instructions, bundled skills, examples, package documentation, and the docs site now consistently lead with TypeScript cores and Native markup for new apps while keeping Zig as the explicit alternative and toolkit-extension tier (#284).
+- **Agent ticket Kanban showcase**: The TypeScript Kanban example now presents numbered OpenAI- and Claude-assigned tickets, uses an icon-only add action, keeps columns scrollable, and extends its end-to-end coverage for the updated drag geometry (#295).
+
+### Contributors
+
+- @ctate
+- @johnlindquist
+- @Railly
+
+## 0.8.1
 
 ### New Features
 
@@ -23,8 +62,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 
 - @ctate
 - @Railly
-
-<!-- release:end -->
 
 ## 0.8.0
 
