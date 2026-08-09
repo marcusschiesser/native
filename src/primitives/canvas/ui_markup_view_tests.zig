@@ -1311,7 +1311,12 @@ test "the registry's attr value classes match the ElementOptions field types" {
         const expected: contract.AttrClass = switch (@typeInfo(FieldType)) {
             .float => .number,
             .int => .whole,
-            .bool, .optional => .truthy,
+            .bool => .truthy,
+            .optional => |optional| switch (@typeInfo(optional.child)) {
+                .bool => .truthy,
+                .float => .number,
+                else => unreachable,
+            },
             .@"enum" => .option,
             .pointer => .text,
             else => unreachable,
@@ -4746,6 +4751,48 @@ test "declaredScrollStateRecord accepts the emitted mirror shape and rejects nea
     try testing.expect(!markup_view.declaredLegacyScrollStateRecord(MirrorScrollState));
     try testing.expect(!markup_view.declaredLegacyScrollStateRecord(canvas.ScrollState));
     try testing.expect(!markup_view.declaredLegacyScrollStateRecord(struct { offset: f64, velocity: f64, viewport_extent: f64, contentExtent: f64 }));
+}
+
+test "declaredWidgetDragDropRecord accepts safe live drag fields and rejects unsafe near misses" {
+    try testing.expect(markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        phase: i64,
+        x: f64,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
+    try testing.expect(!markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        x: f64,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
+    try testing.expect(!markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        phase: []const u8,
+        x: f64,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
+    try testing.expect(!markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        phase: i64,
+        x: u32,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
+    try testing.expect(!markup_view.declaredWidgetDragDropRecord(struct {
+        sourceId: i64,
+        phase: u1,
+        x: f64,
+        y: f64,
+        viewWidth: f64,
+        viewHeight: f64,
+    }));
 }
 
 test "valueArmClass classifies exactly the value-carrying arm shapes" {

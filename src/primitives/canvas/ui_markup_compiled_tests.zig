@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const canvas = @import("root.zig");
+const geometry = @import("geometry");
 const markup_view = @import("ui_markup_view.zig");
 const fixture = @import("ui_markup_view_tests.zig");
 
@@ -90,6 +91,32 @@ fn expectSameTexts(expected: canvas.Widget, actual: canvas.Widget) !void {
 const InboxUi = canvas.Ui(fixture.Msg);
 const InboxInterpreter = markup_view.MarkupView(fixture.Model, fixture.Msg);
 const InboxCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.inbox_markup_source);
+
+const zero_card_padding_markup =
+    \\<card padding="0">
+    \\  <text>Flush</text>
+    \\</card>
+;
+const ZeroCardPaddingCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, zero_card_padding_markup);
+
+test "explicit zero card padding survives interpreted and compiled markup" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.testModel();
+
+    var interpreter = try InboxInterpreter.init(arena, zero_card_padding_markup);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try interpreter.build(&interpreter_ui, &model));
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(ZeroCardPaddingCompiled.build(&compiled_ui, &model));
+
+    try testing.expectEqual(canvas.WidgetKind.card, interpreted.root.kind);
+    try testing.expectEqual(geometry.InsetsF{}, interpreted.root.layout.padding);
+    try testing.expect(!interpreted.root.layout.padding_is_kind_default);
+    try testing.expectEqualDeep(interpreted.root.layout.padding, compiled.root.layout.padding);
+    try testing.expect(!compiled.root.layout.padding_is_kind_default);
+}
 
 fn interpretInbox(arena: std.mem.Allocator, model: *const fixture.Model) !InboxUi.Tree {
     var view = try InboxInterpreter.init(arena, fixture.inbox_markup_source);

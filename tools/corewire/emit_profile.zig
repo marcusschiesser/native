@@ -74,6 +74,7 @@ const export_signatures = [_]ExportSignature{
     .{ .suffix = "frame_msg", .export_name = "abi_frame_msg", .params = &.{ "f64", "f64", "f64", "f64" }, .returns = "bytes" },
     .{ .suffix = "key_msg", .export_name = "abi_key_msg", .params = &.{ "bytes", "u8", "u8", "u8", "u8" }, .returns = "bytes" },
     .{ .suffix = "pinch_msg", .export_name = "abi_pinch_msg", .params = &.{ "f64", "bytes", "u32", "f64", "f64", "f64" }, .returns = "bytes" },
+    .{ .suffix = "drop_msg", .export_name = "abi_drop_msg", .params = &.{"bytes"}, .returns = "bytes" },
 };
 
 /// Suffixes that never enter the export map: the mode-provided symbols
@@ -417,7 +418,8 @@ test "wired channels join the export map with their wire shapes" {
     const arena = arena_state.allocator();
     var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"key_msg\": false", "\"key_msg\": true");
     source = try std.mem.replaceOwned(u8, arena, source, "\"pinch_msg\": false", "\"pinch_msg\": true");
-    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"key_msg\", \"pinch_msg\"]");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"drop_msg\": false", "\"drop_msg\": true");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"key_msg\", \"pinch_msg\", \"drop_msg\"]");
     const generated = try profileFromJson(arena, source, default_entry);
     // The wire-shaped signatures: bytes as buffers, u8 modifier
     // booleans, the pinch phase a u32 member index. The export names
@@ -425,6 +427,7 @@ test "wired channels join the export map with their wire shapes" {
     // prefix.
     try testing.expect(std.mem.indexOf(u8, generated, "{ \"export\": \"abi_key_msg\", \"symbol\": \"nsc_core_key_msg\", \"params\": [\"bytes\", \"u8\", \"u8\", \"u8\", \"u8\"], \"returns\": \"bytes\" }") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "{ \"export\": \"abi_pinch_msg\", \"symbol\": \"nsc_core_pinch_msg\", \"params\": [\"f64\", \"bytes\", \"u32\", \"f64\", \"f64\", \"f64\"], \"returns\": \"bytes\" }") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "{ \"export\": \"abi_drop_msg\", \"symbol\": \"nsc_core_drop_msg\", \"params\": [\"bytes\"], \"returns\": \"bytes\" }") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "abi_command_msg") == null);
     try testing.expect(std.mem.indexOf(u8, generated, "abi_frame_msg") == null);
 }

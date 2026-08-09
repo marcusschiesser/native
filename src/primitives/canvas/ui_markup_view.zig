@@ -1986,9 +1986,15 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     else => return self.failVoid(node, "expected a number"),
                 },
                 .bool => @field(options, field) = value.truthy(),
-                // Optional bools (`expanded`): the attribute's PRESENCE
-                // makes the state non-null; the value sets it.
-                .optional => @field(options, field) = value.truthy(),
+                .optional => |optional| switch (@typeInfo(optional.child)) {
+                    .bool => @field(options, field) = value.truthy(),
+                    .float => @field(options, field) = switch (value) {
+                        .float => |float| float,
+                        .integer => |int| @floatFromInt(int),
+                        else => return self.failVoid(node, "expected a number"),
+                    },
+                    else => return self.failVoid(node, "attribute is not settable from markup"),
+                },
                 // Range-checked against the FIELD's own integer type
                 // before the cast (the grid-lines teaching, generalized):
                 // expression values are i64, so a literal or model
@@ -2082,6 +2088,10 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 };
                 return;
             }
+            if (std.mem.eql(u8, event, "drag")) {
+                options.on_drag = try self.constructDragMessage(scope, node, expression);
+                return;
+            }
             // The value-payload change event: a slider's `on-change` with a
             // bare tag naming a value-carrying arm dispatches the APPLIED
             // value through the `on_value` constructor (the `on-resize`
@@ -2154,6 +2164,21 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                 }
             }
             return self.failMsg(node, "unknown message tag");
+        }
+
+        fn constructDragMessage(self: *Self, scope: *Scope, node: markup.MarkupNode, expression: markup.MessageExpression) BuildError!MsgT {
+            if (expression.payload.len == 0) return self.failMsg(node, markup.on_drag_payload_message);
+            @setEvalBranchQuota(scan_quota);
+            inline for (@typeInfo(MsgT).@"union".fields) |field| {
+                if (std.mem.eql(u8, field.name, expression.tag)) {
+                    if (comptime !reflect.declaredWidgetDragDropRecord(field.type)) return self.failMsg(node, markup.on_drag_payload_message);
+                    const value = try self.evalBinding(scope, node, expression.payload, true);
+                    var payload: field.type = std.mem.zeroes(field.type);
+                    payload.sourceId = try self.coerce(@FieldType(field.type, "sourceId"), node, value);
+                    return @unionInit(MsgT, field.name, payload);
+                }
+            }
+            return self.failMsg(node, markup.on_drag_payload_message);
         }
 
         fn coerce(self: *Self, comptime T: type, node: markup.MarkupNode, value: Value) BuildError!T {
@@ -2612,6 +2637,7 @@ pub const declaredTextInputUnion = reflect.declaredTextInputUnion;
 pub const declaredScrollStateRecord = reflect.declaredScrollStateRecord;
 pub const declaredTerminalStateRecord = reflect.declaredTerminalStateRecord;
 pub const declaredLegacyScrollStateRecord = reflect.declaredLegacyScrollStateRecord;
+pub const declaredWidgetDragDropRecord = reflect.declaredWidgetDragDropRecord;
 pub const valueArmClass = reflect.valueArmClass;
 pub const sliceElement = reflect.sliceElement;
 pub const isItemFn = reflect.isItemFn;

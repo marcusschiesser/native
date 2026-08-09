@@ -54,7 +54,14 @@ pub const ValueKind = expr.ValueKind;
 /// gained a bare-tag rule — a format-2 artifact classified a four-field
 /// terminal message as `.unsupported` and would reject valid `<terminal>`
 /// markup, so a stale artifact must force regeneration rather than pass.
-pub const format_version: u32 = 3;
+/// Version 4: `drag_drop` classifies the closed release-geometry record
+/// used by `on-drag`; older artifacts call it unsupported and would reject
+/// a valid binding.
+/// Version 5: that record gained the numeric live `phase` field so apps can
+/// preview insertion/reordering on change and restore on cancellation.
+/// Version 6: live drag geometry requires floating-point fields so captured
+/// out-of-view coordinates cannot trap an integer conversion at dispatch.
+pub const format_version: u32 = 6;
 
 /// Where the app's build step writes the artifact, relative to the app
 /// directory (a build product lives under zig-out, not in durable state).
@@ -139,7 +146,7 @@ pub const Iterable = struct {
 /// cannot be built from markup at all. `legacy_scroll_state` is the
 /// RETIRED one-axis scroll record, recognized only so `on-scroll` can
 /// teach the two-axis migration by field name.
-pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, legacy_scroll_state, terminal_state, unsupported };
+pub const PayloadClass = enum { none, string, integer, float, boolean, enum_tag, text_input, scroll_state, legacy_scroll_state, terminal_state, drag_drop, unsupported };
 
 pub const MsgTag = struct {
     name: []const u8,
@@ -348,6 +355,7 @@ fn payloadClassOf(comptime T: type, comptime specials: Specials) PayloadClass {
     // binds through on-terminal exactly like the canvas type — same
     // resolution as both engines' terminalConstructor.
     if (reflect.declaredTerminalStateRecord(T)) return .terminal_state;
+    if (reflect.declaredWidgetDragDropRecord(T)) return .drag_drop;
     return switch (@typeInfo(T)) {
         .int => .integer,
         .float => .float,
@@ -904,6 +912,15 @@ const Checker = struct {
             }
             return;
         }
+        if (std.mem.eql(u8, event, "drag")) {
+            const found = tag orelse return self.failAttr(node, attribute, markup.on_drag_payload_message);
+            if (found.payload != .drag_drop or expression.payload.len == 0) {
+                return self.failAttr(node, attribute, markup.on_drag_payload_message);
+            }
+            const resolved = try self.resolveBinding(node, expression.payload, true);
+            try self.requirePayloadKind(node, attribute, resolved, &.{.integer}, found);
+            return;
+        }
         // The value-payload change event (engine parity): a slider's
         // on-change with a bare tag naming a value-carrying arm — f32 (the
         // canvas-native shape) or the transpiled one-number float arm
@@ -931,7 +948,7 @@ const Checker = struct {
             .boolean => {},
             // These payloads cannot be constructed from a markup binding
             // (input/scroll payloads bind through their own events).
-            .text_input, .scroll_state, .legacy_scroll_state, .terminal_state, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
+            .text_input, .scroll_state, .legacy_scroll_state, .terminal_state, .drag_drop, .unsupported => return self.failPayloadType(node, attribute, resolved, found),
             .none => unreachable,
         }
     }

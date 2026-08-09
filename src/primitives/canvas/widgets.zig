@@ -271,6 +271,24 @@ pub const CodeDiffLines = struct {
     removed: u128,
 };
 
+/// Presentation-only FLIP motion for one draggable keyed widget. Layout and
+/// semantics already describe the final pose; render temporarily translates
+/// the widget from the pose the user was looking at and eases that offset to
+/// zero on the recorded frame clock.
+pub const WidgetLayoutMotion = struct {
+    id: ObjectId,
+    from_offset: geometry.OffsetF = .{},
+    offset: geometry.OffsetF = .{},
+    /// A drag landing begins at the pointer after the live preview has
+    /// disappeared. Hoist that one moving subtree above ancestor clips until
+    /// it settles; ordinary neighbor reflow stays clipped to its scroll lane.
+    escape_ancestor_clips: bool = false,
+    start_ns: u64 = 0,
+    duration_ms: u32 = 180,
+    easing: Easing = .emphasized,
+    spring: canvas.SpringToken = .{},
+};
+
 pub const WidgetRenderState = struct {
     /// Whether the app is active and this widget tree's window is key.
     /// Runtime focus ids stay retained while false so focus-visible
@@ -282,6 +300,24 @@ pub const WidgetRenderState = struct {
     focus_visible_id: ?ObjectId = null,
     hovered_id: ?ObjectId = null,
     pressed_id: ?ObjectId = null,
+    /// The live widget drag. Normal emission reserves but does not paint the
+    /// source subtree's current layout slot; a final overlay pass paints its
+    /// fully opaque appearance under the pointer. `drag_preview_offset` is
+    /// the total pointer displacement from the gesture's down point.
+    drag_preview_id: ?ObjectId = null,
+    /// The source frame's origin when the gesture first resolved. Keeping
+    /// this stable lets an app move the standing source to a candidate
+    /// insertion slot while the floating preview stays under the pointer.
+    drag_preview_origin: ?geometry.PointF = null,
+    drag_preview_offset: geometry.OffsetF = .{},
+    /// Renderer-private namespace switch used only while emitting the
+    /// floating appearance, so its display-list ids cannot duplicate the source
+    /// subtree's ids.
+    rendering_drag_preview: bool = false,
+    /// Presentation offsets for draggable keyed widgets displaced by a live
+    /// insertion preview (and for the source settling after pointer-up).
+    /// These never alter hit testing, semantics, or final layout geometry.
+    layout_motions: []const WidgetLayoutMotion = &.{},
     /// The pointer position while `hovered_id` is a widget that draws
     /// hover-detail chrome (today: `.chart` with `hover_details`), in
     /// the same coordinate space as widget frames. Null everywhere
@@ -301,6 +337,22 @@ pub const WidgetRenderState = struct {
         if (id == 0) return false;
         for (self.revealing_disclosure_ids) |revealing_id| {
             if (revealing_id == id) return true;
+        }
+        return false;
+    }
+
+    pub fn layoutMotionOffset(self: WidgetRenderState, id: ObjectId) geometry.OffsetF {
+        if (id == 0 or self.rendering_drag_preview) return .{};
+        for (self.layout_motions) |motion| {
+            if (motion.id == id) return motion.offset;
+        }
+        return .{};
+    }
+
+    pub fn layoutMotionEscapesAncestorClips(self: WidgetRenderState, id: ObjectId) bool {
+        if (id == 0 or self.rendering_drag_preview) return false;
+        for (self.layout_motions) |motion| {
+            if (motion.id == id) return motion.escape_ancestor_clips;
         }
         return false;
     }

@@ -40,6 +40,7 @@
     "frame_msg": false,
     "key_msg": true,
     "pinch_msg": false,
+    "drop_msg": false,
     "appearance_msg": null,
     "chrome_msg": null,
     "env_msgs": []

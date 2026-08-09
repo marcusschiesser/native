@@ -206,3 +206,9 @@ export fn nsc_core_pinch_msg(window_id: f64, label: [*]const u8, label_len: usiz
     _ = y;
     channelEnvelopeOut(out, out_len);
 }
+
+export fn nsc_core_drop_msg(event: [*]const u8, event_len: usize, out: *[*]const u8, out_len: *usize) void {
+    _ = event;
+    _ = event_len;
+    channelEnvelopeOut(out, out_len);
+}

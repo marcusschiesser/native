@@ -36,6 +36,7 @@ const platform = @import("../platform/root.zig");
 const core = @import("core.zig");
 const canvas_frame = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
+const canvas_widget_events = @import("canvas_widget_events.zig");
 const launch_timing = @import("launch_timing.zig");
 const runtime_effects = @import("effects.zig");
 const terminal_session = @import("terminal_session.zig");
@@ -617,6 +618,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// also declare canvas scroll regions should leave this
             /// null (regions consume wheel input themselves).
             on_wheel: ?*const fn (wheel: platform.WheelEvent) ?MsgT = null,
+            /// Optional mapping from an OS file drop into a message. This
+            /// app-level channel receives every drop after any targeted
+            /// canvas widget handler, with the source window/view, optional
+            /// view-local point, and the complete path list intact. The
+            /// paths are borrowed for the callback; dispatch copies any
+            /// bytes the model retains through the ordinary update path.
+            on_drop: ?*const fn (drop: platform.FileDropEvent) ?MsgT = null,
             /// Optional mapping from runtime timer events (started via
             /// `runtime.startTimer`) into messages. Framework-reserved timer
             /// ids (>= `platform.reserved_timer_id_base`) are handled
@@ -987,6 +995,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// payload of any size can be owned — a fixed budget would turn
         /// a large `ui.fmt` payload into a silently unpaired leave.
         hover_msg_leave_arenas: [hover_msg_slot_count]std.heap.ArenaAllocator = undefined,
+        /// The authored `on-drag` Msg captured while the source is live.
+        /// A phase-0 update is allowed to unmount its own widget; the owned
+        /// template preserves that handler until the runtime delivers the
+        /// paired cancel through its retained drag-route snapshot.
+        drag_msg_window_id: platform.WindowId = 1,
+        drag_msg_view_label_storage: [app_manifest.max_view_label_bytes]u8 = undefined,
+        drag_msg_view_label_len: usize = 0,
+        drag_msg_source_id: canvas.ObjectId = 0,
+        drag_msg_view_size: geometry.SizeF = .{},
+        drag_msg_template: ?MsgT = null,
+        drag_msg_template_arena: std.heap.ArenaAllocator,
         /// Re-entrancy guard for `drainHoverMsgs`: the drain's own
         /// dispatches must not drain recursively through `dispatch`'s
         /// tail.
@@ -1208,6 +1227,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
                 .hover_msg_leave_arenas = hoverMsgLeaveArenasInit(backing),
+                .drag_msg_template_arena = std.heap.ArenaAllocator.init(backing),
                 .effects = Effects.init(backing),
                 .terminal_sessions = terminal_session.TerminalSessions.init(backing),
             };
@@ -1273,6 +1293,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .window_slots = windowSlotsInit(backing),
                 .markup_fragment_slots = if (comptime fragment_watch_enabled) markupFragmentSlotsInit(backing) else {},
                 .hover_msg_leave_arenas = hoverMsgLeaveArenasInit(backing),
+                .drag_msg_template_arena = std.heap.ArenaAllocator.init(backing),
                 .effects = Effects.init(backing),
                 .terminal_sessions = terminal_session.TerminalSessions.init(backing),
             };
@@ -1311,6 +1332,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 slot.arenas[1].deinit();
             }
             for (&self.hover_msg_leave_arenas) |*arena| arena.deinit();
+            self.drag_msg_template_arena.deinit();
             if (self.pixel_buffer.len > 0) self.backing.free(self.pixel_buffer);
             if (self.pixel_scratch.len > 0) self.backing.free(self.pixel_scratch);
             self.pixel_buffer = &.{};
@@ -3986,9 +4008,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     try self.rebuildVideoChrome(runtime);
                 },
                 .effects_wake => try self.drainEffects(runtime),
+                .files_dropped => |drop| {
+                    const map = self.options.on_drop orelse return;
+                    if (map(drop)) |msg| try self.dispatch(runtime, drop.window_id, msg);
+                },
                 .gpu_surface_frame => |frame_event| try self.handleFrame(runtime, frame_event),
                 .gpu_surface_resized => |resize_event| try self.handleResize(runtime, resize_event),
                 .canvas_widget_pointer => |pointer_event| try self.handlePointer(runtime, pointer_event),
+                .canvas_widget_drag => |drag_event| try self.handleWidgetDrag(runtime, drag_event),
                 .canvas_widget_keyboard => |keyboard_event| try self.handleKeyboard(runtime, keyboard_event),
                 .canvas_widget_scroll => |scroll_event| try self.handleScroll(runtime, scroll_event),
                 .canvas_widget_context_menu => |menu_event| try self.handleContextMenu(runtime, menu_event),
@@ -5647,6 +5674,91 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (tree.msgForResize(resize_event.id, resize_event.fraction)) |msg| {
                 try self.dispatch(runtime, resize_event.window_id, msg);
             }
+        }
+
+        /// A markup `on-drag` dispatches live motion, release, and
+        /// cancellation. Motion remains runtime-owned for capture and the
+        /// floating preview; the model receives the source binding, phase,
+        /// point, and view dimensions so it can preview a semantic insertion
+        /// during motion, commit it on release, or restore it on cancel.
+        fn handleWidgetDrag(self: *Self, runtime: *Runtime, drag_event: core.CanvasWidgetDragEvent) anyerror!void {
+            // The runtime promotes a source only after this slop, so terminal
+            // phases are always real drags and must dispatch even when the
+            // pointer returned near its origin before release. Change events
+            // below slop remain on the low-level channel to own text motion,
+            // but declarative apps do not hear them.
+            if (drag_event.drag.phase == .change and
+                !canvas_widget_events.canvasWidgetDragCrossedSlop(drag_event.drag.delta)) return;
+            const source = drag_event.source orelse return;
+            // Once drag wins the pointer gesture it also owns its delayed
+            // interpretation. An element may declare both on-hold and on-drag;
+            // leaving the down-armed timer live would dispatch the hold Msg in
+            // the middle of a stationary drag and then dispatch drag end too.
+            if (drag_event.drag.phase == .change) self.disarmHold(runtime);
+            const tree = self.treeForViewLabel(drag_event.view_label);
+            const live_template = if (tree) |value| value.msgFor(source.id, .drag) else null;
+            const layout: ?canvas.WidgetLayoutTree = runtime.canvasWidgetLayout(drag_event.window_id, drag_event.view_label) catch null;
+            const live_view_size: ?geometry.SizeF = if (layout) |value| if (value.nodes.len > 0) blk: {
+                const root = value.nodes[0].frame.normalized();
+                break :blk geometry.SizeF.init(root.width, root.height);
+            } else null else null;
+
+            if (drag_event.drag.phase == .change) {
+                const template = live_template orelse return;
+                const view_size = live_view_size orelse return;
+                const msg = Ui.Tree.msgForDragTemplate(template, drag_event.drag, view_size) orelse return;
+                // Capture before dispatch: this very Msg may rebuild the tree
+                // without its source or handler.
+                try self.captureWidgetDragMsg(drag_event, template, view_size);
+                try self.dispatch(runtime, drag_event.window_id, msg);
+                return;
+            }
+
+            const captured = self.widgetDragCaptureMatches(drag_event.window_id, drag_event.view_label, source.id);
+            const maybe_template: ?MsgT = live_template orelse if (captured) self.drag_msg_template else null;
+            const template = maybe_template orelse {
+                if (captured) self.clearWidgetDragMsgCapture();
+                return;
+            };
+            const view_size = live_view_size orelse if (captured) self.drag_msg_view_size else return;
+            const msg = Ui.Tree.msgForDragTemplate(template, drag_event.drag, view_size) orelse {
+                if (captured) self.clearWidgetDragMsgCapture();
+                return;
+            };
+            defer if (captured) self.clearWidgetDragMsgCapture();
+            try self.dispatch(runtime, drag_event.window_id, msg);
+        }
+
+        fn captureWidgetDragMsg(self: *Self, drag_event: core.CanvasWidgetDragEvent, template: MsgT, view_size: geometry.SizeF) anyerror!void {
+            _ = self.drag_msg_template_arena.reset(.free_all);
+            self.drag_msg_template = deepCopyMsgValue(MsgT, template, self.drag_msg_template_arena.allocator(), 0) catch |err| {
+                self.drag_msg_template = null;
+                self.drag_msg_source_id = 0;
+                _ = self.drag_msg_template_arena.reset(.free_all);
+                ui_app_log.warn("on-drag terminal capture failed: {t}", .{err});
+                return err;
+            };
+            self.drag_msg_window_id = drag_event.window_id;
+            const label_len = @min(drag_event.view_label.len, self.drag_msg_view_label_storage.len);
+            @memcpy(self.drag_msg_view_label_storage[0..label_len], drag_event.view_label[0..label_len]);
+            self.drag_msg_view_label_len = label_len;
+            self.drag_msg_source_id = drag_event.drag.source_id;
+            self.drag_msg_view_size = view_size;
+        }
+
+        fn widgetDragCaptureMatches(self: *const Self, window_id: platform.WindowId, view_label: []const u8, source_id: canvas.ObjectId) bool {
+            return self.drag_msg_template != null and
+                self.drag_msg_window_id == window_id and
+                self.drag_msg_source_id == source_id and
+                std.mem.eql(u8, self.drag_msg_view_label_storage[0..self.drag_msg_view_label_len], view_label);
+        }
+
+        fn clearWidgetDragMsgCapture(self: *Self) void {
+            self.drag_msg_template = null;
+            self.drag_msg_source_id = 0;
+            self.drag_msg_view_label_len = 0;
+            self.drag_msg_view_size = .{};
+            _ = self.drag_msg_template_arena.reset(.free_all);
         }
 
         /// Slider value changes from pointer gestures (rail click, scrub
