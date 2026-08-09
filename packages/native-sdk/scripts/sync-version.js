@@ -117,7 +117,7 @@ for (const entry of readdirSync(npmDir, { withFileTypes: true })) {
 // The committed TS examples' @native-sdk/core pins (exact, like the
 // scaffold's, so a post-publish `npm install` resolves the same content
 // the CLI materializes).
-for (const example of ['examples/soundboard-ts', 'examples/system-monitor-ts']) {
+for (const example of ['examples/kanban', 'examples/soundboard-ts', 'examples/system-monitor-ts']) {
   const examplePath = join(repoRoot, ...example.split('/'), 'package.json');
   const exampleJson = JSON.parse(readFileSync(examplePath, 'utf-8'));
   if (exampleJson.dependencies?.['@native-sdk/core'] !== version) {

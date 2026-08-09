@@ -416,6 +416,17 @@ pub fn widgetRenderStateDirtyBounds(layout: anytype, previous: WidgetRenderState
         bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, previous, tokens));
         bounds = unionOptionalBounds(bounds, widget_render.chartHoverDetailDirtyBounds(layout, next, tokens));
     }
+    // The drag preview is a late overlay that can cross every ancestor
+    // clip and column boundary. Dirty the viewport whenever it appears,
+    // moves, changes source, or disappears; display-list diffing still
+    // narrows the concrete command changes for the frame planner.
+    if (previous.drag_preview_id != next.drag_preview_id or
+        !optionalPointsEqual(previous.drag_preview_origin, next.drag_preview_origin) or
+        previous.drag_preview_offset.dx != next.drag_preview_offset.dx or
+        previous.drag_preview_offset.dy != next.drag_preview_offset.dy)
+    {
+        bounds = unionOptionalBounds(bounds, widget_render.widgetLayoutRootBounds(layout));
+    }
     return bounds;
 }
 

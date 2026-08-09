@@ -266,8 +266,9 @@ const Emitter = struct {
         // mere type under one of these names would falsely activate
         // the channel and then fail as a non-function.
         try reserved.appendSlice(self.arena, &.{
-            "subscriptions", "commandMsg",    "frameMsg",  "keyMsg",
-            "pinchMsg",      "appearanceMsg", "chromeMsg", "envMsgs",
+            "subscriptions", "commandMsg", "frameMsg",      "keyMsg",
+            "pinchMsg",      "dropMsg",    "appearanceMsg", "chromeMsg",
+            "envMsgs",
         });
         // The wiring aliases (wiringAliases) claim the host layer's
         // fixed spellings whenever the sidecar's own names differ.
@@ -276,7 +277,7 @@ const Emitter = struct {
         // Optional glue reserves its name only when it is emitted.
         if (self.sidecar.model_helpers.len > 0) try reserved.append(self.arena, "callHelper");
         const chan = self.sidecar.channels;
-        if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg) {
+        if (chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg) {
             try reserved.appendSlice(self.arena, &.{ "msgFromEnvelope", "envelope", "header" });
         }
         if (self.sidecar.init_returns_cmd) try reserved.append(self.arena, "InitResult");
@@ -284,6 +285,7 @@ const Emitter = struct {
         if (self.sidecar.channels.frame_msg) try reserved.append(self.arena, "FrameEvent");
         if (self.sidecar.channels.key_msg) try reserved.append(self.arena, "KeyEvent");
         if (self.sidecar.channels.pinch_msg) try reserved.appendSlice(self.arena, &.{ "PinchEvent", "PinchPhase" });
+        if (self.sidecar.channels.drop_msg) try reserved.appendSlice(self.arena, &.{ "FileDropEvent", "FileDropPoint" });
 
         const table_names = try self.allTableNames();
         for (table_names) |name| {
@@ -989,7 +991,12 @@ const Emitter = struct {
         if (self.sidecar.update_returns_cmd) {
             try self.raw("    return .{ .model = snapshotModel(), .cmd = cmd_ptr[0..cmd_len] };\n}\n");
         } else {
-            try self.raw("    _ = cmd_ptr;\n    _ = cmd_len;\n    return snapshotModel();\n}\n");
+            // Every dispatch ABI receives these as out-pointers even when
+            // the authored update returns only Model. Passing their addresses
+            // is already a use; discarding them again is a Zig 0.16 error
+            // ("pointless discard of local variable"). The core owns and
+            // ignores the empty command envelope in this shape.
+            try self.raw("    return snapshotModel();\n}\n");
         }
 
         if (self.sidecar.has_subscriptions) {
@@ -1102,7 +1109,7 @@ const Emitter = struct {
 
     fn channels(self: *Emitter) Error!void {
         const chan = self.sidecar.channels;
-        const any_fn_channel = chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg;
+        const any_fn_channel = chan.command_msg or chan.frame_msg or chan.key_msg or chan.pinch_msg or chan.drop_msg;
 
         if (chan.command_msg) {
             try self.print(
@@ -1183,6 +1190,34 @@ const Emitter = struct {
                 \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
                 \\    var out_len: usize = 0;
                 \\    abi.pinch_msg(pinch.windowId, pinch.label.ptr, pinch.label.len, @intCast(@intFromEnum(pinch.phase)), pinch.scale, pinch.x, pinch.y, &out_ptr, &out_len);
+                \\    return msgFromEnvelope(shim_rt.channelEnvelopeBytes(out_ptr, out_len));
+                \\}}
+                \\
+            , .{ident(self.sidecar.msg.name)});
+        }
+        if (chan.drop_msg) {
+            try self.print(
+                \\
+                \\/// A file drop's optional view-local point.
+                \\pub const FileDropPoint = struct {{
+                \\    x: f64,
+                \\    y: f64,
+                \\}};
+                \\
+                \\/// The file-drop channel's source identity, optional point,
+                \\/// and byte-text path list.
+                \\pub const FileDropEvent = struct {{
+                \\    windowId: f64,
+                \\    viewLabel: []const u8,
+                \\    point: ?FileDropPoint,
+                \\    paths: []const []const u8,
+                \\}};
+                \\
+                \\pub fn dropMsg(drop: FileDropEvent) ?{f} {{
+                \\    const encoded = shim_rt.encodeAlloc(FileDropEvent, drop, shim_rt.frameAllocator());
+                \\    var out_ptr: [*]const u8 = &shim_rt.channel_out_guard;
+                \\    var out_len: usize = 0;
+                \\    abi.drop_msg(encoded.ptr, encoded.len, &out_ptr, &out_len);
                 \\    return msgFromEnvelope(shim_rt.channelEnvelopeBytes(out_ptr, out_len));
                 \\}}
                 \\
@@ -1688,7 +1723,7 @@ test "a u64 attestation on chrome geometry refuses at check time" {
         \\    {"name": "chrome_changed", "payload": {"kind": "record", "name": "Msg_chrome_changed"}}
         \\  ], "unbound": []},
         \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false,
-        \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false,
+        \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false, "drop_msg": false,
         \\    "appearance_msg": null, "chrome_msg": "chrome_changed", "env_msgs": []},
         \\  "abi": {"prefix": "nsc_core_", "exports": ["abi_version", "build_id", "set_panic_sink", "init",
         \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
@@ -1857,7 +1892,7 @@ test "a shared authored type spelling like a synthesized name stays a top-level 
         \\  "model": "Model", "model_helpers": [], "model_unbound": [],
         \\  "msg": {"name": "Msg", "arms": [{"name": "bump", "payload": {"kind": "void"}}], "unbound": []},
         \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false,
-        \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false,
+        \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false, "drop_msg": false,
         \\    "appearance_msg": null, "chrome_msg": null, "env_msgs": []},
         \\  "abi": {"prefix": "nsc_core_", "exports": ["abi_version", "build_id", "set_panic_sink", "init",
         \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
@@ -1955,6 +1990,18 @@ test "UpdateResult reserves only when the cmd-returning update emits it" {
     const generated = try emitFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "pub const UpdateResult = enum(u8) {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "pub fn update(model: *const Model, msg: Msg) *const Model {") != null);
+}
+
+test "model-only update does not pointlessly discard command out variables" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"update_returns_cmd\": true", "\"update_returns_cmd\": false");
+    const generated = try emitFromJson(arena, source);
+    try testing.expect(std.mem.indexOf(u8, generated, "pub fn update(model: *const Model, msg: Msg) *const Model {") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "abi.dispatch_void(0, &cmd_ptr, &cmd_len)") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "_ = cmd_ptr;") == null);
+    try testing.expect(std.mem.indexOf(u8, generated, "_ = cmd_len;") == null);
 }
 
 test "a node-stored record as a message arm payload refuses; value-stored passes" {
@@ -2292,7 +2339,7 @@ test "a chrome arm holding its insets by reference refuses" {
         \\    {"name": "chrome_changed", "payload": {"kind": "record", "name": "Msg_chrome_changed"}}
         \\  ], "unbound": []},
         \\  "init_returns_cmd": false, "update_returns_cmd": true, "has_subscriptions": false,
-        \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false,
+        \\  "channels": {"command_msg": false, "frame_msg": false, "key_msg": false, "pinch_msg": false, "drop_msg": false,
         \\    "appearance_msg": null, "chrome_msg": "chrome_changed", "env_msgs": []},
         \\  "abi": {"prefix": "nsc_core_", "exports": ["abi_version", "build_id", "set_panic_sink", "init",
         \\    "collect", "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",

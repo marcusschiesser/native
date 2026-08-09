@@ -137,6 +137,20 @@ test "ui builder distinguishes inherited tab padding from an equal author value"
     try testing.expect(!explicit.widget.layout.padding_is_kind_default);
 }
 
+test "explicit zero padding overrides card kind default" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const inherited = ui.el(.card, .{}, .{});
+    try testing.expectEqual(@as(f32, 24), inherited.widget.layout.padding.top);
+    try testing.expect(inherited.widget.layout.padding_is_kind_default);
+
+    const explicit = ui.el(.card, .{ .padding = 0 }, .{});
+    try testing.expectEqual(geometry.InsetsF{}, explicit.widget.layout.padding);
+    try testing.expect(!explicit.widget.layout.padding_is_kind_default);
+}
+
 test "structural ids are stable across rebuilds" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

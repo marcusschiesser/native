@@ -73,9 +73,10 @@ pub fn isDragSource(widget: Widget) bool {
 /// `canvasWidgetRuntimeHitTarget`, both markup engines, and (via a name
 /// list kept in sync by a test in ui_markup_view_tests.zig) the markup
 /// validator all derive from it. The widget-level predicate is
-/// `isHitTarget`: a bound press/toggle handler (stamped into
+/// `isHitTarget`: a bound press/toggle/drag handler (stamped into
 /// `semantics.actions` by the builder and both markup engines) makes ANY
-/// widget a hit target, so `on_press` on a row/stack/icon works.
+/// widget a hit target, so `on_press` or `on_drag` on a row/stack/icon
+/// works across the element's whole frame.
 pub fn widgetKindHitTarget(kind: WidgetKind) bool {
     return switch (kind) {
         .row, .column, .grid, .data_grid, .table, .data_row, .list, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .stack, .tooltip, .icon, .image, .avatar, .badge, .separator, .skeleton, .spinner, .chart, .split, .tree, .input_group, .media_surface => false,
@@ -85,7 +86,7 @@ pub fn widgetKindHitTarget(kind: WidgetKind) bool {
 
 pub fn isHitTarget(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
-    if (widget.semantics.actions.press or widget.semantics.actions.toggle) return true;
+    if (widget.semantics.actions.press or widget.semantics.actions.toggle or widget.semantics.actions.drag) return true;
     if (widget.window_drag) return true;
     // A chart with hover details opted in is hoverable (the runtime
     // tracks the pointer over it to snap the detail card to the nearest

@@ -102,6 +102,7 @@ pub fn build(b: *std.Build) void {
     const diagnostics_mod = module(b, target, optimize, "src/primitives/diagnostics/root.zig");
     const platform_info_mod = module(b, target, optimize, "src/primitives/platform_info/root.zig");
     const json_mod = module(b, target, optimize, "src/primitives/json/root.zig");
+    const app_runner_assets_mod = module(b, target, optimize, "src/app_runner/app_assets.zig");
     const canvas_mod = module(b, target, optimize, "src/primitives/canvas/root.zig");
     canvas_mod.addImport("geometry", geometry_mod);
     canvas_mod.addImport("json", json_mod);
@@ -126,6 +127,7 @@ pub fn build(b: *std.Build) void {
     const diagnostics_tests = testArtifact(b, diagnostics_mod);
     const platform_info_tests = testArtifact(b, platform_info_mod);
     const json_tests = testArtifact(b, json_mod);
+    const app_runner_assets_tests = testArtifact(b, app_runner_assets_mod);
     const canvas_tests = testArtifact(b, canvas_mod);
 
     const desktop_mod = module(b, target, optimize, "src/root.zig");
@@ -468,6 +470,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(diagnostics_tests).step);
     test_step.dependOn(&b.addRunArtifact(platform_info_tests).step);
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
+    test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
@@ -484,6 +487,7 @@ pub fn build(b: *std.Build) void {
         const ts_core_e2e_step = b.step("test-ts-core-e2e", "Run the TypeScript-core end-to-end suites over externally compiled fixture cores (requires node and `npm ci` in packages/core)");
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
         const markup_e2e_run = b.addRunArtifact(ts_core_artifacts.markup);
+        const kanban_e2e_run = b.addRunArtifact(ts_core_artifacts.kanban);
         const soundboard_e2e_run = b.addRunArtifact(ts_core_artifacts.soundboard);
         const monitor_e2e_run = b.addRunArtifact(ts_core_artifacts.system_monitor);
         const scaffold_ide_e2e_run = b.addRunArtifact(ts_core_artifacts.scaffold_ide);
@@ -514,12 +518,14 @@ pub fn build(b: *std.Build) void {
         }
         ts_core_e2e_step.dependOn(&host_e2e_run.step);
         ts_core_e2e_step.dependOn(&markup_e2e_run.step);
+        ts_core_e2e_step.dependOn(&kanban_e2e_run.step);
         ts_core_e2e_step.dependOn(&soundboard_e2e_run.step);
         ts_core_e2e_step.dependOn(&monitor_e2e_run.step);
         ts_core_e2e_step.dependOn(&scaffold_ide_e2e_run.step);
         ts_core_e2e_step.dependOn(&ai_chat_e2e_run.step);
         test_step.dependOn(&host_e2e_run.step);
         test_step.dependOn(&markup_e2e_run.step);
+        test_step.dependOn(&kanban_e2e_run.step);
         test_step.dependOn(&soundboard_e2e_run.step);
         test_step.dependOn(&monitor_e2e_run.step);
         test_step.dependOn(&scaffold_ide_e2e_run.step);
@@ -1919,8 +1925,8 @@ pub fn build(b: *std.Build) void {
     const writeback_smoke_step = b.step("test-writeback-smoke", "Run macOS provenance + write-back automation smoke test");
     // Debug on purpose: the write-back loop lives on the markup
     // interpreter + hot-reload watch, which apps enable in Debug
-    // (kanban's dev_markup_reload) - the release engine is compiled and
-    // watchless by design.
+    // (including the generated TS-core wiring) - the release engine is
+    // compiled and watchless by design.
     const writeback_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
     writeback_smoke_build.setCwd(b.path("examples/kanban"));
     const writeback_smoke_run = b.addSystemCommand(&.{
@@ -1933,45 +1939,45 @@ pub fn build(b: *std.Build) void {
         \\automation_dir=".zig-cache/native-sdk-automation"
         \\mkdir -p "$automation_dir"
         \\rm -f "$automation_dir/snapshot.txt" "$automation_dir"/command*.txt "$automation_dir/provenance.txt"
-        \\# The smoke edits src/board.native through the write-back verb and restores
+        \\# The smoke edits src/app.native through the write-back verb and restores
         \\# it through the same verb; the trap restores from the backup on ANY
         \\# failure so an aborted run never leaves the example dirty.
-        \\cp src/board.native .zig-cache/board.native.smoke-backup
+        \\cp src/app.native .zig-cache/app.native.smoke-backup
         \\"$app" > .zig-cache/native-sdk-writeback-smoke.log 2>&1 &
         \\pid=$!
-        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; cp .zig-cache/board.native.smoke-backup src/board.native; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-writeback-smoke.log) ----" >&2; cat .zig-cache/native-sdk-writeback-smoke.log >&2 2>/dev/null || true; fi' EXIT
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; cp .zig-cache/app.native.smoke-backup src/app.native; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-writeback-smoke.log) ----" >&2; cat .zig-cache/native-sdk-writeback-smoke.log >&2 2>/dev/null || true; fi' EXIT
         \\"$cli" automate assert --timeout-ms 30000 'ready=true' >/dev/null
         \\snapshot="$(cat "$automation_dir/snapshot.txt")"
         \\button_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=button name="Add card".*/\1/p' | head -n 1)"
         \\case "$button_id" in ''|*[!0-9]*) echo "writeback smoke: Add card button id was missing from the snapshot" >&2; exit 1 ;; esac
+        \\heading_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Todo".*/\1/p' | head -n 1)"
+        \\case "$heading_id" in ''|*[!0-9]*) echo "writeback smoke: Todo heading id was missing from the snapshot" >&2; exit 1 ;; esac
         \\# 1. Provenance: the button reports its authored span in the root file.
         \\provenance="$("$cli" automate provenance kanban-canvas "$button_id" 2>/dev/null)"
-        \\case "$provenance" in *"authored=markup"*"root=src/board.native"*) ;; *) echo "writeback smoke: button provenance was not markup-authored: $provenance" >&2; exit 1 ;; esac
-        \\case "$provenance" in *"node file=src/board.native"*) ;; *) echo "writeback smoke: button provenance named the wrong file: $provenance" >&2; exit 1 ;; esac
-        \\# 2. Template + import chain: a card title reports its definition site in
-        \\# the component file plus the <use> site in the root file, with the
-        \\# for-loop iteration key.
-        \\card_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Sketch the board layout".*/\1/p' | head -n 1)"
+        \\case "$provenance" in *"authored=markup"*"root=src/app.native"*) ;; *) echo "writeback smoke: button provenance was not markup-authored: $provenance" >&2; exit 1 ;; esac
+        \\case "$provenance" in *"node file=src/app.native"*) ;; *) echo "writeback smoke: button provenance named the wrong file: $provenance" >&2; exit 1 ;; esac
+        \\# 2. Loop provenance: the boot view is deliberately self-contained,
+        \\# so a card title reports its node in app.native plus its iteration key.
+        \\card_id="$(printf '%s\n' "$snapshot" | sed -n 's/.*widget @w1\/kanban-canvas#\([0-9][0-9]*\) role=text name="Retry failed agent runs".*/\1/p' | head -n 1)"
         \\case "$card_id" in ''|*[!0-9]*) echo "writeback smoke: card text id was missing from the snapshot" >&2; exit 1 ;; esac
         \\card_provenance="$("$cli" automate provenance kanban-canvas "$card_id" 2>/dev/null)"
-        \\case "$card_provenance" in *"node file=src/components/board-column.native"*) ;; *) echo "writeback smoke: card provenance missed the component file: $card_provenance" >&2; exit 1 ;; esac
-        \\case "$card_provenance" in *"use file=src/board.native"*) ;; *) echo "writeback smoke: card provenance missed the use-site chain: $card_provenance" >&2; exit 1 ;; esac
+        \\case "$card_provenance" in *"node file=src/app.native"*) ;; *) echo "writeback smoke: card provenance named the wrong file: $card_provenance" >&2; exit 1 ;; esac
         \\case "$card_provenance" in *"keys="*) ;; *) echo "writeback smoke: card provenance missed the iteration key: $card_provenance" >&2; exit 1 ;; esac
-        \\# 3. Write-back: flip the button label through the verb; the app's own
+        \\# 3. Write-back: flip the Todo heading through the verb; the app's own
         \\# hot-reload watch picks the file change up and repaints.
-        \\"$cli" automate edit kanban-canvas "$button_id" set-text "Add task" >/dev/null 2>&1
-        \\"$cli" automate assert --timeout-ms 15000 'role=button name="Add task"' >/dev/null
-        \\# The file diff is byte-exact: exactly the label bytes changed.
-        \\sed 's/>Add card</>Add task</' .zig-cache/board.native.smoke-backup > .zig-cache/board.native.smoke-expected
-        \\cmp -s .zig-cache/board.native.smoke-expected src/board.native || { echo "writeback smoke: the edit was not minimal-diff" >&2; exit 1; }
+        \\"$cli" automate edit kanban-canvas "$heading_id" set-text "Backlog" >/dev/null 2>&1
+        \\"$cli" automate assert --timeout-ms 15000 'role=text name="Backlog"' >/dev/null
+        \\# The file diff is byte-exact: exactly the heading bytes changed.
+        \\sed 's/>Todo</>Backlog</' .zig-cache/app.native.smoke-backup > .zig-cache/app.native.smoke-expected
+        \\cmp -s .zig-cache/app.native.smoke-expected src/app.native || { echo "writeback smoke: the edit was not minimal-diff" >&2; exit 1; }
         \\# 4. Flip it back through the same verb: the structural id survived the
         \\# reload (text is not identity), and the file restores byte-identical.
-        \\"$cli" automate edit kanban-canvas "$button_id" set-text "Add card" >/dev/null 2>&1
-        \\"$cli" automate assert --timeout-ms 15000 'role=button name="Add card"' >/dev/null
-        \\cmp -s .zig-cache/board.native.smoke-backup src/board.native || { echo "writeback smoke: the flip-back did not restore the file byte-identically" >&2; exit 1; }
+        \\"$cli" automate edit kanban-canvas "$heading_id" set-text "Todo" >/dev/null 2>&1
+        \\"$cli" automate assert --timeout-ms 15000 'role=text name="Todo"' >/dev/null
+        \\cmp -s .zig-cache/app.native.smoke-backup src/app.native || { echo "writeback smoke: the flip-back did not restore the file byte-identically" >&2; exit 1; }
         \\# 5. Refusal: an edit that fails validation leaves the file untouched.
         \\if "$cli" automate edit kanban-canvas "$button_id" set-attr bogus 1 >/dev/null 2>&1; then echo "writeback smoke: an invalid edit was not refused" >&2; exit 1; fi
-        \\cmp -s .zig-cache/board.native.smoke-backup src/board.native || { echo "writeback smoke: a refused edit touched the file" >&2; exit 1; }
+        \\cmp -s .zig-cache/app.native.smoke-backup src/app.native || { echo "writeback smoke: a refused edit touched the file" >&2; exit 1; }
         \\echo "writeback smoke ok"
         ,
         "sh",
@@ -2987,6 +2993,7 @@ const TsCoreE2eArtifacts = struct {
     /// set is a fixed-prefix C ABI, so one process carries ONE archive
     /// — every fixture battery links exactly its own core.
     markup: *std.Build.Step.Compile,
+    kanban: *std.Build.Step.Compile,
     soundboard: *std.Build.Step.Compile,
     system_monitor: *std.Build.Step.Compile,
     /// The stock-IDE contract: a fresh scaffold (and the committed TS
@@ -3094,6 +3101,26 @@ fn tsCoreE2eArtifact(
     markup_e2e_mod.addImport("native_sdk", desktop_mod);
     markup_e2e_mod.addImport("ts_markup_fixture", markup_fixture_mod);
 
+    // The rewritten Kanban example's real TypeScript core and self-contained
+    // shipping markup. Its battery drives native multi-file drops through
+    // the generated dropMsg adapter and then moves the created cards.
+    const kanban_fixture = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "examples/kanban/src/core.ts",
+        .src_dir = b.path("examples/kanban/src"),
+        .name = "kanban_core",
+    });
+    const kanban_core_mod = kanban_fixture.module;
+    const kanban_stage = b.addWriteFiles();
+    const kanban_root = kanban_stage.addCopyFile(b.path("tests/ts-core/kanban_e2e_tests.zig"), "kanban_e2e_tests.zig");
+    _ = kanban_stage.addCopyFile(b.path("examples/kanban/src/app.native"), "app.native");
+    const kanban_mod = b.createModule(.{
+        .root_source_file = kanban_root,
+        .target = target,
+        .optimize = optimize,
+    });
+    kanban_mod.addImport("native_sdk", desktop_mod);
+    kanban_mod.addImport("ts_kanban_core", kanban_core_mod);
+
     // The soundboard-ts example's core and markup, tested as one app:
     // the test root stages beside a copy of the example's app.native so
     // the compiled markup engine builds the SHIPPING view over the
@@ -3189,6 +3216,7 @@ fn tsCoreE2eArtifact(
         f64_slots: []const []const u8 = &.{},
     }{
         .{ .shim_import = "shim_host_core", .contract_name = "host-fixture", .core = host_fixture, .f64_slots = &.{"Model.pastBytes"} },
+        .{ .shim_import = "shim_kanban_core", .contract_name = "kanban", .core = kanban_fixture },
         .{ .shim_import = "shim_soundboard_core", .contract_name = "soundboard", .core = soundboard_fixture },
         .{ .shim_import = "shim_monitor_core", .contract_name = "system-monitor", .core = monitor_fixture },
         .{ .shim_import = "shim_ai_chat_core", .contract_name = "ai-chat", .core = ai_chat_fixture },
@@ -3236,6 +3264,7 @@ fn tsCoreE2eArtifact(
     return .{
         .host = filteredTestArtifact(b, e2e_mod, "ts-core-e2e-tests", &.{}),
         .markup = filteredTestArtifact(b, markup_e2e_mod, "ts-markup-e2e-tests", &.{}),
+        .kanban = filteredTestArtifact(b, kanban_mod, "ts-kanban-e2e-tests", &.{}),
         .soundboard = filteredTestArtifact(b, soundboard_mod, "ts-soundboard-e2e-tests", &.{}),
         .system_monitor = filteredTestArtifact(b, monitor_mod, "ts-system-monitor-e2e-tests", &.{}),
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),

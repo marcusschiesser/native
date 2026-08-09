@@ -334,8 +334,8 @@ export type FetchedKind<M extends Msgish> = M extends Msgish
 // The generated wiring's opt-in host-event channels: export the channel
 // and it is wired (`commandMsg(name: string): Msg | null` is the same
 // family — menus, shortcuts, chrome tabs — and predates these). Event
-// RECORD shapes (`frameMsg`'s FrameEvent, `keyMsg`'s KeyEvent, the
-// appearanceMsg/chromeMsg arm payloads) are DECLARED IN YOUR CORE and
+// RECORD shapes (`frameMsg`'s FrameEvent, `keyMsg`'s KeyEvent,
+// `dropMsg`'s FileDropEvent, the appearanceMsg/chromeMsg arm payloads) are DECLARED IN YOUR CORE and
 // matched by field name, the TextInputEvent rule — they must emit as your
 // module's own records, so an SDK interface cannot stand in for them.
 

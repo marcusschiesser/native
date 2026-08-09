@@ -284,6 +284,8 @@ test "channel entries hold the bytes-envelope laws" {
     try testing.expect(shim_core.keyMsg(.{ .key = "space", .shift = false, .control = true, .alt = false, .super = false }) == null);
     try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 0, .height = 600, .timestampMs = 16, .intervalMs = 16 }) == null);
     try testing.expect(shim_core.pinchMsg(.{ .windowId = 7, .label = "ts-markup-canvas", .phase = .begin, .scale = 0, .x = 1, .y = 2 }) == null);
+    const ignored_paths = [_][]const u8{"/tmp/ignored.txt"};
+    try testing.expect(shim_core.dropMsg(.{ .windowId = 1, .viewLabel = "ts-markup-canvas", .point = null, .paths = &ignored_paths }) == null);
 
     // The presented-frame channel produces the resize at boot width,
     // and the dispatched cycle updates the model so the same frame then
@@ -313,5 +315,20 @@ test "channel entries hold the bytes-envelope laws" {
         const msg = shim_core.pinchMsg(.{ .windowId = 7, .label = "ts-markup-canvas", .phase = .change, .scale = 0.25, .x = 1, .y = 2 }) orelse return error.TestUnexpectedResult;
         try testing.expect(msg == .zoomed);
         shim_model = try singleCycle(arena, shim_model, msg);
+    }
+
+    // The drop channel: the nested optional point and byte-text path
+    // sequence cross the one canonical event buffer into the core.
+    {
+        const paths = [_][]const u8{ "/tmp/first.txt", "/tmp/second.txt" };
+        const msg = shim_core.dropMsg(.{
+            .windowId = 1,
+            .viewLabel = "ts-markup-canvas",
+            .point = .{ .x = 12.5, .y = 24.25 },
+            .paths = &paths,
+        }) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("/tmp/first.txt", msg.banner_set);
+        shim_model = try singleCycle(arena, shim_model, msg);
+        try testing.expectEqualStrings("/tmp/first.txt", shim_model.banner);
     }
 }

@@ -339,13 +339,18 @@ fn widgetDropTargetIndexAtPoint(layout: anytype, point: geometry.PointF) ?usize 
 
 fn widgetDragSourceIndex(layout: anytype, id: ObjectId) ?usize {
     if (id == 0) return null;
-    const index = widgetIndexById(layout, id) orelse return null;
-    const node = layout.nodes[index];
-    if (!widget_access.isDragSource(node.widget)) return null;
-    if (isWidgetHiddenInAncestors(layout, index)) return null;
-    if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
-    if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
-    return index;
+    var current = widgetIndexById(layout, id);
+    while (current) |index| {
+        const node = layout.nodes[index];
+        if (widget_access.isDragSource(node.widget)) {
+            if (isWidgetHiddenInAncestors(layout, index)) return null;
+            if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
+            if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
+            return index;
+        }
+        current = node.parent_index;
+    }
+    return null;
 }
 
 fn routeWidgetEventPath(layout: anytype, target_index: usize, output: []WidgetEventRouteEntry) Error![]const WidgetEventRouteEntry {

@@ -28,8 +28,8 @@
 //! THE HOST-EVENT CHANNELS are the core's own, comptime-detected from
 //! its exports (export exists -> wired; a wiring that also sets the
 //! seam is a teaching panic): `frameMsg(model, frame)` -> `on_frame`,
-//! `keyMsg(key)` -> `on_key`, and the arm exports `appearanceMsg` /
-//! `chromeMsg` -> `on_appearance`/`on_chrome`, each host event built
+//! `keyMsg(key)` -> `on_key`, `dropMsg(drop)` -> `on_drop`, and the arm
+//! exports `appearanceMsg` / `chromeMsg` -> `on_appearance`/`on_chrome`, each host event built
 //! structurally by field name from the core's declared records (the
 //! effects-routing rule applied to the app shell; every shape mismatch
 //! is a teaching compile error re-deriving the frontend's NS1033).
@@ -205,6 +205,12 @@ pub fn TsUiApp(comptime core: type) type {
                     @panic("TsUiApp wires on_pinch from the core's pinchMsg export - remove the wiring's on_pinch");
                 }
                 stamped.on_pinch = pinchMsgAdapter;
+            }
+            if (comptime @hasDecl(core, "dropMsg")) {
+                if (options.on_drop != null) {
+                    @panic("TsUiApp wires on_drop from the core's dropMsg export - remove the wiring's on_drop");
+                }
+                stamped.on_drop = dropMsgAdapter;
             }
             if (comptime @hasDecl(core, "appearanceMsg")) {
                 if (options.on_appearance != null) {
@@ -423,6 +429,33 @@ pub fn TsUiApp(comptime core: type) type {
             return core.pinchMsg(arg);
         }
 
+        /// `Options.on_drop` over the core's `dropMsg(drop)` export: the
+        /// emitted FileDropEvent record carries the source window/view,
+        /// optional view-local point, and every path as byte text. The
+        /// slices stay borrowed through the channel call; a Msg that keeps
+        /// one is committed through the ordinary core dispatch immediately
+        /// after this mapper returns.
+        fn dropMsgAdapter(drop: platform.FileDropEvent) ?Msg {
+            const params = @typeInfo(@TypeOf(core.dropMsg)).@"fn".params;
+            if (comptime params.len != 1) {
+                @compileError("TsUiApp: dropMsg must take one FileDropEvent parameter - regenerate the core");
+            }
+            const DropArg = params[0].type.?;
+            comptime validateDropEvent(DropArg);
+            const PointArg = @typeInfo(@FieldType(DropArg, "point")).optional.child;
+            var arg: DropArg = undefined;
+            arg.windowId = channelNum(@FieldType(DropArg, "windowId"), @floatFromInt(drop.window_id));
+            arg.viewLabel = drop.view_label;
+            arg.point = if (drop.point) |point| blk: {
+                var out: PointArg = undefined;
+                out.x = channelNum(@FieldType(PointArg, "x"), point.x);
+                out.y = channelNum(@FieldType(PointArg, "y"), point.y);
+                break :blk out;
+            } else null;
+            arg.paths = drop.paths;
+            return core.dropMsg(arg);
+        }
+
         /// `Options.on_appearance` over the core's `appearanceMsg` arm
         /// export: the appearance record — `colorScheme` (a declared
         /// light/dark enum, matched by member name), `reduceMotion`,
@@ -507,6 +540,26 @@ pub fn TsUiApp(comptime core: type) type {
                     @compileError("TsUiApp: " ++ what ++ " field '" ++ field.name ++ "' must be a number");
                 }
             }
+        }
+
+        fn validateDropEvent(comptime T: type) void {
+            const teaching = "TsUiApp: dropMsg's FileDropEvent must be exactly { windowId: number; viewLabel: string; point: { x: number; y: number } | null; paths: readonly Uint8Array[] }";
+            const info = @typeInfo(T);
+            if (info != .@"struct" or info.@"struct".fields.len != 4) @compileError(teaching);
+            if (!@hasField(T, "windowId") or !@hasField(T, "viewLabel") or !@hasField(T, "point") or !@hasField(T, "paths")) @compileError(teaching);
+            validateChannelRecord(struct { windowId: @FieldType(T, "windowId") }, &.{"windowId"}, "dropMsg's FileDropEvent", &.{});
+            if (@FieldType(T, "viewLabel") != []const u8) @compileError(teaching);
+
+            const Point = switch (@typeInfo(@FieldType(T, "point"))) {
+                .optional => |optional| optional.child,
+                else => @compileError(teaching),
+            };
+            validateChannelRecord(Point, &.{ "x", "y" }, "dropMsg's FileDropEvent.point", &.{ "x", "y" });
+
+            const paths = @typeInfo(@FieldType(T, "paths"));
+            if (paths != .pointer or paths.pointer.size != .slice) @compileError(teaching);
+            const path = @typeInfo(paths.pointer.child);
+            if (path != .pointer or path.pointer.size != .slice or path.pointer.child != u8 or !path.pointer.is_const) @compileError(teaching);
         }
 
         fn validateAppearanceArm(comptime T: type) void {

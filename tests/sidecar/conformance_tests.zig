@@ -32,6 +32,7 @@ const corewire_rt = @import("corewire_rt");
 const shim_markup = @import("shim_markup_core");
 const shim_integer = @import("shim_integer_core");
 const shim_host = @import("shim_host_core");
+const shim_kanban = @import("shim_kanban_core");
 const shim_soundboard = @import("shim_soundboard_core");
 const shim_monitor = @import("shim_monitor_core");
 const shim_ai_chat = @import("shim_ai_chat_core");
@@ -40,7 +41,7 @@ const testing = std.testing;
 
 // ------------------------------------------------------ markup fixture
 // The bootstrap mirror: hand-written sidecar (independent ground truth
-// for the schema), the full channel surface (frame/key/pinch/
+// for the schema), the full channel surface (frame/key/pinch/drop/
 // appearance/chrome/env), text-input and inline-record payloads, an
 // optional scalar, a node-pointer iterable.
 
@@ -68,6 +69,7 @@ test "markup fixture: the mirror declares the sidecar's channel surface" {
     try testing.expect(@hasDecl(shim_markup, "frameMsg"));
     try testing.expect(@hasDecl(shim_markup, "keyMsg"));
     try testing.expect(@hasDecl(shim_markup, "pinchMsg"));
+    try testing.expect(@hasDecl(shim_markup, "dropMsg"));
     try testing.expect(!@hasDecl(shim_markup, "commandMsg"));
     try testing.expectEqualStrings("appearance_changed", shim_markup.appearanceMsg);
     try testing.expectEqualStrings("chrome_changed", shim_markup.chromeMsg);
@@ -102,6 +104,16 @@ test "host fixture: the mirror declares the boot and subscription shape" {
     // the bare pointer) and the subscription entry.
     try testing.expect(@typeInfo(@typeInfo(@TypeOf(shim_host.initialModel)).@"fn".return_type.?) == .@"struct");
     try testing.expect(@hasDecl(shim_host, "subscriptions"));
+}
+
+// ------------------------------------------------------------- kanban
+
+test "kanban: model-only updates and the native drop channel stay reflected" {
+    try testing.expect(@hasDecl(shim_kanban, "dropMsg"));
+    try testing.expect(@hasDecl(shim_kanban.Model, "todoCards"));
+    try testing.expect(@hasDecl(shim_kanban.Model, "doingCards"));
+    try testing.expect(@hasDecl(shim_kanban.Model, "doneCards"));
+    try testing.expect(@typeInfo(@typeInfo(@TypeOf(shim_kanban.update)).@"fn".return_type.?) == .pointer);
 }
 
 // ------------------------------------------------------------ ai-chat
@@ -162,6 +174,17 @@ test "markup fixture: generated channel entries unpack the stub core's envelope"
     const zoomed = shim_markup.pinchMsg(.{ .windowId = 7, .label = "board", .phase = .change, .scale = 0.25, .x = 1, .y = 2 }).?;
     try testing.expectEqual(@as(f64, 1.25), zoomed.zoomed.factor);
     try testing.expect(zoomed.zoomed.fromBoard);
+
+    // The drop entry accepts its nested optional/sequence input and the
+    // same envelope decoder remains the one result path.
+    const paths = [_][]const u8{"/tmp/report.txt"};
+    const dropped = shim_markup.dropMsg(.{
+        .windowId = 1,
+        .viewLabel = "board",
+        .point = .{ .x = 12.5, .y = 24.25 },
+        .paths = &paths,
+    }).?;
+    try testing.expectEqual(@as(f64, 1.25), dropped.zoomed.factor);
 }
 
 // ---------------------------------------------- integer-class fixture
@@ -286,6 +309,7 @@ test "every generated shim fully analyzes and links against the ABI" {
     refAllDeclsRecursive(shim_markup);
     refAllDeclsRecursive(shim_integer);
     refAllDeclsRecursive(shim_host);
+    refAllDeclsRecursive(shim_kanban);
     refAllDeclsRecursive(shim_soundboard);
     refAllDeclsRecursive(shim_monitor);
     refAllDeclsRecursive(shim_ai_chat);

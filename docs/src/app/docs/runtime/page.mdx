@@ -149,7 +149,7 @@ The runtime dispatches `LifecycleEvent` values through your `event_fn`:
 - **`frame`** -- a frame has been requested (for animations or state updates)
 - **`stop`** -- the app is shutting down
 
-Native file drops dispatch `Event.files_dropped` to `event_fn`. Apps with WebView content also receive `app:activate`, `app:deactivate`, and `drop:files` on each trusted `window.zero` instance:
+Native file drops dispatch `Event.files_dropped` to `event_fn`; `UiApp` maps them through `Options.on_drop`, and TypeScript cores export `dropMsg(drop: FileDropEvent)` (see [Native UI: File drops](/docs/native-ui#file-drops)). Apps with WebView content also receive `app:activate`, `app:deactivate`, and `drop:files` on each trusted `window.zero` instance:
 
 ```ts
 window.zero.on("drop:files", (event) => {

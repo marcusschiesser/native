@@ -623,10 +623,10 @@ fn assetOutputPath(allocator: std.mem.Allocator, output_path: []const u8, resour
 /// app-relative path — Resources/assets by default — so a relative asset
 /// path the app uses at runtime ("assets/music/track.mp3") names the
 /// same file inside the bundle that it names in a dev run: the packaged
-/// macOS host resolves relative asset paths against Resources. An
-/// absolute or parent-escaping --assets directory has no app-relative
-/// meaning a packaged process could resolve, so it keeps the flat
-/// Resources layout.
+/// generated runner and macOS host resolve relative asset paths against
+/// Resources. An absolute or parent-escaping --assets directory has no
+/// app-relative meaning a packaged process could resolve, so it keeps the
+/// flat Resources layout.
 fn macosAssetOutputPath(allocator: std.mem.Allocator, options: PackageOptions) ![]const u8 {
     if (options.frontend != null) return assetOutputPath(allocator, options.output_path, "Contents/Resources", options);
     if (appRelativeAssetSubpath(options.assets_dir)) |subpath| {
