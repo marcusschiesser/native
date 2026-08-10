@@ -1086,7 +1086,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // webview_navigate [op][label_len][label]
                     //                  [url_len u32 LE][url]
-                    0x1E => {
+                    0x20 => {
                         const label = takeShortBytes(cmd, &at);
                         const url = takeLongBytes(cmd, &at);
                         fx.navigateWebView(label, url);
