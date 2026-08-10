@@ -21,7 +21,6 @@ pub const Metadata = struct {
     icons: []const []const u8 = &.{},
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
-    privacy: PrivacyMetadata = .{},
     capabilities: []const []const u8 = &.{},
     bridge_commands: []const BridgeCommandMetadata = &.{},
     web_engine: []const u8 = "system",
@@ -77,8 +76,6 @@ pub const Metadata = struct {
         if (self.platforms.len > 0) allocator.free(self.platforms);
         for (self.permissions) |value| allocator.free(value);
         if (self.permissions.len > 0) allocator.free(self.permissions);
-        if (self.privacy.microphone_usage) |value| allocator.free(value);
-        if (self.privacy.system_audio_usage) |value| allocator.free(value);
         for (self.capabilities) |value| allocator.free(value);
         if (self.capabilities.len > 0) allocator.free(self.capabilities);
         for (self.bridge_commands) |command| {
@@ -190,11 +187,6 @@ pub const Metadata = struct {
         }
         if (self.url_schemes.len > 0) allocator.free(self.url_schemes);
     }
-};
-
-pub const PrivacyMetadata = struct {
-    microphone_usage: ?[]const u8 = null,
-    system_audio_usage: ?[]const u8 = null,
 };
 
 pub const BridgeCommandMetadata = struct {
@@ -456,10 +448,6 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .identity = .{ .id = metadata.id, .name = metadata.name, .display_name = metadata.display_name, .description = metadata.description },
         .version = parseVersion(metadata.version) catch return .{ .ok = false, .message = "app.zon version is invalid" },
         .permissions = permissions,
-        .privacy = .{
-            .microphone_usage = metadata.privacy.microphone_usage,
-            .system_audio_usage = metadata.privacy.system_audio_usage,
-        },
         .capabilities = capabilities,
         .bridge = .{ .commands = bridge_commands },
         .frontend = frontend,
@@ -533,10 +521,6 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .icons = try duplicateStringList(allocator, raw.icons),
         .platforms = try duplicateStringList(allocator, raw.platforms),
         .permissions = try duplicateStringList(allocator, raw.permissions),
-        .privacy = .{
-            .microphone_usage = try duplicateOptionalString(allocator, raw.privacy.microphone_usage),
-            .system_audio_usage = try duplicateOptionalString(allocator, raw.privacy.system_audio_usage),
-        },
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
         .bridge_commands = try convertRawBridgeCommands(allocator, raw.bridge.commands),
         .web_engine = try allocator.dupe(u8, raw.web_engine),
@@ -1668,31 +1652,6 @@ test "manifest metadata parser reads identity version and lists" {
         .file_associations = associations,
         .url_schemes = schemes,
     });
-}
-
-test "manifest metadata parser reads audio privacy and permissions" {
-    const metadata = try parseText(std.testing.allocator,
-        \\.{
-        \\  .id = "com.example.recorder",
-        \\  .name = "recorder",
-        \\  .version = "1.0.0",
-        \\  .permissions = .{ "filesystem", "microphone", "system_audio" },
-        \\  .privacy = .{
-        \\    .microphone_usage = "Record your voice.",
-        \\    .system_audio_usage = "Record meeting audio.",
-        \\  },
-        \\}
-    );
-    defer metadata.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("microphone", metadata.permissions[1]);
-    try std.testing.expectEqualStrings("system_audio", metadata.permissions[2]);
-    try std.testing.expectEqualStrings("Record your voice.", metadata.privacy.microphone_usage.?);
-    try std.testing.expectEqualStrings("Record meeting audio.", metadata.privacy.system_audio_usage.?);
-    const permissions = try parsePermissions(std.testing.allocator, metadata.permissions);
-    defer std.testing.allocator.free(permissions);
-    try std.testing.expectEqual(app_manifest.PermissionKind.microphone, permissions[1].kind());
-    try std.testing.expectEqual(app_manifest.PermissionKind.system_audio, permissions[2].kind());
 }
 
 test "manifest metadata parser reads structured security policy" {

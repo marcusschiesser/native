@@ -67,7 +67,6 @@ pub const RunOptions = struct {
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
             .declares_tray = manifestDeclaresTrayCapability(),
-            .permissions = self.security.permissions,
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,

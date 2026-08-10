@@ -1,4 +1,8 @@
 {
+  // Mirrors the compiler options the @native-sdk/core checker enforces,
+  // so editor diagnostics match `native check` reality. @native-sdk/core
+  // resolves from node_modules: the native CLI materializes the SDK's
+  // copy there (and keeps it fresh) until the package is on npm.
   "compilerOptions": {
     "strict": true,
     "target": "esnext",

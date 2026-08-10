@@ -38,6 +38,8 @@ pub const Op = union(enum) {
     pty_resize: struct { key: []const u8, cols: f64, rows: f64 },
     pty_kill: struct { key: []const u8 },
     show_notification: struct { title: []const u8, subtitle: []const u8, body: []const u8 },
+    audio_capture_start: struct { key: f64, source: u8, sample_rate: u32, channels: u8, event_tag: u8 },
+    audio_capture_stop: struct { key: f64 },
 
     pub const Host = struct {
         name: []const u8,
@@ -353,6 +355,32 @@ pub const CmdIter = struct {
                 const body = longBytes(b, &off);
                 break :blk .{ .show_notification = .{ .title = title, .subtitle = subtitle, .body = body } };
             },
+            // audio_capture_start [op 0x1E][key f64 LE][source u8]
+            // [sample_rate u32 LE][channels u8][event_tag u8].
+            0x1E => blk: {
+                const key: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                const source = b[off];
+                off += 1;
+                const sample_rate = std.mem.readInt(u32, b[off..][0..4], .little);
+                off += 4;
+                const channels = b[off];
+                const event_tag = b[off + 1];
+                off += 2;
+                break :blk .{ .audio_capture_start = .{
+                    .key = key,
+                    .source = source,
+                    .sample_rate = sample_rate,
+                    .channels = channels,
+                    .event_tag = event_tag,
+                } };
+            },
+            // audio_capture_stop [op 0x1F][key f64 LE].
+            0x1F => blk: {
+                const key: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                break :blk .{ .audio_capture_stop = .{ .key = key } };
+            },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
         self.off = off;
@@ -544,6 +572,36 @@ test "the channel records decode, alone and inside a batch" {
     try std.testing.expectEqual(@as(f64, 41), second.channel_close.key);
     const third = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 7), third.now.msg_tag);
+    try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "the audio capture records decode and advance a batch exactly" {
+    var start: [16]u8 = undefined;
+    start[0] = 0x1E;
+    start[1..9].* = @bitCast(@as(f64, 91));
+    start[9] = 1; // system
+    std.mem.writeInt(u32, start[10..14], 24_000, .little);
+    start[14] = 2;
+    start[15] = 6;
+    const opened = findOp(&start, .audio_capture_start) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 91), opened.key);
+    try std.testing.expectEqual(@as(u8, 1), opened.source);
+    try std.testing.expectEqual(@as(u32, 24_000), opened.sample_rate);
+    try std.testing.expectEqual(@as(u8, 2), opened.channels);
+    try std.testing.expectEqual(@as(u8, 6), opened.event_tag);
+
+    var stop: [9]u8 = undefined;
+    stop[0] = 0x1F;
+    stop[1..9].* = @bitCast(@as(f64, 91));
+    var batch: [27]u8 = undefined;
+    batch[0..16].* = start;
+    batch[16..25].* = stop;
+    batch[25..27].* = .{ 0x02, 7 };
+    var iter = CmdIter.init(&batch);
+    _ = iter.next() orelse return error.TestUnexpectedResult;
+    const closed = iter.next() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 91), closed.audio_capture_stop.key);
+    try std.testing.expectEqual(@as(u8, 7), (iter.next() orelse return error.TestUnexpectedResult).now.msg_tag);
     try std.testing.expectEqual(@as(?Op, null), iter.next());
 }
 

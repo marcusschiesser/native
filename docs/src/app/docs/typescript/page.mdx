@@ -299,10 +299,6 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>The audio player: one event stream (<code>loaded</code>, <code>position</code>, <code>completed</code>, <code>failed</code>, <code>spectrum</code>, ...) until <code>audioStop</code> closes it</td>
     </tr>
     <tr>
-      <td><code>Cmd.audioCaptureStart</code> / <code>audioCaptureRead</code> / <code>audioCaptureStop</code> / <code>audioCaptureDiscard</code> / microphone device and access commands</td>
-      <td>macOS 15+ reliable paired s16le PCM, microphone enumeration, and explicit permission status/request operations; see <a href="/docs/audio-capture">Audio Capture</a></td>
-    </tr>
-    <tr>
       <td><code>Cmd.showWindow(label)</code> / <code>Cmd.quitApp()</code></td>
       <td>The menu-bar lifecycle verbs: un-hide + activate the labeled window (the tray "Open" consequence, the counterpart to <code>close_policy = "hide"</code>), and the real graceful terminate</td>
     </tr>
@@ -313,6 +309,10 @@ The runtime interprets the command after the model commits and dispatches any re
     <tr>
       <td><code>Cmd.channelOpen(key, &#123; event &#125;)</code> / <code>channelClose(key)</code></td>
       <td>Open an external-source channel under an app-chosen numeric key: the native side holds the posting handle and feeds bytes from its own threads, and every post arrives through the one <code>event</code> arm with the back-pressure counters aboard. <code>channelClose</code> flushes staged posts, dispatches exactly one <code>closed</code> event with the final drop totals, and frees the key</td>
+    </tr>
+    <tr>
+      <td><code>Cmd.audioCaptureStart(key, spec, &#123; event &#125;)</code> / <code>audioCaptureStop(key)</code></td>
+      <td>Capture <code>microphone</code> or <code>system</code> audio as bounded, timestamped, interleaved signed-16 LE PCM chunks. The stream reports <code>started</code>, <code>data</code>, <code>failed</code>, <code>stopped</code>, and <code>rejected</code>, with observable drop counters</td>
     </tr>
     <tr>
       <td><code>Cmd.host(name, ...args)</code> / <code>Cmd.request(name, payload, &#123; key?, ok, err &#125;)</code></td>
@@ -326,6 +326,8 @@ The runtime interprets the command after the model commits and dispatches any re
 </table>
 
 Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for host results and errors, one number field for timer fires, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for `fetch`'s — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed effect — `Cmd.request`, the named engine ops, `Cmd.delay` — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it silently. The one exception is a live `Cmd.spawn` key, which rejects the duplicate (`err` gets `rejected`) — a running subprocess is never killed implicitly; cancel it first, and that cancel is loud (`err` gets `cancelled`) because killing a process is an observable event. Every `err` arm receives a machine-readable reason, so failure is never silence. Persistence today is `Cmd.writeFile` + a boot-time `Cmd.readFile` — the pattern every real app uses.
+
+For durable packaged-app paths, request the framework-provided app data directory through `envMsgs` and join filenames below it. The runner synthesizes `NATIVE_SDK_APP_DATA_DIR` from the platform convention (`~/Library/Application Support/<app>` on macOS and `%LOCALAPPDATA%\<app>\Data` on Windows), then dispatches it as the same journaled one-`Uint8Array`-field message as an ambient value. This keeps a Finder- or Explorer-launched app independent of its process working directory.
 
 The debounced-autosave shape, in full — edits re-arm a one-shot; one write lands after the pause:
 
@@ -419,6 +421,21 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 }
 ```
 
+Audio input uses the same bounded, wake-driven stream transport without requiring native posting code. `Cmd.audioCaptureStart(key, { source, sampleRate?, channels? }, { event })` captures the microphone or the desktop output mix. The supported canonical rates are 16, 24, and 48 kHz; channels are mono or stereo; the default is 48 kHz mono. Each `data` event carries at most 20 ms of interleaved signed 16-bit little-endian PCM in `pcm`, plus `timestampMs`, `frames`, the delivered format, and drop counters. Microphone and system capture can run concurrently, but only one stream per source is live; starting that source again stops the prior key. `Cmd.audioCaptureStop(key)` quiesces the native callback, drains accepted chunks, then emits one `stopped` terminal. A key remains occupied until that terminal is delivered, so wait for `stopped` before reusing it. Add `"microphone"` and/or `"system_audio"` to `app.zon` permissions so packaged macOS apps receive the required usage descriptions and consent prompts.
+
+```ts:src/core.ts
+import { Cmd, type AudioCaptureState, type AudioCaptureSource } from "@native-sdk/core";
+
+export type Msg =
+  | { readonly kind: "record" }
+  | { readonly kind: "stop" }
+  | { readonly kind: "audio_chunk"; readonly key: number; readonly state: AudioCaptureState; readonly source: AudioCaptureSource; readonly sampleRate: number; readonly channels: number; readonly timestampMs: number; readonly frames: number; readonly pcm: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+
+// In update:
+// case "record": return [model, Cmd.audioCaptureStart(1, { source: "microphone", sampleRate: 48000, channels: 1 }, { event: "audio_chunk" })];
+// case "stop": return [model, Cmd.audioCaptureStop(1)];
+```
+
 ## Subscriptions are Sub data
 
 Recurring effects are declared, not issued: export `subscriptions(model): Sub<Msg>` and return descriptors derived from the current model. After every commit the host reconciles the returned set against its active timers by key — a new key (or a changed interval) arms a timer, a missing key cancels it — so starting, stopping, and re-tuning timers is just returning different data:
@@ -463,7 +480,7 @@ export function subscriptions(model: Model): Sub<Msg> {
 }
 ```
 
-Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.spawn`'s lines, `Cmd.audioPlay`'s events, `Cmd.channelOpen`'s posts) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
+Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.spawn`'s lines, `Cmd.audioPlay`'s events, `Cmd.channelOpen`'s posts, and audio capture chunks) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
 
 ## Text input from markup
 

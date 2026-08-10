@@ -10,7 +10,7 @@
 // return path (NS1017) — they never live in the Model, in a Msg, in a local,
 // or in a helper.
 //
-// The v5 command set:
+// The v3 command set:
 //
 //   Cmd.none                     no effects (what a bare `return model` means)
 //   Cmd.persist()                ask the host to persist the committed model
@@ -390,98 +390,6 @@ export type AudioEventKind<M extends Msgish> = M extends Msgish
     : never
   : never;
 
-export type AudioCaptureState = "started" | "readable" | "stopped" | "failed" | "rejected";
-export type AudioCaptureReason =
-  | "none" | "invalid_options" | "permission_missing" | "permission_required"
-  | "already_recording" | "device_not_found" | "device_disconnected"
-  | "capture_failed" | "no_audio" | "consumer_too_slow" | "discarded" | "unsupported";
-export type AudioCaptureEventArm = {
-  readonly key: Uint8Array;
-  readonly state: AudioCaptureState;
-  readonly reason: AudioCaptureReason;
-  readonly sampleRate: number;
-  readonly channels: number;
-  readonly availableFrames: number;
-  readonly capacityFrames: number;
-  readonly framesProduced: number;
-};
-export type AudioCaptureEventKind<M extends Msgish> = M extends Msgish
-  ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureEventArm]
-    ? [keyof AudioCaptureEventArm] extends [Exclude<keyof M, "kind">]
-      ? M extends Msgish & AudioCaptureEventArm
-        ? [AudioCaptureState] extends [M["state"]]
-          ? [AudioCaptureReason] extends [M["reason"]] ? M["kind"] : never
-          : never
-        : never
-      : never
-    : never
-  : never;
-
-export type AudioCaptureReadState = "chunk" | "empty" | "ended" | "rejected";
-export type AudioCaptureReadReason = "none" | "invalid_options" | "not_recording" | "read_in_progress";
-export type AudioCaptureReadEventArm = {
-  readonly key: Uint8Array;
-  readonly state: AudioCaptureReadState;
-  readonly reason: AudioCaptureReadReason;
-  readonly sequence: number;
-  readonly frameOffset: number;
-  readonly frames: number;
-  readonly systemPcm: Uint8Array;
-  readonly microphonePcm: Uint8Array;
-  readonly systemGapFrames: number;
-  readonly microphoneGapFrames: number;
-  readonly remainingFrames: number;
-  readonly endOfStream: boolean;
-};
-export type AudioCaptureReadEventKind<M extends Msgish> = M extends Msgish
-  ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureReadEventArm]
-    ? [keyof AudioCaptureReadEventArm] extends [Exclude<keyof M, "kind">]
-      ? M extends Msgish & AudioCaptureReadEventArm ? M["kind"] : never
-      : never
-    : never
-  : never;
-
-export type MicrophoneDeviceState = "device" | "completed" | "failed" | "rejected";
-export type MicrophoneDeviceEventArm = {
-  readonly key: Uint8Array;
-  readonly state: MicrophoneDeviceState;
-  readonly id: Uint8Array;
-  readonly name: Uint8Array;
-  readonly isDefault: boolean;
-  readonly index: number;
-  readonly total: number;
-};
-export type MicrophoneDeviceEventKind<M extends Msgish> = M extends Msgish
-  ? [Exclude<keyof M, "kind">] extends [keyof MicrophoneDeviceEventArm]
-    ? [keyof MicrophoneDeviceEventArm] extends [Exclude<keyof M, "kind">]
-      ? M extends Msgish & MicrophoneDeviceEventArm
-        ? [MicrophoneDeviceState] extends [M["state"]] ? M["kind"] : never
-        : never
-      : never
-    : never
-  : never;
-
-export type CaptureAccessSource = "system_audio" | "microphone";
-export type CaptureAccessAction = "status" | "request";
-export type CaptureAccessStatus = "authorized" | "not_authorized" | "not_determined" | "denied" | "restricted" | "unavailable";
-export type CaptureAccessEventArm = {
-  readonly key: Uint8Array;
-  readonly source: CaptureAccessSource;
-  readonly status: CaptureAccessStatus;
-  readonly restartRequired: boolean;
-};
-export type CaptureAccessEventKind<M extends Msgish> = M extends Msgish
-  ? [Exclude<keyof M, "kind">] extends [keyof CaptureAccessEventArm]
-    ? [keyof CaptureAccessEventArm] extends [Exclude<keyof M, "kind">]
-      ? M extends Msgish & CaptureAccessEventArm
-        ? [CaptureAccessSource] extends [M["source"]]
-          ? [CaptureAccessStatus] extends [M["status"]] ? M["kind"] : never
-          : never
-        : never
-      : never
-    : never
-  : never;
-
 /// The video event states, the audio vocabulary without spectrum: `loaded`
 /// acknowledges a successful load with the player's duration estimate and
 /// the stream's decoded pixel dimensions; `position` ticks at the
@@ -651,6 +559,64 @@ export interface ChannelRoute<M extends Msgish> {
   readonly event: ChannelEventKind<M>;
 }
 
+/// The native capture source. "microphone" captures the selected/default
+/// input device; "system" captures the process-independent desktop output
+/// mix (the OS may present a screen/audio consent prompt).
+export type AudioCaptureSource = "microphone" | "system";
+
+/// Capture stream states. A successful stream begins with "started", emits
+/// zero or more "data" chunks, and ends with "stopped" after
+/// `Cmd.audioCaptureStop`. "failed" reports a source/permission failure;
+/// stop that stream to retire it. "rejected" means the runtime refused the
+/// start before a native source was opened.
+export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
+
+export type AudioCaptureSampleRate = 16000 | 24000 | 48000;
+export type AudioCaptureChannels = 1 | 2;
+
+/// Requested canonical output format. Native inputs are converted to
+/// interleaved signed 16-bit little-endian PCM before delivery.
+export interface AudioCaptureSpec {
+  readonly source: AudioCaptureSource;
+  readonly sampleRate?: AudioCaptureSampleRate;
+  readonly channels?: AudioCaptureChannels;
+}
+
+/// The payload shape of an audio-capture event arm, matched by field name.
+/// `pcm` is populated only for "data" and is valid for this dispatch; copy
+/// bytes retained by the model. Chunks are at most 20ms. Drop counters make
+/// bounded-queue back-pressure observable rather than silent.
+export type AudioCaptureEventArm = {
+  readonly key: number;
+  readonly state: AudioCaptureState;
+  readonly source: AudioCaptureSource;
+  readonly sampleRate: number;
+  readonly channels: number;
+  readonly timestampMs: number;
+  readonly frames: number;
+  readonly pcm: Uint8Array;
+  readonly droppedPending: number;
+  readonly droppedTotal: number;
+};
+
+export type AudioCaptureEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureEventArm]
+    ? [keyof AudioCaptureEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & AudioCaptureEventArm
+        ? [AudioCaptureState] extends [M["state"]]
+          ? [AudioCaptureSource] extends [M["source"]]
+            ? M["kind"]
+            : never
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+export interface AudioCaptureRoute<M extends Msgish> {
+  readonly event: AudioCaptureEventKind<M>;
+}
+
 /// The pty session event states, mirroring the engine's vocabulary:
 /// "output" is one coalesced batch of child output; "exit" is the
 /// exactly-one terminal every session produces — a clean end, a signal,
@@ -798,22 +764,6 @@ export interface AudioSource {
 export interface AudioRoute<M extends Msgish> {
   readonly event: AudioEventKind<M>;
 }
-
-export type MicrophoneSelection = "none" | "default" | Uint8Array;
-/** Sources and normalized PCM format for one reliable capture stream.
- * `bufferDurationMs` defaults to 5000 and accepts 1000..30000. */
-export interface AudioCaptureOptions {
-  readonly systemAudio?: boolean;
-  readonly microphone?: MicrophoneSelection;
-  readonly sampleRate?: 16000 | 24000 | 44100 | 48000;
-  readonly channels?: 1 | 2;
-  readonly excludeCurrentProcessAudio?: boolean;
-  readonly bufferDurationMs?: number;
-}
-export interface AudioCaptureRoute<M extends Msgish> { readonly event: AudioCaptureEventKind<M>; }
-export interface AudioCaptureReadRoute<M extends Msgish> { readonly event: AudioCaptureReadEventKind<M>; }
-export interface MicrophoneDevicesRoute<M extends Msgish> { readonly event: MicrophoneDeviceEventKind<M>; }
-export interface CaptureAccessRoute<M extends Msgish> { readonly event: CaptureAccessEventKind<M>; }
 
 /// A `Cmd.videoLoad` source. `surface` is the model-owned media-surface id
 /// the markup binds — the texture channel the decoded frames feed. The
@@ -967,23 +917,6 @@ export type Cmd<M extends Msgish> =
       readonly value: number;
     }
   | {
-      readonly op: "audio_capture_start";
-      readonly key: string;
-      readonly eventKind: string;
-      readonly options: AudioCaptureOptions;
-    }
-  | { readonly op: "audio_capture_stop"; readonly key: string }
-  | { readonly op: "audio_capture_read"; readonly key: string; readonly eventKind: string; readonly maxFrames: number }
-  | { readonly op: "audio_capture_discard"; readonly key: string }
-  | { readonly op: "microphone_devices"; readonly key: string; readonly eventKind: string }
-  | {
-      readonly op: "capture_access";
-      readonly key: string;
-      readonly eventKind: string;
-      readonly source: CaptureAccessSource;
-      readonly action: CaptureAccessAction;
-    }
-  | {
       readonly op: "video_load";
       readonly key: string;
       readonly eventKind: string;
@@ -1017,6 +950,15 @@ export type Cmd<M extends Msgish> =
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string }
   | { readonly op: "channel_close"; readonly key: number }
+  | {
+      readonly op: "audio_capture_start";
+      readonly key: number;
+      readonly source: AudioCaptureSource;
+      readonly sampleRate: number;
+      readonly channels: number;
+      readonly eventKind: string;
+    }
+  | { readonly op: "audio_capture_stop"; readonly key: number }
   | {
       readonly op: "pty_spawn";
       readonly key: string;
@@ -1271,39 +1213,6 @@ export const Cmd = {
     return { op: "audio_ctl", key, verb: "volume", value: volume };
   },
 
-  /** Start the app's single capture stream. This never prompts; request
-   * access explicitly first. Lifecycle/readability events use `route`. */
-  audioCaptureStart<M extends Msgish>(key: string, options: AudioCaptureOptions, route: AudioCaptureRoute<M>): Cmd<M> {
-    return { op: "audio_capture_start", key, eventKind: route.event, options };
-  },
-
-  /** Stop producers while retaining every accepted frame for draining. */
-  audioCaptureStop(key: string): Cmd<never> {
-    return { op: "audio_capture_stop", key };
-  },
-
-  /** Pull whole aligned blocks, up to 100 ms. PCM byte slices in the
-   * resulting message are borrowed until update returns. */
-  audioCaptureRead<M extends Msgish>(key: string, maxFrames: number, route: AudioCaptureReadRoute<M>): Cmd<M> {
-    return { op: "audio_capture_read", key, eventKind: route.event, maxFrames };
-  },
-
-  /** Stop and release a capture immediately, discarding buffered PCM. */
-  audioCaptureDiscard(key: string): Cmd<never> {
-    return { op: "audio_capture_discard", key };
-  },
-
-  /** Stream a microphone snapshot as device records plus one terminal. */
-  microphoneDevices<M extends Msgish>(key: string, route: MicrophoneDevicesRoute<M>): Cmd<M> {
-    return { op: "microphone_devices", key, eventKind: route.event };
-  },
-
-  /** Read or explicitly request one TCC permission. Capture start itself
-   * never opens a system prompt. */
-  captureAccess<M extends Msgish>(key: string, source: CaptureAccessSource, action: CaptureAccessAction, route: CaptureAccessRoute<M>): Cmd<M> {
-    return { op: "capture_access", key, eventKind: route.event, source, action };
-  },
-
   /// Open (or replace — one player is the whole surface) the keyed video
   /// event stream: claim the media-surface the source names, resolve the
   /// source cascade (local path, then url) and start playback (autoplay,
@@ -1494,6 +1403,29 @@ export const Cmd = {
     return { op: "channel_close", key };
   },
 
+  /// Start microphone or system-output capture under a positive numeric
+  /// `key`. The stream is normalized to interleaved signed 16-bit LE PCM
+  /// at the requested rate/channels (48kHz mono by default). Microphone and
+  /// system capture may run concurrently; only one stream per source may
+  /// be live. The event stream is bounded and journal/replay aware.
+  audioCaptureStart<M extends Msgish>(key: number, spec: AudioCaptureSpec, route: AudioCaptureRoute<M>): Cmd<M> {
+    return {
+      op: "audio_capture_start",
+      key,
+      source: spec.source,
+      sampleRate: spec.sampleRate ?? 48000,
+      channels: spec.channels ?? 1,
+      eventKind: route.event,
+    };
+  },
+
+  /// Stop capture under `key`. Native callbacks quiesce synchronously,
+  /// accepted backlog drains, then exactly one "stopped" event retires the
+  /// stream. A key with no live capture is a no-op.
+  audioCaptureStop(key: number): Cmd<never> {
+    return { op: "audio_capture_stop", key };
+  },
+
   /// Open a pseudo-terminal session — a spawn with a different
   /// transport: run `argv` on a fresh pty (same argv budgets, same
   /// child environment policy) whose initial grid is `cols` x `rows`
@@ -1560,7 +1492,6 @@ export const Cmd = {
 export type Sub<M extends Msgish> =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
-  | { readonly op: "microphone_devices_changed"; readonly msgKind: string }
   | { readonly op: "batch"; readonly subs: readonly Sub<M>[] };
 
 export const Sub = {
@@ -1572,11 +1503,6 @@ export const Sub = {
   /// its single number payload field.
   timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M> {
     return { op: "timer", key, everyMs, msgKind };
-  },
-
-  /** Invalidation only: issue `Cmd.microphoneDevices` for a fresh list. */
-  microphoneDevicesChanged<M extends Msgish>(msgKind: EmptyKind<M>): Sub<M> {
-    return { op: "microphone_devices_changed", msgKind };
   },
 
   /// Several subscriptions at once.

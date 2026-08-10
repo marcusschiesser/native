@@ -22,7 +22,6 @@ export const PAGE_TITLES: Record<string, string> = {
   "native-surfaces": "Native Surfaces",
   "media-producers": "Media Producers",
   windows: "Windows",
-  "audio-capture": "Audio Capture",
   webviews: "Multiple WebViews",
   "keyboard-shortcuts": "Keyboard Shortcuts",
   commands: "Commands",

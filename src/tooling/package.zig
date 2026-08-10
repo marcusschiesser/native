@@ -666,14 +666,14 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
     defer allocator.free(document_types);
     const url_types = try macosUrlTypes(allocator, metadata);
     defer allocator.free(url_types);
+    const privacy_descriptions = try macosPrivacyUsageDescriptions(allocator, metadata);
+    defer allocator.free(privacy_descriptions);
     // The About panel's bottom line in packaged bundles: the manifest
     // description rides NSHumanReadableCopyright, the plist key the
     // standard About panel renders as its footer text — the same line
     // dev runs pass to the panel directly.
     const about_line = try macosAboutLine(allocator, metadata);
     defer allocator.free(about_line);
-    const privacy_entries = try macosPrivacyEntries(allocator, metadata);
-    defer allocator.free(privacy_entries);
     // CFBundleName is the SHORT user-visible name — the application
     // menu's title next to the Apple menu reads it — while
     // CFBundleDisplayName serves the Finder and longer surfaces. Both
@@ -708,27 +708,47 @@ fn macosInfoPlist(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata
         \\</dict>
         \\</plist>
         \\
-    , .{ bundle_id, display_name, display_name, executable, icon, version, version, about_line, privacy_entries, document_types, url_types });
+    , .{ bundle_id, display_name, display_name, executable, icon, version, version, about_line, privacy_descriptions, document_types, url_types });
 }
 
-fn macosPrivacyEntries(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    if (metadata.privacy.microphone_usage) |usage| {
-        const escaped = try xmlEscapeAlloc(allocator, usage);
-        defer allocator.free(escaped);
-        const entry = try std.fmt.allocPrint(allocator, "  <key>NSMicrophoneUsageDescription</key>\n  <string>{s}</string>\n", .{escaped});
-        defer allocator.free(entry);
-        try out.appendSlice(allocator, entry);
+fn metadataHasPermission(metadata: manifest_tool.Metadata, name: []const u8) bool {
+    for (metadata.permissions) |permission| {
+        if (std.mem.eql(u8, permission, name)) return true;
     }
-    if (metadata.privacy.system_audio_usage) |usage| {
-        const escaped = try xmlEscapeAlloc(allocator, usage);
-        defer allocator.free(escaped);
-        const entry = try std.fmt.allocPrint(allocator, "  <key>NSScreenCaptureUsageDescription</key>\n  <string>{s}</string>\n  <key>NSAudioCaptureUsageDescription</key>\n  <string>{s}</string>\n", .{ escaped, escaped });
-        defer allocator.free(entry);
-        try out.appendSlice(allocator, entry);
-    }
-    return out.toOwnedSlice(allocator);
+    return false;
+}
+
+/// Privacy usage strings are generated from the manifest's explicit capture
+/// permissions. ScreenCaptureKit historically uses the screen-recording
+/// consent surface for desktop audio; newer macOS also recognizes the
+/// audio-only usage key, so system capture declares both.
+fn macosPrivacyUsageDescriptions(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]const u8 {
+    const microphone = metadataHasPermission(metadata, "microphone");
+    const system_audio = metadataHasPermission(metadata, "system_audio");
+    if (!microphone and !system_audio) return allocator.dupe(u8, "");
+    const display_name = try xmlEscapeAlloc(allocator, metadata.displayName());
+    defer allocator.free(display_name);
+    if (microphone and system_audio) return std.fmt.allocPrint(allocator,
+        \\  <key>NSMicrophoneUsageDescription</key>
+        \\  <string>{s} captures microphone audio when you start recording.</string>
+        \\  <key>NSAudioCaptureUsageDescription</key>
+        \\  <string>{s} captures system audio when you start recording.</string>
+        \\  <key>NSScreenCaptureUsageDescription</key>
+        \\  <string>{s} captures system audio when you start recording.</string>
+        \\
+    , .{ display_name, display_name, display_name });
+    if (microphone) return std.fmt.allocPrint(allocator,
+        \\  <key>NSMicrophoneUsageDescription</key>
+        \\  <string>{s} captures microphone audio when you start recording.</string>
+        \\
+    , .{display_name});
+    return std.fmt.allocPrint(allocator,
+        \\  <key>NSAudioCaptureUsageDescription</key>
+        \\  <string>{s} captures system audio when you start recording.</string>
+        \\  <key>NSScreenCaptureUsageDescription</key>
+        \\  <string>{s} captures system audio when you start recording.</string>
+        \\
+    , .{ display_name, display_name });
 }
 
 /// The optional NSHumanReadableCopyright entry (with trailing newline)
@@ -2319,23 +2339,28 @@ test "plist template includes identity executable and version" {
     try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSHumanReadableCopyright") == null);
 }
 
-test "plist template emits audio capture purpose keys" {
-    const metadata: manifest_tool.Metadata = .{
+test "plist capture usage descriptions follow manifest permissions" {
+    const capture_permissions = [_][]const u8{ "microphone", "system_audio" };
+    const capture: manifest_tool.Metadata = .{
         .id = "dev.example.recorder",
         .name = "recorder",
-        .version = "1.2.3",
-        .privacy = .{
-            .microphone_usage = "Record voice & commentary.",
-            .system_audio_usage = "Record meeting <audio>.",
-        },
+        .display_name = "Audio & Voice",
+        .version = "1.0.0",
+        .permissions = &capture_permissions,
     };
-    const plist = try macosInfoPlist(std.testing.allocator, metadata, "recorder");
+    const plist = try macosInfoPlist(std.testing.allocator, capture, "recorder");
     defer std.testing.allocator.free(plist);
-    try std.testing.expect(std.mem.indexOf(u8, plist, "<key>NSMicrophoneUsageDescription</key>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plist, "Record voice &amp; commentary.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plist, "<key>NSScreenCaptureUsageDescription</key>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plist, "<key>NSAudioCaptureUsageDescription</key>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plist, "Record meeting &lt;audio&gt;.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "NSMicrophoneUsageDescription") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "NSAudioCaptureUsageDescription") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "NSScreenCaptureUsageDescription") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plist, "Audio &amp; Voice captures microphone audio") != null);
+
+    const bare: manifest_tool.Metadata = .{ .id = "dev.example.app", .name = "demo", .version = "1.0.0" };
+    const bare_plist = try macosInfoPlist(std.testing.allocator, bare, "demo");
+    defer std.testing.allocator.free(bare_plist);
+    try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSMicrophoneUsageDescription") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSAudioCaptureUsageDescription") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bare_plist, "NSScreenCaptureUsageDescription") == null);
 }
 
 test "plist template includes document and URL registrations" {
