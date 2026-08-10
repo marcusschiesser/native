@@ -282,6 +282,14 @@ pub const NullAudio = struct {
     }
 };
 
+pub const NullAudioCapture = struct {
+    active: bool = false,
+    format: types.AudioCaptureFormat = .{},
+    sink: types.AudioCaptureSink = .{},
+    start_count: usize = 0,
+    stop_count: usize = 0,
+};
+
 pub const NullPlatform = struct {
     surface_value: Surface = .{},
     web_engine: WebEngine = .system,
@@ -625,6 +633,9 @@ pub const NullPlatform = struct {
     audio_stop_count: usize = 0,
     audio_seek_count: usize = 0,
     audio_volume_count: usize = 0,
+    microphone_capture: bool = true,
+    system_audio_capture: bool = true,
+    audio_captures: [2]NullAudioCapture = [_]NullAudioCapture{.{}} ** 2,
     /// Whether this modeled host has a video decoder. On by default (the
     /// fake below stands in for AVFoundation); tests modelling a staged
     /// host (Windows/Linux today) set it false BEFORE `platform()` so
@@ -851,6 +862,8 @@ pub const NullPlatform = struct {
                 .audio_stop_fn = if (self.audio_playback) audioStop else null,
                 .audio_seek_fn = if (self.audio_playback) audioSeek else null,
                 .audio_set_volume_fn = if (self.audio_playback) audioSetVolume else null,
+                .audio_capture_start_fn = if (self.microphone_capture or self.system_audio_capture) audioCaptureStart else null,
+                .audio_capture_stop_fn = if (self.microphone_capture or self.system_audio_capture) audioCaptureStop else null,
                 .video_load_fn = if (self.video_playback) videoLoad else null,
                 .video_load_url_fn = if (self.video_playback) videoLoadUrl else null,
                 .video_play_fn = if (self.video_playback) videoPlay else null,
@@ -915,6 +928,8 @@ pub const NullPlatform = struct {
             .audio_playback => self.audio_playback,
             .audio_streaming => self.audio_playback and self.audio_streaming,
             .audio_spectrum => self.audio_playback and self.audio_spectrum,
+            .microphone_capture => self.microphone_capture,
+            .system_audio_capture => self.system_audio_capture,
             .video_playback => self.video_playback,
         };
     }
@@ -1665,6 +1680,49 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         self.audio_volume_count += 1;
         self.audio.volume = volume;
+    }
+
+    fn audioCaptureStart(context: ?*anyopaque, source: types.AudioCaptureSource, format: types.AudioCaptureFormat, sink: types.AudioCaptureSink) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        if ((source == .microphone and !self.microphone_capture) or
+            (source == .system and !self.system_audio_capture)) return error.UnsupportedService;
+        const capture = &self.audio_captures[@intFromEnum(source)];
+        capture.active = true;
+        capture.format = format;
+        capture.sink = sink;
+        capture.start_count += 1;
+        _ = sink.push(.{ .kind = .started, .source = source, .format = format });
+    }
+
+    fn audioCaptureStop(context: ?*anyopaque, source: types.AudioCaptureSource) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const capture = &self.audio_captures[@intFromEnum(source)];
+        capture.active = false;
+        capture.sink = .{};
+        capture.stop_count += 1;
+    }
+
+    /// Push deterministic PCM through a live fake capture.
+    pub fn pushAudioCapture(self: *NullPlatform, source: types.AudioCaptureSource, timestamp_ns: u64, pcm_s16le: []const u8) types.AudioCapturePushResult {
+        const capture = &self.audio_captures[@intFromEnum(source)];
+        if (!capture.active) return .closed;
+        const stride = @as(usize, capture.format.channels) * 2;
+        if (stride == 0 or pcm_s16le.len % stride != 0) return .dropped_oversized;
+        return capture.sink.push(.{
+            .kind = .data,
+            .source = source,
+            .format = capture.format,
+            .timestamp_ns = timestamp_ns,
+            .frames = @intCast(pcm_s16le.len / stride),
+            .pcm_s16le = pcm_s16le,
+        });
+    }
+
+    pub fn failAudioCapture(self: *NullPlatform, source: types.AudioCaptureSource) types.AudioCapturePushResult {
+        const capture = &self.audio_captures[@intFromEnum(source)];
+        if (!capture.active) return .closed;
+        capture.active = false;
+        return capture.sink.push(.{ .kind = .failed, .source = source, .format = capture.format });
     }
 
     fn audioUrlHash(url: []const u8) u64 {

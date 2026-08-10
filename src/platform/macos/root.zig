@@ -205,6 +205,10 @@ extern fn native_sdk_appkit_audio_pause(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_stop(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_audio_seek(host: *AppKitHost, position_ms: u64) c_int;
 extern fn native_sdk_appkit_audio_set_volume(host: *AppKitHost, volume: f64) c_int;
+const AppKitAudioCapturePush = *const fn (context: ?*anyopaque, kind: c_int, source: c_int, sample_rate: u32, channels: u8, timestamp_ns: u64, frames: u32, pcm: ?[*]const u8, pcm_len: usize) callconv(.c) c_int;
+extern fn native_sdk_appkit_audio_capture_start(host: *AppKitHost, source: c_int, sample_rate: u32, channels: u8, push_fn: AppKitAudioCapturePush, push_context: ?*anyopaque) c_int;
+extern fn native_sdk_appkit_audio_capture_stop(host: *AppKitHost, source: c_int) c_int;
+extern fn native_sdk_appkit_audio_capture_supported(host: *AppKitHost, source: c_int) c_int;
 extern fn native_sdk_appkit_video_load(host: *AppKitHost, path: [*]const u8, path_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_load_url(host: *AppKitHost, url: [*]const u8, url_len: usize, token: u64, push_fn: AppKitVideoSinkPush, push_context: ?*anyopaque) c_int;
 extern fn native_sdk_appkit_video_play(host: *AppKitHost) c_int;
@@ -587,6 +591,7 @@ pub const MacPlatform = struct {
     /// every push happens on the main thread (the host's frame pump is
     /// a run-loop timer), so a plain field is race-free.
     video_sink: platform_mod.VideoFrameSink = .{},
+    audio_capture_sinks: [2]platform_mod.AudioCaptureSink = [_]platform_mod.AudioCaptureSink{.{}} ** 2,
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!MacPlatform {
         return initWithEngine(title, size, .system);
@@ -750,6 +755,8 @@ pub const MacPlatform = struct {
                 .audio_stop_fn = audioStop,
                 .audio_seek_fn = audioSeek,
                 .audio_set_volume_fn = audioSetVolume,
+                .audio_capture_start_fn = if (self.web_engine == .system) audioCaptureStart else null,
+                .audio_capture_stop_fn = if (self.web_engine == .system) audioCaptureStop else null,
                 .video_load_fn = videoLoad,
                 .video_load_url_fn = videoLoadUrl,
                 .video_play_fn = videoPlay,
@@ -822,6 +829,8 @@ pub const MacPlatform = struct {
             .audio_streaming,
             .audio_spectrum,
             => self.web_engine == .system,
+            .microphone_capture => self.web_engine == .system and audioCaptureSupported(self.host, .microphone),
+            .system_audio_capture => self.web_engine == .system and audioCaptureSupported(self.host, .system),
             // AVFoundation video ships in the AppKit host only (one
             // AVPlayer whose AVPlayerItemVideoOutput frames feed the
             // media-surface sink); the CEF host stubs the C ABI and
@@ -829,6 +838,17 @@ pub const MacPlatform = struct {
             // a second player.
             .video_playback => self.web_engine == .system,
         };
+    }
+
+    /// The host performs the availability probe because system capture is
+    /// version-gated at runtime (the deployment target predates
+    /// ScreenCaptureKit audio). Hermetic Zig tests do not link an AppKit
+    /// host, so keep the probe behind the same test/target seam as Linux's
+    /// runtime-loaded service probes.
+    fn audioCaptureSupported(host: *AppKitHost, source: platform_mod.AudioCaptureSource) bool {
+        if (comptime @import("builtin").is_test) return false;
+        if (@import("builtin").target.os.tag != .macos) return false;
+        return native_sdk_appkit_audio_capture_supported(host, @intFromEnum(source)) != 0;
     }
 
     fn run(context: *anyopaque, handler: platform_mod.EventHandler, handler_context: *anyopaque) anyerror!void {
@@ -1529,6 +1549,54 @@ fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
 fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     _ = native_sdk_appkit_audio_set_volume(self.host, volume);
+}
+
+fn nativeSdkAudioCapturePush(context: ?*anyopaque, kind: c_int, source_value: c_int, sample_rate: u32, channels: u8, timestamp_ns: u64, frames: u32, pcm: ?[*]const u8, pcm_len: usize) callconv(.c) c_int {
+    const sink: *platform_mod.AudioCaptureSink = @ptrCast(@alignCast(context orelse return 1));
+    const source: platform_mod.AudioCaptureSource = switch (source_value) {
+        1 => .system,
+        else => .microphone,
+    };
+    const event_kind: platform_mod.AudioCaptureEventKind = switch (kind) {
+        0 => .started,
+        1 => .data,
+        else => .failed,
+    };
+    const bytes = if (pcm) |ptr| ptr[0..pcm_len] else "";
+    return switch (sink.push(.{
+        .kind = event_kind,
+        .source = source,
+        .format = .{ .sample_rate = sample_rate, .channels = channels },
+        .timestamp_ns = timestamp_ns,
+        .frames = frames,
+        .pcm_s16le = bytes,
+    })) {
+        .accepted => 0,
+        .closed => 1,
+        .dropped_full => 2,
+        .dropped_oversized => 3,
+    };
+}
+
+fn audioCaptureStart(context: ?*anyopaque, source: platform_mod.AudioCaptureSource, format: platform_mod.AudioCaptureFormat, sink: platform_mod.AudioCaptureSink) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    const stored = &self.audio_capture_sinks[@intFromEnum(source)];
+    // The native stop is a synchronous callback fence. Quiesce the old
+    // producer before replacing the memory its callback context points at;
+    // otherwise a final old-source callback can be delivered to the new sink.
+    _ = native_sdk_appkit_audio_capture_stop(self.host, @intFromEnum(source));
+    stored.* = sink;
+    if (native_sdk_appkit_audio_capture_start(self.host, @intFromEnum(source), format.sample_rate, format.channels, nativeSdkAudioCapturePush, stored) == 0) {
+        stored.* = .{};
+        return error.AudioCaptureStartFailed;
+    }
+}
+
+fn audioCaptureStop(context: ?*anyopaque, source: platform_mod.AudioCaptureSource) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_appkit_audio_capture_stop(self.host, @intFromEnum(source));
+    self.audio_capture_sinks[@intFromEnum(source)] = .{};
 }
 
 /// The C-callable bridge for `VideoFrameSink.push`: the sink's `push_fn`

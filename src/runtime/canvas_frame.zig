@@ -220,6 +220,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
 
             var frame_options = options;
             if (frame_options.surface_size.isEmpty()) frame_options.surface_size = self.views[index].frame.size();
+            frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             return self.views[index].canvasDisplayList().framePlan(previous, frame_options, storage);
         }
 
@@ -874,6 +875,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             launch_timing.lapOnce("first_plan_begin");
             defer launch_timing.lapOnce("first_plan_done");
             var frame_options = options;
+            frame_options.backdrop_blur_sample_extent_multiplier = backdropBlurSampleExtentMultiplier(self.options.platform.name);
             if (frame_options.surface_size.isEmpty()) {
                 frame_options.surface_size = if (self.views[index].gpu_size.isEmpty()) self.views[index].frame.size() else self.views[index].gpu_size;
             }
@@ -1134,6 +1136,7 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 render_plan.commands,
                 dirty_bounds,
                 dirty_rects[0..dirty_rect_count],
+                frame_options.backdrop_blur_sample_extent_multiplier,
             )) {
                 // A blur's apron must be reconstructed from the scene as
                 // it existed before that command. Retained pixels beyond
@@ -1316,12 +1319,20 @@ fn incrementalCanvasDamageIntersectsBackdropBlur(
     commands: []const canvas.RenderCommand,
     dirty_bounds: ?geometry.RectF,
     dirty_rects: []const geometry.RectF,
+    sample_extent_multiplier: f32,
 ) bool {
-    if (dirty_rects.len == 0) return canvas.incrementalDamageIntersectsBackdropBlur(commands, dirty_bounds);
+    if (dirty_rects.len == 0) return canvas.incrementalDamageIntersectsBackdropBlurWithSampleExtent(commands, dirty_bounds, sample_extent_multiplier);
     for (dirty_rects) |dirty_rect| {
-        if (canvas.incrementalDamageIntersectsBackdropBlur(commands, dirty_rect)) return true;
+        if (canvas.incrementalDamageIntersectsBackdropBlurWithSampleExtent(commands, dirty_rect, sample_extent_multiplier)) return true;
     }
     return false;
+}
+
+/// AppKit approximates its Gaussian with three consecutive box filters, so
+/// one output pixel can depend on the sum of three box radii. Other renderers
+/// retain the shared one-radius footprint.
+fn backdropBlurSampleExtentMultiplier(platform_name: []const u8) f32 {
+    return if (std.mem.eql(u8, platform_name, "macos")) 3 else 1;
 }
 
 /// Rework a planned frame's incremental damage for the present's

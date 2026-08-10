@@ -1107,6 +1107,7 @@ fn parsePermission(value: []const u8) app_manifest.Permission {
     if (std.mem.eql(u8, value, "filesystem")) return .filesystem;
     if (std.mem.eql(u8, value, "camera")) return .camera;
     if (std.mem.eql(u8, value, "microphone")) return .microphone;
+    if (std.mem.eql(u8, value, "system_audio")) return .system_audio;
     if (std.mem.eql(u8, value, "location")) return .location;
     if (std.mem.eql(u8, value, "notifications")) return .notifications;
     if (std.mem.eql(u8, value, "clipboard")) return .clipboard;

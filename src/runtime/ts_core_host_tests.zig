@@ -70,6 +70,8 @@ const mini_core = struct {
     /// The channel event states, shuffled off the engine order for the
     /// same by-NAME matching proof.
     pub const ChannelState = enum { rejected, data, closed };
+    pub const CaptureState = enum { data, stopped, started, rejected, failed };
+    pub const CaptureSource = enum { system, microphone };
 
     /// The image outcome states the mixed-rejection tests observe,
     /// shuffled off the engine order like the other two.
@@ -115,6 +117,18 @@ const mini_core = struct {
         chan_dropped_pending: f64,
         chan_dropped_total: f64,
         chan_events: i64,
+        // Native audio-capture stream mirrors.
+        capture_state: CaptureState,
+        capture_source: CaptureSource,
+        capture_key: f64,
+        capture_rate: f64,
+        capture_channels: f64,
+        capture_timestamp_ms: f64,
+        capture_frames: f64,
+        capture_pcm: []const u8,
+        capture_dropped_pending: f64,
+        capture_dropped_total: f64,
+        capture_events: i64,
         // Image event mirrors.
         img_state: ImageState,
         img_events: i64,
@@ -289,6 +303,20 @@ const mini_core = struct {
         uget, // 81: fetch "uget" -> ufetched/failed
         ufetched: struct { status: u64, body: []const u8 }, // 82: fetch ok
         // record with a u64-classed number field
+        start_capture, // 83: microphone capture key 91 -> capture_evt
+        stop_capture, // 84: stop capture key 91
+        capture_evt: struct { // 85: ten-field capture event arm
+            key: f64,
+            state: CaptureState,
+            source: CaptureSource,
+            sampleRate: f64,
+            channels: f64,
+            timestampMs: f64,
+            frames: f64,
+            pcm: []const u8,
+            droppedPending: f64,
+            droppedTotal: f64,
+        },
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -330,6 +358,17 @@ const mini_core = struct {
                 .chan_dropped_pending = -1,
                 .chan_dropped_total = -1,
                 .chan_events = 0,
+                .capture_state = .stopped,
+                .capture_source = .microphone,
+                .capture_key = -1,
+                .capture_rate = 0,
+                .capture_channels = 0,
+                .capture_timestamp_ms = 0,
+                .capture_frames = 0,
+                .capture_pcm = "",
+                .capture_dropped_pending = 0,
+                .capture_dropped_total = 0,
+                .capture_events = 0,
                 .img_state = .loaded,
                 .img_events = 0,
                 .pty_key = "",
@@ -640,6 +679,23 @@ const mini_core = struct {
                 @memcpy(out[first.len..], second);
                 return .{ .model = model, .cmd = out };
             },
+            .start_capture => return .{ .model = model, .cmd = cmdAudioCaptureStart(91, 0, 16_000, 1, 85) },
+            .stop_capture => return .{ .model = model, .cmd = cmdAudioCaptureStop(91) },
+            .capture_evt => |event| {
+                const out = frameCreate(model.*);
+                out.capture_state = event.state;
+                out.capture_source = event.source;
+                out.capture_key = event.key;
+                out.capture_rate = event.sampleRate;
+                out.capture_channels = event.channels;
+                out.capture_timestamp_ms = event.timestampMs;
+                out.capture_frames = event.frames;
+                out.capture_pcm = event.pcm;
+                out.capture_dropped_pending = event.droppedPending;
+                out.capture_dropped_total = event.droppedTotal;
+                out.capture_events = model.capture_events + 1;
+                return .{ .model = out, .cmd = "" };
+            },
         }
     }
 
@@ -665,6 +721,7 @@ const mini_core = struct {
         out[0].output = commitBytes(next.output);
         out[0].bands = commitBytes(next.bands);
         out[0].chan_bytes = commitBytes(next.chan_bytes);
+        out[0].capture_pcm = commitBytes(next.capture_pcm);
         out[0].pty_bytes = commitBytes(next.pty_bytes);
         out[0].order = commitBytes(next.order);
         return &out[0];
@@ -916,6 +973,24 @@ const mini_core = struct {
         const out = rt.frameAlloc(u8, 1 + 8);
         out[0] = 0x16;
         std.mem.writeInt(u64, out[1..][0..8], @bitCast(key), .little);
+        return out;
+    }
+
+    fn cmdAudioCaptureStart(key: f64, source: u8, sample_rate: u32, channels: u8, event_tag: u8) []const u8 {
+        const out = rt.frameAlloc(u8, 16);
+        out[0] = 0x1E;
+        std.mem.writeInt(u64, out[1..9], @bitCast(key), .little);
+        out[9] = source;
+        std.mem.writeInt(u32, out[10..14], sample_rate, .little);
+        out[14] = channels;
+        out[15] = event_tag;
+        return out;
+    }
+
+    fn cmdAudioCaptureStop(key: f64) []const u8 {
+        const out = rt.frameAlloc(u8, 9);
+        out[0] = 0x1F;
+        std.mem.writeInt(u64, out[1..9], @bitCast(key), .little);
         return out;
     }
 
@@ -2198,6 +2273,39 @@ test "a channel opens, posts route the five-field arm by name, and close retires
     Host.drain(fx);
     try std.testing.expectEqual(@as(i64, 4), Host.model().chan_events);
     try std.testing.expect(fx.channelHandle(41) != null);
+}
+
+test "audio capture wire records route canonical PCM through the ten-field arm" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .start_capture);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().capture_events);
+    try std.testing.expectEqual(mini_core.CaptureState.started, Host.model().capture_state);
+    try std.testing.expectEqual(mini_core.CaptureSource.microphone, Host.model().capture_source);
+    try std.testing.expectEqual(@as(f64, 91), Host.model().capture_key);
+    try std.testing.expectEqual(@as(f64, 16_000), Host.model().capture_rate);
+    try std.testing.expectEqual(@as(f64, 1), Host.model().capture_channels);
+
+    const pcm = [_]u8{ 1, 0, 2, 0 };
+    try fx.feedAudioCapture(91, 9_876_543, &pcm);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 2), Host.model().capture_events);
+    try std.testing.expectEqual(mini_core.CaptureState.data, Host.model().capture_state);
+    try std.testing.expectEqual(@as(f64, 9), Host.model().capture_timestamp_ms);
+    try std.testing.expectEqual(@as(f64, 2), Host.model().capture_frames);
+    try std.testing.expectEqualStrings(&pcm, Host.model().capture_pcm);
+
+    Host.dispatch(fx, .stop_capture);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 3), Host.model().capture_events);
+    try std.testing.expectEqual(mini_core.CaptureState.stopped, Host.model().capture_state);
+    // Terminal channel envelopes carry no PCM packet; the bridge retains
+    // the requested source/format so every event arm stays self-describing.
+    try std.testing.expectEqual(mini_core.CaptureSource.microphone, Host.model().capture_source);
+    try std.testing.expectEqual(@as(f64, 16_000), Host.model().capture_rate);
 }
 
 test "a mixed refused batch dispatches its rejections in command-stream order" {

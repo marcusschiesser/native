@@ -657,16 +657,17 @@ pub const control_size_value_names = [_][]const u8{ "default", "sm", "lg", "icon
 pub const text_size_value_names = [_][]const u8{ "heading", "display" };
 
 pub const icon_names = [_][]const u8{
-    "alert",       "archive",      "arrow-down",    "arrow-right",  "arrow-up",
-    "check",       "check-circle", "chevron-down",  "chevron-left", "chevron-right",
-    "chevron-up",  "circle-dot",   "clock",         "copy",         "download",
-    "edit",        "ellipsis",     "external-link", "eye",          "file-text",
-    "folder",      "folder-open",  "git-branch",    "git-merge",    "git-pull-request",
-    "info",        "menu",         "moon",          "music",        "panel-left",
-    "panel-right", "pause",        "play",          "plus",         "refresh-cw",
-    "repeat",      "save",         "search",        "send",         "settings",
-    "shuffle",     "skip-back",    "skip-forward",  "sun",          "terminal",
-    "trash",       "volume",       "wrench",        "x",            "x-circle",
+    "alert",      "archive",      "arrow-down",    "arrow-right",  "arrow-up",
+    "check",      "check-circle", "chevron-down",  "chevron-left", "chevron-right",
+    "chevron-up", "circle-dot",   "clock",         "copy",         "download",
+    "edit",       "ellipsis",     "external-link", "eye",          "file-text",
+    "folder",     "folder-open",  "git-branch",    "git-merge",    "git-pull-request",
+    "info",       "menu",         "mic",           "moon",         "music",
+    "panel-left", "panel-right",  "pause",         "play",         "plus",
+    "refresh-cw", "repeat",       "save",          "search",       "send",
+    "settings",   "shuffle",      "skip-back",     "skip-forward", "sun",
+    "terminal",   "trash",        "volume",        "wrench",       "x",
+    "x-circle",
 };
 
 /// The semantic role vocabulary the `role` attribute accepts: the field

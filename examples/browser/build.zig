@@ -204,9 +204,12 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
             },
         }
         if (b.sysroot) |sysroot| app_mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
+        app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/macos/capture_info_plist.c"), .flags = &.{} });
         app_mod.linkFramework("AppKit", .{});
         // The audio playback service (the AppKit host's single AVPlayer).
         app_mod.linkFramework("AVFoundation", .{});
+        app_mod.linkFramework("CoreMedia", .{});
+        app_mod.linkFramework("ScreenCaptureKit", .{ .weak = true });
         // CVPixelBuffer for the video frame path (the AppKit host's
         // AVPlayerItemVideoOutput frames are real CoreVideo symbols).
         app_mod.linkFramework("CoreVideo", .{});

@@ -2499,6 +2499,7 @@ const FacadeEmitter = struct {
             \\
             \\const nscfFetchMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
             \\const nscfAudioVerbs = ["pause", "resume", "stop", "seek", "volume"];
+            \\const nscfAudioCaptureSources = ["microphone", "system"];
             \\const nscfVideoVerbs = ["play", "pause", "stop", "seek", "volume", "muted", "loop"];
             \\
             \\function nscfEncodeCmd(sink: nscfSink, cmd: nscfCmd<{s}>): void {{
@@ -2718,6 +2719,18 @@ const FacadeEmitter = struct {
             \\      nscfWBytes(sink, cmd.title);
             \\      nscfWBytes(sink, cmd.subtitle);
             \\      nscfWBytes(sink, cmd.body);
+            \\      return;
+            \\    case "audio_capture_start":
+            \\      nscfWU8(sink, 0x1e);
+            \\      nscfWF64(sink, cmd.key);
+            \\      nscfWU8(sink, nscfMemberIndex(nscfAudioCaptureSources, cmd.source, "audio capture source"));
+            \\      nscfWU32(sink, cmd.sampleRate);
+            \\      nscfWU8(sink, cmd.channels);
+            \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
+            \\      return;
+            \\    case "audio_capture_stop":
+            \\      nscfWU8(sink, 0x1f);
+            \\      nscfWF64(sink, cmd.key);
             \\      return;
             \\    case "batch":
             \\      for (let i = 0; i < cmd.cmds.length; i++) {

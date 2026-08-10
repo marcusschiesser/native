@@ -357,6 +357,7 @@
 
 const std = @import("std");
 const runtime_effects = @import("effects.zig");
+const platform = @import("../platform/root.zig");
 
 /// Engine-key namespace for bridge-issued host requests: `base + table
 /// index`. High bits spell "TSRQ" so a bridge key is recognizable in
@@ -591,6 +592,20 @@ pub fn TsCoreHost(comptime core: type) type {
             event_tag: u8 = 0,
         };
 
+        /// One microphone/system capture stream. Capture uses the engine's
+        /// channel transport internally but keeps a distinct bridge table so
+        /// terminal events retain the requested source and output format.
+        /// Replacing a source may briefly leave its old entry closing while
+        /// the new key is already live, so this mirrors channel capacity.
+        const AudioCaptureEntry = struct {
+            used: bool = false,
+            key: u64 = 0,
+            event_tag: u8 = 0,
+            source: platform.AudioCaptureSource = .microphone,
+            sample_rate: u32 = 0,
+            channels: u8 = 0,
+        };
+
         /// One live pty session — the stream entries' non-retiring
         /// shape: "output" events route through it repeatedly across
         /// dispatches, and only the one "exit" terminal retires it. The
@@ -627,6 +642,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var video_entry: VideoEntry = .{};
         var images: [runtime_effects.max_effects]ImageEntry = @splat(.{});
         var channels: [runtime_effects.max_effect_channels]ChannelEntry = @splat(.{});
+        var audio_captures: [runtime_effects.max_effect_channels]AudioCaptureEntry = @splat(.{});
         var ptys: [runtime_effects.max_effect_ptys]PtyEntry = @splat(.{});
         /// The platform caches directory for URL image sources, the
         /// audio cache dir's twin (`setImageCacheDir` / `TsUiApp`'s
@@ -701,6 +717,7 @@ pub fn TsCoreHost(comptime core: type) type {
             video_entry = .{};
             images = @splat(.{});
             channels = @splat(.{});
+            audio_captures = @splat(.{});
             ptys = @splat(.{});
             clip_write_counter = 0;
             audio_cache_dir_len = 0;
@@ -1232,6 +1249,26 @@ pub fn TsCoreHost(comptime core: type) type {
                             .subtitle = subtitle,
                             .body = body,
                         });
+                    },
+                    // audio_capture_start [op][key f64 LE][source u8]
+                    //                     [sample_rate u32 LE][channels u8]
+                    //                     [event_tag u8]
+                    0x1E => {
+                        const key_bits = takeBytes(cmd, &at, 8);
+                        const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
+                        const source_wire = takeByte(cmd, &at);
+                        const source = std.enums.fromInt(platform.AudioCaptureSource, source_wire) orelse
+                            @panic("ts core host: unknown audio capture source wire value - the core and this runtime disagree on cmd_format_version");
+                        const sample_rate = std.mem.readInt(u32, takeBytes(cmd, &at, 4)[0..4], .little);
+                        const capture_channels = takeByte(cmd, &at);
+                        const event_tag = takeByte(cmd, &at);
+                        issueAudioCaptureStart(fx, key_value, source, sample_rate, capture_channels, event_tag);
+                    },
+                    // audio_capture_stop [op][key f64 LE]
+                    0x1F => {
+                        const key_bits = takeBytes(cmd, &at, 8);
+                        const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
+                        runAudioCaptureStop(fx, key_value);
                     },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
@@ -1815,6 +1852,110 @@ pub fn TsCoreHost(comptime core: type) type {
             const entry = &channels[index];
             if (event.kind != .data) entry.used = false;
             return msgFromTagChannel(entry.event_tag, event);
+        }
+
+        // --------------------------------------------- audio capture streams
+
+        fn issueAudioCaptureStart(
+            fx: *Fx,
+            key_value: f64,
+            source: platform.AudioCaptureSource,
+            sample_rate: u32,
+            capture_channels: u8,
+            event_tag: u8,
+        ) void {
+            const representable = std.math.isFinite(key_value) and
+                key_value >= 1 and key_value < 9007199254740992.0 and
+                @floor(key_value) == key_value;
+            const format: platform.AudioCaptureFormat = .{
+                .sample_rate = sample_rate,
+                .channels = capture_channels,
+            };
+            if (!representable or !format.valid()) {
+                fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
+                    .key = if (representable) @intFromFloat(key_value) else 0,
+                    .kind = .rejected,
+                    .source = source,
+                    .sample_rate = sample_rate,
+                    .channels = capture_channels,
+                }));
+                return;
+            }
+            const key: u64 = @intFromFloat(key_value);
+            if (findAudioCapture(key) != null) {
+                fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
+                    .key = key,
+                    .kind = .rejected,
+                    .source = source,
+                    .sample_rate = sample_rate,
+                    .channels = capture_channels,
+                }));
+                return;
+            }
+            const index = freeAudioCaptureIndex() orelse {
+                fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
+                    .key = key,
+                    .kind = .rejected,
+                    .source = source,
+                    .sample_rate = sample_rate,
+                    .channels = capture_channels,
+                }));
+                return;
+            };
+            audio_captures[index] = .{
+                .used = true,
+                .key = key,
+                .event_tag = event_tag,
+                .source = source,
+                .sample_rate = sample_rate,
+                .channels = capture_channels,
+            };
+            fx.startAudioCapture(.{
+                .key = key,
+                .source = source,
+                .sample_rate = sample_rate,
+                .channels = capture_channels,
+                .on_event = audioCaptureEventMsg,
+            });
+        }
+
+        fn findAudioCapture(key: u64) ?usize {
+            for (&audio_captures, 0..) |*entry, index| {
+                if (entry.used and entry.key == key) return index;
+            }
+            return null;
+        }
+
+        fn freeAudioCaptureIndex() ?usize {
+            for (&audio_captures, 0..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            return null;
+        }
+
+        fn runAudioCaptureStop(fx: *Fx, key_value: f64) void {
+            const representable = std.math.isFinite(key_value) and
+                key_value >= 1 and key_value < 9007199254740992.0 and
+                @floor(key_value) == key_value;
+            if (!representable) return;
+            const key: u64 = @intFromFloat(key_value);
+            if (findAudioCapture(key) == null) return;
+            fx.stopAudioCapture(key);
+        }
+
+        fn audioCaptureEventMsg(channel_event: runtime_effects.EffectChannelEvent) Msg {
+            const index = findAudioCapture(channel_event.key) orelse
+                @panic("ts core host: an audio capture event arrived with no open bridge entry");
+            const entry = &audio_captures[index];
+            var event = runtime_effects.decodeAudioCaptureChannelEvent(channel_event);
+            // The channel's terminal envelope carries no capture packet;
+            // restore the requested identity/format from the bridge entry.
+            event.source = entry.source;
+            if (event.sample_rate == 0) event.sample_rate = entry.sample_rate;
+            if (event.channels == 0) event.channels = entry.channels;
+            const event_tag = entry.event_tag;
+            if (event.kind == .stopped or event.kind == .rejected) entry.used = false;
+            return msgFromTagAudioCapture(event_tag, event);
         }
 
         // -------------------------------------------------- pty sessions
@@ -2623,6 +2764,90 @@ pub fn TsCoreHost(comptime core: type) type {
                 }
             }
             @panic("ts core host: a channel event names a Msg tag outside the union");
+        }
+
+        fn audioCaptureArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct") return false;
+            const fields = info.@"struct".fields;
+            if (fields.len != 10) return false;
+            var ok = true;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "state") or std.mem.eql(u8, f.name, "source")) {
+                    if (@typeInfo(f.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, f.name, "pcm")) {
+                    if (f.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, f.name, "key") or
+                    std.mem.eql(u8, f.name, "sampleRate") or
+                    std.mem.eql(u8, f.name, "channels") or
+                    std.mem.eql(u8, f.name, "timestampMs") or
+                    std.mem.eql(u8, f.name, "frames") or
+                    std.mem.eql(u8, f.name, "droppedPending") or
+                    std.mem.eql(u8, f.name, "droppedTotal"))
+                {
+                    if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
+                } else {
+                    ok = false;
+                }
+            }
+            return ok;
+        }
+
+        fn audioCaptureStateValue(comptime E: type, kind: runtime_effects.EffectAudioCaptureEventKind) E {
+            const name = @tagName(kind);
+            inline for (@typeInfo(E).@"enum".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            }
+            @panic("ts core host: an audio capture event kind has no member in the event arm's state union - the frontend's own shape check should have stopped this build");
+        }
+
+        fn audioCaptureSourceValue(comptime E: type, source: platform.AudioCaptureSource) E {
+            const name = @tagName(source);
+            inline for (@typeInfo(E).@"enum".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            }
+            @panic("ts core host: an audio capture source has no member in the event arm's source union - the frontend's own shape check should have stopped this build");
+        }
+
+        fn msgFromTagAudioCapture(tag: u8, event: runtime_effects.EffectAudioCaptureEvent) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime audioCaptureArmShape(arm.type)) {
+                        const fields = @typeInfo(arm.type).@"struct".fields;
+                        var payload: arm.type = undefined;
+                        inline for (fields) |f| {
+                            if (comptime std.mem.eql(u8, f.name, "state")) {
+                                @field(payload, f.name) = audioCaptureStateValue(f.type, event.kind);
+                            } else if (comptime std.mem.eql(u8, f.name, "source")) {
+                                @field(payload, f.name) = audioCaptureSourceValue(f.type, event.source);
+                            } else if (comptime std.mem.eql(u8, f.name, "key")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.key) else @intCast(event.key);
+                            } else if (comptime std.mem.eql(u8, f.name, "sampleRate")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.sample_rate) else @intCast(event.sample_rate);
+                            } else if (comptime std.mem.eql(u8, f.name, "channels")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.channels) else @intCast(event.channels);
+                            } else if (comptime std.mem.eql(u8, f.name, "timestampMs")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.timestamp_ms) else @intCast(event.timestamp_ms);
+                            } else if (comptime std.mem.eql(u8, f.name, "frames")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.frames) else @intCast(event.frames);
+                            } else if (comptime std.mem.eql(u8, f.name, "droppedPending")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.dropped_pending) else @intCast(event.dropped_pending);
+                            } else if (comptime std.mem.eql(u8, f.name, "droppedTotal")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.dropped_total) else @intCast(event.dropped_total);
+                            } else if (event.pcm_s16le.len == 0) {
+                                @field(payload, f.name) = "";
+                            } else {
+                                const copy = core.rt.frameAlloc(u8, event.pcm_s16le.len);
+                                @memcpy(copy, event.pcm_s16le);
+                                @field(payload, f.name) = copy;
+                            }
+                        }
+                        return @unionInit(Msg, arm.name, payload);
+                    }
+                    @panic("ts core host: an audio capture event targets Msg arm '" ++ arm.name ++ "', which is not the ten-field audio capture event record");
+                }
+            }
+            @panic("ts core host: an audio capture event names a Msg tag outside the union");
         }
 
         /// The six-field pty event record, matched by field name —

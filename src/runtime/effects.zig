@@ -1096,6 +1096,94 @@ pub const EffectChannelEvent = struct {
     dropped_total: u32 = 0,
 };
 
+/// Capture stream states delivered through `Effects.audioCaptureMsg`.
+/// `.started`, `.data`, and `.failed` originate at the native source;
+/// `.stopped` is the channel's exactly-once close terminal and `.rejected`
+/// is a loop-side refusal before a source started.
+pub const EffectAudioCaptureEventKind = enum(u8) {
+    started,
+    data,
+    failed,
+    stopped,
+    rejected,
+};
+
+/// One microphone or system-output capture report. PCM is interleaved
+/// signed 16-bit little-endian drain scratch: copy what the model keeps.
+/// `key` is the caller's stream identity; it is authoritative on terminal
+/// events, whose format fields are zero/default because no packet exists.
+pub const EffectAudioCaptureEvent = struct {
+    key: u64,
+    kind: EffectAudioCaptureEventKind,
+    source: platform.AudioCaptureSource = .microphone,
+    sample_rate: u32 = 0,
+    channels: u8 = 0,
+    /// Capture timestamp in monotonic milliseconds. The platform packet
+    /// keeps nanoseconds, but the public event uses milliseconds so a TS
+    /// `number` carries it exactly across long-running sessions.
+    timestamp_ms: u64 = 0,
+    frames: u32 = 0,
+    pcm_s16le: []const u8 = "",
+    dropped_pending: u32 = 0,
+    dropped_total: u32 = 0,
+};
+
+const audio_capture_packet_header_bytes: usize = 24;
+const audio_capture_packet_magic = "AC01";
+
+/// Convert the channel envelope used internally by capture into its public
+/// typed event. Also useful to native integrations that intentionally route
+/// capture through a generic `channelMsg` handler.
+pub fn decodeAudioCaptureChannelEvent(channel: EffectChannelEvent) EffectAudioCaptureEvent {
+    if (channel.kind == .closed) return .{
+        .key = channel.key,
+        .kind = .stopped,
+        .dropped_pending = channel.dropped_pending,
+        .dropped_total = channel.dropped_total,
+    };
+    if (channel.kind == .rejected) return .{
+        .key = channel.key,
+        .kind = .rejected,
+        .dropped_pending = channel.dropped_pending,
+        .dropped_total = channel.dropped_total,
+    };
+    const bytes = channel.bytes;
+    if (bytes.len < audio_capture_packet_header_bytes or !std.mem.eql(u8, bytes[0..4], audio_capture_packet_magic)) {
+        return .{ .key = channel.key, .kind = .failed, .dropped_pending = channel.dropped_pending, .dropped_total = channel.dropped_total };
+    }
+    const native_kind = std.enums.fromInt(platform.AudioCaptureEventKind, bytes[4]) orelse
+        return .{ .key = channel.key, .kind = .failed, .dropped_pending = channel.dropped_pending, .dropped_total = channel.dropped_total };
+    const source = std.enums.fromInt(platform.AudioCaptureSource, bytes[5]) orelse
+        return .{ .key = channel.key, .kind = .failed, .dropped_pending = channel.dropped_pending, .dropped_total = channel.dropped_total };
+    const channels = bytes[6];
+    const sample_rate = std.mem.readInt(u32, bytes[8..12], .little);
+    const frames = std.mem.readInt(u32, bytes[12..16], .little);
+    const timestamp_ns = std.mem.readInt(u64, bytes[16..24], .little);
+    const pcm = bytes[audio_capture_packet_header_bytes..];
+    const format: platform.AudioCaptureFormat = .{ .sample_rate = sample_rate, .channels = channels };
+    const shape_valid = format.valid() and switch (native_kind) {
+        .data => pcm.len == @as(usize, frames) * @as(usize, channels) * 2,
+        .started, .failed => frames == 0 and pcm.len == 0,
+    };
+    if (!shape_valid) return .{ .key = channel.key, .kind = .failed, .dropped_pending = channel.dropped_pending, .dropped_total = channel.dropped_total };
+    return .{
+        .key = channel.key,
+        .kind = switch (native_kind) {
+            .started => .started,
+            .data => .data,
+            .failed => .failed,
+        },
+        .source = source,
+        .sample_rate = sample_rate,
+        .channels = channels,
+        .timestamp_ms = timestamp_ns / std.time.ns_per_ms,
+        .frames = frames,
+        .pcm_s16le = pcm,
+        .dropped_pending = channel.dropped_pending,
+        .dropped_total = channel.dropped_total,
+    };
+}
+
 /// One channel's cross-thread staging FIFO: fixed entries, never
 /// evicted (see `max_effect_channel_pending`). Allocated from
 /// `process_allocator` per open occupancy and freed when the `.closed`
@@ -2607,6 +2695,18 @@ pub fn Effects(comptime Msg: type) type {
             }.make;
         }
 
+        /// Comptime Msg constructor for microphone/system capture. Capture
+        /// reuses the external-channel transport internally, while this
+        /// constructor decodes its bounded packet into
+        /// `native_sdk.EffectAudioCaptureEvent` for app code.
+        pub fn audioCaptureMsg(comptime tag: std.meta.Tag(Msg)) ChannelMsgFn {
+            return struct {
+                fn make(event: EffectChannelEvent) Msg {
+                    return @unionInit(Msg, @tagName(tag), decodeAudioCaptureChannelEvent(event));
+                }
+            }.make;
+        }
+
         /// Comptime Msg constructor for `on_event` of pty effects:
         /// `ptyMsg(.shell)` builds `Msg{ .shell = event }` — the
         /// variant's payload type must be `native_sdk.EffectPtyEvent`.
@@ -2992,6 +3092,18 @@ pub fn Effects(comptime Msg: type) type {
             max_pending: u32 = max_effect_channel_pending,
         };
 
+        pub const StartAudioCaptureOptions = struct {
+            /// Caller-chosen stream identity. Capture uses the external
+            /// channel table and its shared effect-key namespace.
+            key: u64,
+            source: platform.AudioCaptureSource,
+            sample_rate: u32 = 48_000,
+            channels: u8 = 1,
+            /// Use `Effects.audioCaptureMsg(.tag)` for a typed payload.
+            on_event: ChannelMsgFn,
+            max_pending: u32 = max_effect_channel_pending,
+        };
+
         pub const PtySpawnOptions = struct {
             /// Caller-chosen identity, stored in the model. Shares the
             /// keyed families' one key space, occupied from spawn until
@@ -3183,6 +3295,14 @@ pub fn Effects(comptime Msg: type) type {
             /// Session replay only: whether `park_seq` still reserves
             /// its pending-order slot.
             park_state: ParkOrderState = .none,
+        };
+
+        const AudioCaptureSlot = struct {
+            active: bool = false,
+            platform_started: bool = false,
+            key: u64 = 0,
+            source: platform.AudioCaptureSource = .microphone,
+            format: platform.AudioCaptureFormat = .{},
         };
 
         /// The single audio playback channel — one player is the whole
@@ -4399,6 +4519,10 @@ pub fn Effects(comptime Msg: type) type {
         /// the effect slots. Loop-thread only — the thread-shared half
         /// of each slot lives behind its `ChannelSlot.shared` header.
         channel_slots: [max_effect_channels]ChannelSlot = [_]ChannelSlot{.{}} ** max_effect_channels,
+        /// One independently-running capture per source. PCM itself rides the
+        /// channel table; this tiny loop-side mirror exists to quiesce native
+        /// audio callbacks before closing/reusing their channel occupancy.
+        audio_capture_slots: [2]AudioCaptureSlot = [_]AudioCaptureSlot{.{}} ** 2,
         /// Monotonic post-order stamp shared by every channel's staging
         /// FIFO and the close markers: the cross-channel delivery order
         /// and the drain boundary's causality cut (posts stamped at or
@@ -4617,6 +4741,18 @@ pub fn Effects(comptime Msg: type) type {
                     }
                 }
                 timer_slot.* = .{};
+            }
+            // Quiesce every native capture BEFORE the channel sweep closes
+            // its posting target and frees its staging. The platform stop
+            // contract fences callbacks synchronously, so after this loop no capture
+            // source can still enter its channel while teardown dismantles
+            // staging below. Fake/replay occupancies have no platform source
+            // to stop, but their mirrors are cleared by the same sweep.
+            for (&self.audio_capture_slots) |*capture| {
+                if (capture.active and capture.platform_started) {
+                    if (self.services) |services| services.audioCaptureStop(capture.source) catch {};
+                }
+                capture.* = .{};
             }
             // Silence the platform audio player (best effort) and clear
             // the channel.
@@ -6531,6 +6667,103 @@ pub fn Effects(comptime Msg: type) type {
             return null;
         }
 
+        /// Start (or replace) the native capture for one source. Capture is
+        /// a typed specialization of `openChannel`: bounded staging, drop
+        /// accounting, loop wakeups, and session replay are inherited
+        /// verbatim. The platform normalizes to the requested signed-16 LE
+        /// format and reports `.started` before its first `.data` packet.
+        pub fn startAudioCapture(self: *Self, options: StartAudioCaptureOptions) void {
+            const format: platform.AudioCaptureFormat = .{
+                .sample_rate = options.sample_rate,
+                .channels = options.channels,
+            };
+            if (!format.valid()) {
+                self.rejectChannel(options.key, options.on_event, true);
+                return;
+            }
+            const capture_index: usize = @intFromEnum(options.source);
+            const capture = &self.audio_capture_slots[capture_index];
+
+            // Admit the replacement BEFORE stopping the source it would
+            // supersede. A duplicate/occupied key, a full channel table, or
+            // an executor allocation failure must reject the new request
+            // without destroying a healthy recording. A same-key restart is
+            // therefore only a rejection; the existing stream keeps running
+            // until its owner explicitly stops it and receives `.stopped`.
+            if (self.keyOccupiedUntilDelivery(options.key)) {
+                self.rejectChannel(options.key, options.on_event, true);
+                return;
+            }
+
+            const handle = self.openChannel(.{
+                .key = options.key,
+                .on_event = options.on_event,
+                .max_pending = options.max_pending,
+            });
+            // A refused open has no slot. Replay parks one but deliberately
+            // returns an inert handle; retain the tiny mirror so the replayed
+            // stop verb closes that parked occupancy without touching a host.
+            if (self.findChannelSlot(options.key) == null) return;
+            if (capture.active) self.closeChannel(capture.key);
+            capture.* = .{
+                .active = true,
+                .platform_started = false,
+                .key = options.key,
+                .source = options.source,
+                .format = format,
+            };
+            if (!handle.live()) return;
+
+            const sink: platform.AudioCaptureSink = .{
+                .context = handle.shared,
+                .generation = handle.generation,
+                .push_fn = pushAudioCaptureEvent,
+            };
+            if (self.executor == .fake) {
+                _ = sink.push(.{ .kind = .started, .source = options.source, .format = format });
+                return;
+            }
+            const services = self.services orelse {
+                _ = sink.push(.{ .kind = .failed, .source = options.source, .format = format });
+                self.closeChannel(options.key);
+                return;
+            };
+            services.audioCaptureStart(options.source, format, sink) catch {
+                _ = sink.push(.{ .kind = .failed, .source = options.source, .format = format });
+                self.closeChannel(options.key);
+                return;
+            };
+            capture.platform_started = true;
+        }
+
+        /// Stop a keyed capture. Accepted PCM already staged drains first,
+        /// then exactly one `.stopped` terminal delivers through the channel.
+        pub fn stopAudioCapture(self: *Self, key: u64) void {
+            if (self.findAudioCaptureByKey(key) == null) return;
+            self.closeChannel(key);
+        }
+
+        /// Deterministic fake-executor seam: push one canonical PCM chunk
+        /// through the same packet/channel path a native callback uses.
+        pub fn feedAudioCapture(self: *Self, key: u64, timestamp_ns: u64, pcm_s16le: []const u8) error{ EffectNotFound, InvalidAudioCaptureData, EffectQueueFull }!void {
+            const capture = self.findAudioCaptureByKey(key) orelse return error.EffectNotFound;
+            if (pcm_s16le.len % (@as(usize, capture.format.channels) * 2) != 0 or
+                pcm_s16le.len > platform.max_audio_capture_pcm_bytes)
+            {
+                return error.InvalidAudioCaptureData;
+            }
+            const handle = self.channelHandle(key) orelse return error.EffectNotFound;
+            const result = pushAudioCaptureEvent(handle.shared, handle.generation, .{
+                .kind = .data,
+                .source = capture.source,
+                .format = capture.format,
+                .timestamp_ns = timestamp_ns,
+                .frames = @intCast(pcm_s16le.len / (@as(usize, capture.format.channels) * 2)),
+                .pcm_s16le = pcm_s16le,
+            });
+            if (result != .accepted) return error.EffectQueueFull;
+        }
+
         /// Close the open channel with `key`: posts stop landing
         /// immediately (the handle answers `.closed`), the staged
         /// backlog flushes in post order, and exactly one terminal
@@ -6540,6 +6773,13 @@ pub fn Effects(comptime Msg: type) type {
         /// is NOT a channel's close (channels end the way audio does:
         /// through their own verb).
         pub fn closeChannel(self: *Self, key: u64) void {
+            if (self.findAudioCaptureByKey(key)) |capture| {
+                if (capture.platform_started) {
+                    if (self.services) |services| services.audioCaptureStop(capture.source) catch {};
+                }
+                capture.active = false;
+                capture.platform_started = false;
+            }
             const slot = self.findChannelSlot(key) orelse return;
             if (slot.state != .open) return;
             slot.state = .closing;
@@ -11239,6 +11479,35 @@ pub fn Effects(comptime Msg: type) type {
                 .channel_fn = channel_fn,
                 .regenerates = regenerates,
             });
+        }
+
+        fn findAudioCaptureByKey(self: *Self, key: u64) ?*AudioCaptureSlot {
+            for (&self.audio_capture_slots) |*capture| {
+                if (capture.active and capture.key == key) return capture;
+            }
+            return null;
+        }
+
+        fn pushAudioCaptureEvent(context: ?*anyopaque, generation: u64, event: platform.AudioCaptureEvent) platform.AudioCapturePushResult {
+            const shared: *ChannelShared = @ptrCast(@alignCast(context orelse return .closed));
+            var packet: [max_effect_channel_bytes]u8 = undefined;
+            const total = audio_capture_packet_header_bytes + event.pcm_s16le.len;
+            if (total > packet.len) return .dropped_oversized;
+            @memcpy(packet[0..4], audio_capture_packet_magic);
+            packet[4] = @intFromEnum(event.kind);
+            packet[5] = @intFromEnum(event.source);
+            packet[6] = event.format.channels;
+            packet[7] = 0;
+            std.mem.writeInt(u32, packet[8..12], event.format.sample_rate, .little);
+            std.mem.writeInt(u32, packet[12..16], event.frames, .little);
+            std.mem.writeInt(u64, packet[16..24], event.timestamp_ns, .little);
+            @memcpy(packet[audio_capture_packet_header_bytes..total], event.pcm_s16le);
+            return switch ((ChannelHandle{ .shared = shared, .generation = generation }).post(packet[0..total])) {
+                .accepted => .accepted,
+                .dropped_full => .dropped_full,
+                .dropped_oversized => .dropped_oversized,
+                .closed => .closed,
+            };
         }
 
         /// The next channel occupancy generation — channel-owned,
