@@ -299,6 +299,7 @@ pub const CanvasFrame = frame_model.CanvasFrame;
 pub const max_canvas_frame_dirty_rects = frame_model.max_canvas_frame_dirty_rects;
 pub const buildCanvasFrame = frame_model.buildCanvasFrame;
 pub const incrementalDamageIntersectsBackdropBlur = frame_model.incrementalDamageIntersectsBackdropBlur;
+pub const incrementalDamageIntersectsBackdropBlurWithSampleExtent = frame_model.incrementalDamageIntersectsBackdropBlurWithSampleExtent;
 
 // Canvas GPU packet and encoder data live in `gpu.zig`; root keeps the public API stable.
 pub const CanvasRenderPassLoadAction = gpu_model.CanvasRenderPassLoadAction;

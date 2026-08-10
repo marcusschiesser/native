@@ -73,3 +73,17 @@ export interface AudioEvent {
     readonly buffering: boolean;
     readonly bands: Uint8Array;
 }
+export type AudioCaptureSource = "microphone" | "system";
+export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
+export interface AudioCaptureEvent {
+    readonly key: number;
+    readonly state: AudioCaptureState;
+    readonly source: AudioCaptureSource;
+    readonly sampleRate: number;
+    readonly channels: number;
+    readonly timestampMs: number;
+    readonly frames: number;
+    readonly pcm: Uint8Array;
+    readonly droppedPending: number;
+    readonly droppedTotal: number;
+}

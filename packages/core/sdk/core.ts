@@ -562,6 +562,64 @@ export interface ChannelRoute<M extends Msgish> {
   readonly event: ChannelEventKind<M>;
 }
 
+/// The native capture source. "microphone" captures the selected/default
+/// input device; "system" captures the process-independent desktop output
+/// mix (the OS may present a screen/audio consent prompt).
+export type AudioCaptureSource = "microphone" | "system";
+
+/// Capture stream states. A successful stream begins with "started", emits
+/// zero or more "data" chunks, and ends with "stopped" after
+/// `Cmd.audioCaptureStop`. "failed" reports a source/permission failure;
+/// stop that stream to retire it. "rejected" means the runtime refused the
+/// start before a native source was opened.
+export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
+
+export type AudioCaptureSampleRate = 16000 | 24000 | 48000;
+export type AudioCaptureChannels = 1 | 2;
+
+/// Requested canonical output format. Native inputs are converted to
+/// interleaved signed 16-bit little-endian PCM before delivery.
+export interface AudioCaptureSpec {
+  readonly source: AudioCaptureSource;
+  readonly sampleRate?: AudioCaptureSampleRate;
+  readonly channels?: AudioCaptureChannels;
+}
+
+/// The payload shape of an audio-capture event arm, matched by field name.
+/// `pcm` is populated only for "data" and is valid for this dispatch; copy
+/// bytes retained by the model. Chunks are at most 20ms. Drop counters make
+/// bounded-queue back-pressure observable rather than silent.
+export type AudioCaptureEventArm = {
+  readonly key: number;
+  readonly state: AudioCaptureState;
+  readonly source: AudioCaptureSource;
+  readonly sampleRate: number;
+  readonly channels: number;
+  readonly timestampMs: number;
+  readonly frames: number;
+  readonly pcm: Uint8Array;
+  readonly droppedPending: number;
+  readonly droppedTotal: number;
+};
+
+export type AudioCaptureEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureEventArm]
+    ? [keyof AudioCaptureEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & AudioCaptureEventArm
+        ? [AudioCaptureState] extends [M["state"]]
+          ? [AudioCaptureSource] extends [M["source"]]
+            ? M["kind"]
+            : never
+          : never
+        : never
+      : never
+    : never
+  : never;
+
+export interface AudioCaptureRoute<M extends Msgish> {
+  readonly event: AudioCaptureEventKind<M>;
+}
+
 /// The pty session event states, mirroring the engine's vocabulary:
 /// "output" is one coalesced batch of child output; "exit" is the
 /// exactly-one terminal every session produces — a clean end, a signal,
@@ -896,6 +954,15 @@ export type Cmd<M extends Msgish> =
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string }
   | { readonly op: "channel_close"; readonly key: number }
+  | {
+      readonly op: "audio_capture_start";
+      readonly key: number;
+      readonly source: AudioCaptureSource;
+      readonly sampleRate: number;
+      readonly channels: number;
+      readonly eventKind: string;
+    }
+  | { readonly op: "audio_capture_stop"; readonly key: number }
   | {
       readonly op: "pty_spawn";
       readonly key: string;
@@ -1347,6 +1414,29 @@ export const Cmd = {
   /// audio's.
   channelClose(key: number): Cmd<never> {
     return { op: "channel_close", key };
+  },
+
+  /// Start microphone or system-output capture under a positive numeric
+  /// `key`. The stream is normalized to interleaved signed 16-bit LE PCM
+  /// at the requested rate/channels (48kHz mono by default). Microphone and
+  /// system capture may run concurrently; only one stream per source may
+  /// be live. The event stream is bounded and journal/replay aware.
+  audioCaptureStart<M extends Msgish>(key: number, spec: AudioCaptureSpec, route: AudioCaptureRoute<M>): Cmd<M> {
+    return {
+      op: "audio_capture_start",
+      key,
+      source: spec.source,
+      sampleRate: spec.sampleRate ?? 48000,
+      channels: spec.channels ?? 1,
+      eventKind: route.event,
+    };
+  },
+
+  /// Stop capture under `key`. Native callbacks quiesce synchronously,
+  /// accepted backlog drains, then exactly one "stopped" event retires the
+  /// stream. A key with no live capture is a no-op.
+  audioCaptureStop(key: number): Cmd<never> {
+    return { op: "audio_capture_stop", key };
   },
 
   /// Open a pseudo-terminal session — a spawn with a different

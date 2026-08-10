@@ -122,6 +122,36 @@ export interface ChannelRoute<M extends Msgish> {
   readonly event: M["kind"];
 }
 
+export type AudioCaptureSource = "microphone" | "system";
+export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
+export type AudioCaptureSampleRate = 16000 | 24000 | 48000;
+export type AudioCaptureChannels = 1 | 2;
+
+export interface AudioCaptureSpec {
+  // Inline the event-module alias here: the external-compile stager
+  // deliberately deduplicates aliases shared by core.ts and events.ts.
+  readonly source: "microphone" | "system";
+  readonly sampleRate?: AudioCaptureSampleRate;
+  readonly channels?: AudioCaptureChannels;
+}
+
+export type AudioCaptureEventArm = {
+  readonly key: number;
+  readonly state: "started" | "data" | "failed" | "stopped" | "rejected";
+  readonly source: "microphone" | "system";
+  readonly sampleRate: number;
+  readonly channels: number;
+  readonly timestampMs: number;
+  readonly frames: number;
+  readonly pcm: Uint8Array;
+  readonly droppedPending: number;
+  readonly droppedTotal: number;
+};
+
+export interface AudioCaptureRoute<M extends Msgish> {
+  readonly event: M["kind"];
+}
+
 export interface PtyRoute<M extends Msgish> {
   readonly key?: string;
   readonly cols?: number;
@@ -252,6 +282,8 @@ export type CmdData =
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string }
   | { readonly op: "channel_close"; readonly key: number }
+  | { readonly op: "audio_capture_start"; readonly key: number; readonly source: "microphone" | "system"; readonly sampleRate: number; readonly channels: number; readonly eventKind: string }
+  | { readonly op: "audio_capture_stop"; readonly key: number }
   | {
       readonly op: "pty_spawn";
       readonly key: string;
@@ -529,6 +561,21 @@ export const Cmd = {
 
   channelClose(key: number): CmdData {
     return { op: "channel_close", key };
+  },
+
+  audioCaptureStart(key: number, spec: AudioCaptureSpec, route: { readonly event: string }): CmdData {
+    return {
+      op: "audio_capture_start",
+      key,
+      source: spec.source,
+      sampleRate: spec.sampleRate ?? 48000,
+      channels: spec.channels ?? 1,
+      eventKind: route.event,
+    };
+  },
+
+  audioCaptureStop(key: number): CmdData {
+    return { op: "audio_capture_stop", key };
   },
 
   ptySpawn(argv: readonly Uint8Array[], route: { readonly key?: string; readonly cols?: number; readonly rows?: number; readonly term?: string; readonly event: string }): CmdData {

@@ -44,7 +44,11 @@
 //!                    variable present at launch as one journaled Msg on
 //!                    its bytes arm, right after the boot command — the
 //!                    core itself never reads the environment (NS1005),
-//!                    and replay carries the recorded values.
+//!                    and replay carries the recorded values. The runner
+//!                    synthesizes `NATIVE_SDK_APP_DATA_DIR` from app_dirs
+//!                    when a core requests it, so packaged apps never
+//!                    depend on their process working directory for
+//!                    durable files.
 //!
 //! Editing this file is never core-level work: it carries no app logic and
 //! regenerates from the SDK on every build.
@@ -71,6 +75,7 @@ pub const app_markup = @embedFile("app.native");
 
 const app_permissions = manifestStringList(manifest, "permissions");
 const allowed_origins = manifestAllowedOrigins();
+const app_data_dir_env = "NATIVE_SDK_APP_DATA_DIR";
 
 pub fn main(init: std.process.Init) !void {
     var options: Adapter.Options = .{
@@ -106,6 +111,19 @@ pub fn main(init: std.process.Init) !void {
         .cache,
         &cache_dir_buffer,
     ) catch "";
+    // The durable per-app data directory, resolved by the same platform
+    // convention as Zig-core apps. TS cores request it through the
+    // ordinary journaled envMsgs boundary under `app_data_dir_env`; it
+    // is framework-provided rather than trusted from the ambient
+    // environment, so package launch cwd and env differences disappear.
+    var data_dir_buffer: [512]u8 = undefined;
+    const app_data_dir = native_sdk.app_dirs.resolveOne(
+        .{ .name = manifest.name },
+        native_sdk.app_dirs.currentPlatform(),
+        native_sdk.debug.envFromMap(init.environ_map),
+        .data,
+        &data_dir_buffer,
+    ) catch "";
     // app.zon-declared images, read once at launch (bounded; a missing or
     // over-bound file skips its entry and the views keep their fallback)
     // and registered by the adapter on the installing frame.
@@ -127,7 +145,12 @@ pub fn main(init: std.process.Init) !void {
     var env_value_count: usize = 0;
     if (comptime @hasDecl(core, "envMsgs")) {
         inline for (core.envMsgs) |entry| {
-            if (init.environ_map.get(entry.env)) |value| {
+            if (std.mem.eql(u8, entry.env, app_data_dir_env)) {
+                if (app_data_dir.len > 0) {
+                    env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = app_data_dir };
+                    env_value_count += 1;
+                }
+            } else if (init.environ_map.get(entry.env)) |value| {
                 env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = value };
                 env_value_count += 1;
             }

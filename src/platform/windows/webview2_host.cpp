@@ -605,6 +605,24 @@ struct AudioSpectrumState {
     uint64_t generation = 0;
 };
 
+using AudioCapturePush = int (*)(void *context, int kind, int source,
+    uint32_t sample_rate, uint8_t channels, uint64_t timestamp_ns,
+    uint32_t frames, const uint8_t *pcm, size_t pcm_len);
+
+struct AudioCaptureShared {
+    std::atomic<bool> stop{false};
+    int source = 0;
+    uint32_t sample_rate = 48000;
+    uint8_t channels = 1;
+    AudioCapturePush push = nullptr;
+    void *context = nullptr;
+};
+
+struct AudioCaptureState {
+    std::shared_ptr<AudioCaptureShared> shared;
+    std::thread worker;
+};
+
 /* The app's single audio player (see the audio section further down for
  * the backend rationale). All fields are message-loop-thread state; the
  * lifetime mutex additionally guards `generation` and `source` because
@@ -698,6 +716,7 @@ struct Host {
     bool com_initialized = false;
     AudioState audio;
     AudioSpectrumState spectrum;
+    AudioCaptureState captures[2];
     PendingContextMenu context_menu;
     std::shared_ptr<HostLifetime> lifetime = std::make_shared<HostLifetime>();
 };
@@ -4258,6 +4277,129 @@ static void audioHandleSpectrumMessage(Host *host, WPARAM generation) {
     audioEmitSpectrum(host, bands);
 }
 
+/* ------------------------------------------------------- audio capture
+ * Default microphone capture uses the default eCapture endpoint; system
+ * capture uses the default eRender endpoint with WASAPI's loopback flag.
+ * Shared-mode conversion asks the in-box audio engine for the SDK's exact
+ * signed-16 format, so device-native rates/layouts never leak across the
+ * platform seam. Each source owns a joinable worker: stop is the required
+ * quiescence fence before the Zig sink storage can be cleared. */
+static void audioCaptureThread(std::shared_ptr<AudioCaptureShared> shared) {
+    HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
+    IMMDeviceEnumerator *enumerator = nullptr;
+    IMMDevice *device = nullptr;
+    IAudioClient *client = nullptr;
+    IAudioCaptureClient *capture = nullptr;
+    HANDLE ready = nullptr;
+    bool running = false;
+    do {
+        if (FAILED(CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL,
+                IID_IMMDeviceEnumerator, reinterpret_cast<void **>(&enumerator))) || !enumerator) break;
+        const EDataFlow flow = shared->source == 1 ? eRender : eCapture;
+        if (FAILED(enumerator->GetDefaultAudioEndpoint(flow, eConsole, &device)) || !device) break;
+        if (FAILED(device->Activate(IID_IAudioClient, CLSCTX_ALL, nullptr,
+                reinterpret_cast<void **>(&client))) || !client) break;
+        WAVEFORMATEX format = {};
+        format.wFormatTag = WAVE_FORMAT_PCM;
+        format.nChannels = shared->channels;
+        format.nSamplesPerSec = shared->sample_rate;
+        format.wBitsPerSample = 16;
+        format.nBlockAlign = (WORD)(format.nChannels * 2);
+        format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+        DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+            AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+        if (shared->source == 1) flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
+        if (FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 1000000, 0, &format, nullptr))) break;
+        ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!ready || FAILED(client->SetEventHandle(ready))) break;
+        if (FAILED(client->GetService(IID_IAudioCaptureClient, reinterpret_cast<void **>(&capture))) || !capture) break;
+        if (FAILED(client->Start())) break;
+        running = true;
+    } while (false);
+
+    if (!running) {
+        if (!shared->stop.load(std::memory_order_relaxed) && shared->push) {
+            shared->push(shared->context, 2, shared->source, shared->sample_rate,
+                shared->channels, 0, 0, nullptr, 0);
+        }
+    } else {
+        if (shared->push && shared->push(shared->context, 0, shared->source,
+                shared->sample_rate, shared->channels, 0, 0, nullptr, 0) == 1) {
+            shared->stop.store(true, std::memory_order_relaxed);
+        }
+        const UINT32 max_frames = 3840u / ((UINT32)shared->channels * 2u);
+        int16_t silence[1920] = {};
+        bool terminal_error = false;
+        while (!shared->stop.load(std::memory_order_relaxed)) {
+            const DWORD wait_result = WaitForSingleObject(ready, 50);
+            /* A timeout is also a polling fallback for loopback endpoints
+             * whose event notification is late or absent. */
+            if (wait_result != WAIT_OBJECT_0 && wait_result != WAIT_TIMEOUT) {
+                terminal_error = true;
+                break;
+            }
+            while (!shared->stop.load(std::memory_order_relaxed)) {
+                UINT32 pending = 0;
+                if (FAILED(capture->GetNextPacketSize(&pending))) {
+                    terminal_error = true;
+                    break;
+                }
+                if (pending == 0) break;
+                BYTE *data = nullptr;
+                UINT32 frames = 0;
+                DWORD packet_flags = 0;
+                if (FAILED(capture->GetBuffer(&data, &frames, &packet_flags, nullptr, nullptr))) {
+                    terminal_error = true;
+                    break;
+                }
+                UINT32 offset = 0;
+                while (offset < frames && !shared->stop.load(std::memory_order_relaxed)) {
+                    const UINT32 chunk = std::min(max_frames, frames - offset);
+                    const size_t byte_len = (size_t)chunk * shared->channels * 2;
+                    const uint8_t *pcm = ((packet_flags & AUDCLNT_BUFFERFLAGS_SILENT) || !data)
+                        ? reinterpret_cast<const uint8_t *>(silence)
+                        : data + (size_t)offset * shared->channels * 2;
+                    const int result = shared->push ? shared->push(shared->context, 1,
+                        shared->source, shared->sample_rate, shared->channels,
+                        gpuTimestampNs(), chunk, pcm, byte_len) : 1;
+                    if (result == 1) shared->stop.store(true, std::memory_order_relaxed);
+                    offset += chunk;
+                }
+                if (FAILED(capture->ReleaseBuffer(frames))) {
+                    terminal_error = true;
+                    break;
+                }
+            }
+            if (terminal_error) break;
+        }
+        if (terminal_error && !shared->stop.load(std::memory_order_relaxed) && shared->push) {
+            shared->push(shared->context, 2, shared->source, shared->sample_rate,
+                shared->channels, 0, 0, nullptr, 0);
+        }
+        client->Stop();
+    }
+    if (capture) capture->Release();
+    if (client) client->Release();
+    if (device) device->Release();
+    if (enumerator) enumerator->Release();
+    if (ready) CloseHandle(ready);
+    if (SUCCEEDED(com_hr)) CoUninitialize();
+}
+
+static void audioCaptureStop(Host *host, int source) {
+    if (!host || source < 0 || source > 1) return;
+    AudioCaptureState &state = host->captures[source];
+    if (state.shared) state.shared->stop.store(true, std::memory_order_relaxed);
+    if (state.worker.joinable()) state.worker.join();
+    state.shared.reset();
+}
+
+static void audioCaptureStopAll(Host *host) {
+    audioCaptureStop(host, 0);
+    audioCaptureStop(host, 1);
+}
+
 /* Release the whole pipeline. The session retires through Close(): the
  * event pump answers the MESessionClosed handshake by shutting source
  * and session down on the worker thread, so the loop never blocks. The
@@ -5840,6 +5982,7 @@ Host *native_sdk_windows_create(const char *app_name, size_t app_name_len, const
 
 void native_sdk_windows_destroy(Host *host) {
     if (!host) return;
+    audioCaptureStopAll(host);
     std::shared_ptr<HostLifetime> lifetime = host->lifetime;
     std::lock_guard<std::recursive_mutex> guard(lifetime->mutex);
     lifetime->alive = false;
@@ -7606,6 +7749,34 @@ int native_sdk_windows_audio_set_volume(Host *host, double volume) {
 int native_sdk_windows_audio_spectrum_supported(Host *host) {
     if (!host) return 0;
     return audioSpectrumSupported() ? 1 : 0;
+}
+
+int native_sdk_windows_audio_capture_start(Host *host, int source, uint32_t sample_rate,
+        uint8_t channels, AudioCapturePush push_fn, void *push_context) {
+    if (!host || source < 0 || source > 1 || !push_fn ||
+        (sample_rate != 16000 && sample_rate != 24000 && sample_rate != 48000) ||
+        (channels != 1 && channels != 2)) return 0;
+    audioCaptureStop(host, source);
+    AudioCaptureState &state = host->captures[source];
+    state.shared = std::make_shared<AudioCaptureShared>();
+    state.shared->source = source;
+    state.shared->sample_rate = sample_rate;
+    state.shared->channels = channels;
+    state.shared->push = push_fn;
+    state.shared->context = push_context;
+    try {
+        state.worker = std::thread(audioCaptureThread, state.shared);
+    } catch (...) {
+        state.shared.reset();
+        return 0;
+    }
+    return 1;
+}
+
+int native_sdk_windows_audio_capture_stop(Host *host, int source) {
+    if (!host || source < 0 || source > 1) return 0;
+    audioCaptureStop(host, source);
+    return 1;
 }
 
 }

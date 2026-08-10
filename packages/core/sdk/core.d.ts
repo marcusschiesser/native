@@ -58,6 +58,31 @@ export type ChannelEventKind<M extends Msgish> = M extends Msgish ? [Exclude<key
 export interface ChannelRoute<M extends Msgish> {
     readonly event: ChannelEventKind<M>;
 }
+export type AudioCaptureSource = "microphone" | "system";
+export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
+export type AudioCaptureSampleRate = 16000 | 24000 | 48000;
+export type AudioCaptureChannels = 1 | 2;
+export interface AudioCaptureSpec {
+    readonly source: AudioCaptureSource;
+    readonly sampleRate?: AudioCaptureSampleRate;
+    readonly channels?: AudioCaptureChannels;
+}
+export type AudioCaptureEventArm = {
+    readonly key: number;
+    readonly state: AudioCaptureState;
+    readonly source: AudioCaptureSource;
+    readonly sampleRate: number;
+    readonly channels: number;
+    readonly timestampMs: number;
+    readonly frames: number;
+    readonly pcm: Uint8Array;
+    readonly droppedPending: number;
+    readonly droppedTotal: number;
+};
+export type AudioCaptureEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof AudioCaptureEventArm] ? [keyof AudioCaptureEventArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & AudioCaptureEventArm ? [AudioCaptureState] extends [M["state"]] ? [AudioCaptureSource] extends [M["source"]] ? M["kind"] : never : never : never : never : never : never;
+export interface AudioCaptureRoute<M extends Msgish> {
+    readonly event: AudioCaptureEventKind<M>;
+}
 export type PtyState = "output" | "exit";
 export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
 export type PtyEventArm = {
@@ -291,6 +316,16 @@ export type Cmd<M extends Msgish> = {
     readonly op: "channel_close";
     readonly key: number;
 } | {
+    readonly op: "audio_capture_start";
+    readonly key: number;
+    readonly source: AudioCaptureSource;
+    readonly sampleRate: number;
+    readonly channels: number;
+    readonly eventKind: string;
+} | {
+    readonly op: "audio_capture_stop";
+    readonly key: number;
+} | {
     readonly op: "pty_spawn";
     readonly key: string;
     readonly eventKind: string;
@@ -354,6 +389,8 @@ export declare const Cmd: {
     imageUnregister(id: number): Cmd<never>;
     channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M>;
     channelClose(key: number): Cmd<never>;
+    audioCaptureStart<M extends Msgish>(key: number, spec: AudioCaptureSpec, route: AudioCaptureRoute<M>): Cmd<M>;
+    audioCaptureStop(key: number): Cmd<never>;
     ptySpawn<M extends Msgish>(argv: readonly Uint8Array[], route: PtyRoute<M>): Cmd<M>;
     ptyWrite(key: string, bytes: Uint8Array): Cmd<never>;
     ptyResize(key: string, cols: number, rows: number): Cmd<never>;

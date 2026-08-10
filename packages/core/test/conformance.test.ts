@@ -3519,6 +3519,22 @@ const channelTail = `
 }
 `;
 
+const captureMsg = `
+export type CaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
+export type CaptureSource = "microphone" | "system";
+export interface Model { readonly seen: number; readonly errs: number; }
+export type Msg =
+  | { readonly kind: "go"; readonly which: number }
+  | { readonly kind: "capture_event"; readonly key: number; readonly state: CaptureState; readonly source: CaptureSource; readonly sampleRate: number; readonly channels: number; readonly timestampMs: number; readonly frames: number; readonly pcm: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+export function initialModel(): Model { return { seen: 0, errs: 0 }; }
+`;
+
+const captureTail = `
+    case "capture_event": return msg.state === "data" ? { ...model, seen: model.seen + msg.frames } : { ...model, errs: model.errs + (msg.state === "failed" ? 1 : 0) };
+  }
+}
+`;
+
 // The video fixture: the five-state union and the seven-field event arm
 // videoLoad routes.
 const videoMsg = `
@@ -4126,6 +4142,40 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       if (msg.which === 1) return [model, Cmd.channelOpen(model.seen + 100, { event: "chan_event" })];
       return [model, Cmd.channelClose(41)];
 ${channelTail}
+`,
+  },
+  {
+    name: "audioCaptureStart and audioCaptureStop emit microphone and system capture records",
+    src: `
+import { Cmd } from "@native-sdk/core";
+${captureMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go":
+      if (msg.which === 0) return [model, Cmd.audioCaptureStart(91, { source: "microphone" }, { event: "capture_event" })];
+      if (msg.which === 1) return [model, Cmd.audioCaptureStart(model.seen + 100, { source: "system", sampleRate: 16000, channels: 2 }, { event: "capture_event" })];
+      return [model, Cmd.audioCaptureStop(91)];
+${captureTail}
+`,
+  },
+  {
+    name: "an audio capture event arm whose state union misses a member is taught",
+    formerEmitGate: "NS1027",
+    src: `
+import { Cmd, type AudioCaptureEventKind } from "@native-sdk/core";
+export type NarrowState = "started" | "data" | "failed" | "stopped";
+export type CaptureSource = "microphone" | "system";
+export interface Model { readonly seen: number; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "capture_event"; readonly key: number; readonly state: NarrowState; readonly source: CaptureSource; readonly sampleRate: number; readonly channels: number; readonly timestampMs: number; readonly frames: number; readonly pcm: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+export function initialModel(): Model { return { seen: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.audioCaptureStart(91, { source: "microphone" }, { event: "capture_event" as AudioCaptureEventKind<Msg> })];
+    case "capture_event": return { seen: model.seen + 1 };
+  }
+}
 `,
   },
   {
