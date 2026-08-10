@@ -531,6 +531,16 @@ int native_sdk_appkit_audio_stop(native_sdk_appkit_host_t *host);
 int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t position_ms);
 int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume);
 
+/* Microphone/system-output capture. Source: 0 microphone, 1 system;
+ * event kind: 0 started, 1 PCM data, 2 failed. PCM is interleaved signed
+ * 16-bit little-endian in the exact requested format. The callback returns
+ * 0 accepted, 1 closed (the producer must exit), or a drop code. Stop is a
+ * synchronous quiescence fence: the callback is never entered afterward. */
+typedef int (*native_sdk_appkit_audio_capture_push_t)(void *context, int kind, int source, uint32_t sample_rate, uint8_t channels, uint64_t timestamp_ns, uint32_t frames, const uint8_t *pcm, size_t pcm_len);
+int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, int source, uint32_t sample_rate, uint8_t channels, native_sdk_appkit_audio_capture_push_t push_fn, void *push_context);
+int native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host, int source);
+int native_sdk_appkit_audio_capture_supported(native_sdk_appkit_host_t *host, int source);
+
 /* Where the video player delivers decoded frames: one tightly packed,
  * row-major, straight-alpha RGBA8 frame per call (len = width * height
  * * 4), copied before return. Returns 0 when the frame was accepted, 1

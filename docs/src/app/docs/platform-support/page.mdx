@@ -298,6 +298,14 @@ macOS, Linux, and Windows run full desktop apps through their own platform hosts
       <td>Unsupported</td>
       <td>Supported on Windows 10 2004+ (process-scoped WASAPI loopback of this app only, probed live)</td>
     </tr>
+    <tr>
+      <td>Microphone + system audio capture</td>
+      <td>Supported (AVAudioEngine microphone; ScreenCaptureKit system mix on macOS 13+; user consent required)</td>
+      <td>Unsupported</td>
+      <td>Unsupported</td>
+      <td>Unsupported</td>
+      <td>Supported (default capture endpoint + WASAPI render loopback)</td>
+    </tr>
   </tbody>
 </table>
 
@@ -328,7 +336,7 @@ JavaScript can query the same support model through the built-in bridge when `js
 const hasTray = await window.zero.platform.supports("tray");
 ```
 
-Feature names match the Zig `PlatformFeature` enum and the TypeScript `NativeSdkPlatformFeature` union. JavaScript callers may use either snake_case names such as `native_views` or camelCase aliases such as `nativeViews`. Unsupported operations still reject explicitly if called; support checks are intended for choosing UI affordances before making those calls.
+Feature names match the Zig `PlatformFeature` enum and the TypeScript `NativeSdkPlatformFeature` union. JavaScript callers may use either snake_case names such as `native_views`, `microphone_capture`, and `system_audio_capture` or camelCase aliases such as `nativeViews`, `microphoneCapture`, and `systemAudioCapture`. Unsupported operations still reject explicitly if called; support checks are intended for choosing UI affordances before making those calls.
 
 ## Native Surfaces
 

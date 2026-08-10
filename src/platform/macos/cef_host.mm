@@ -3411,6 +3411,28 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
     object.trayContext = context;
 }
 
+int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, int source, uint32_t sample_rate, uint8_t channels, native_sdk_appkit_audio_capture_push_t callback, void *context) {
+    (void)host;
+    (void)source;
+    (void)sample_rate;
+    (void)channels;
+    (void)callback;
+    (void)context;
+    return 0;
+}
+
+int native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host, int source) {
+    (void)host;
+    (void)source;
+    return 0;
+}
+
+int native_sdk_appkit_audio_capture_supported(native_sdk_appkit_host_t *host, int source) {
+    (void)host;
+    (void)source;
+    return 0;
+}
+
 /* Native context menu, CEF engine: same NSMenu presentation as the
  * system-engine host, anchored to the window content view (gpu-surface
  * views are system-engine-only, so `label` resolves to the window). */

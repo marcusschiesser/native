@@ -163,6 +163,10 @@ pub fn setAudioService(self: anytype, service: types.MobileAudioService, context
     services.audio_set_volume_fn = if (playback) Bridge.audioSetVolume else null;
     self.null_platform.audio_playback = playback;
     self.null_platform.audio_streaming = streaming;
+    // The embed ABI has no capture producer callbacks yet; never inherit
+    // the null platform's deterministic capture fake as host capability.
+    self.null_platform.microphone_capture = false;
+    self.null_platform.system_audio_capture = false;
 }
 
 /// Host-owned storage for the shim's registered image-decode service
@@ -725,6 +729,8 @@ pub const MobileHostApp = struct {
         // below so the runtime's service table starts without audio.
         self.null_platform.audio_playback = false;
         self.null_platform.audio_streaming = false;
+        self.null_platform.microphone_capture = false;
+        self.null_platform.system_audio_capture = false;
         // Video is declined the same way: no mobile shim registers a
         // decoder yet, and the null platform's fake player belongs to
         // hermetic tests — a load that "succeeds" but never decodes

@@ -123,6 +123,8 @@ pub fn UiAppHost(comptime AppDef: type) type {
             // snapshotted below.
             self.null_platform.audio_playback = false;
             self.null_platform.audio_streaming = false;
+            self.null_platform.microphone_capture = false;
+            self.null_platform.system_audio_capture = false;
             // The null packet presenter records only counts; disabling it
             // routes presentation through the CPU pixel path so frames
             // produce real pixels (the buffer M2's surface blit consumes).

@@ -457,6 +457,11 @@ pub const CanvasFrameOptions = struct {
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
     scale: f32 = 1,
+    /// Renderer-specific read support relative to `Blur.radius`. The
+    /// reference and Windows renderers consume one radius; AppKit's
+    /// three-box Gaussian consumes at most three. Runtime-owned frame
+    /// planning sets this from the active platform.
+    backdrop_blur_sample_extent_multiplier: f32 = 1,
     full_repaint: bool = false,
     budget: CanvasFrameBudget = .{},
     previous_pipeline_cache: []const RenderPipelineCacheEntry = &.{},
@@ -615,7 +620,11 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
         // pixels so a fractional dirty edge cannot erase an unchanged
         // neighbor's boundary-pixel coverage without redrawing it.
         dirty_bounds = bleedAlignedDirtyBounds(unionOptionalBounds(dirtyBoundsFromChanges(changes), render_override_dirty_bounds), options.scale, 1, options.surface_size);
-        if (incrementalDamageIntersectsBackdropBlur(render_plan.commands, dirty_bounds)) {
+        if (incrementalDamageIntersectsBackdropBlurWithSampleExtent(
+            render_plan.commands,
+            dirty_bounds,
+            options.backdrop_blur_sample_extent_multiplier,
+        )) {
             // A backdrop blur reads pixels around its output from the
             // destination as it existed at this point in draw order.
             // Retained pixels outside an incremental scissor already
@@ -666,8 +675,23 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
 /// outside the scissor hold the previous fully composited frame rather
 /// than the backdrop at the blur command's position in draw order.
 pub fn incrementalDamageIntersectsBackdropBlur(commands: []const RenderCommand, dirty_bounds: ?geometry.RectF) bool {
+    return incrementalDamageIntersectsBackdropBlurWithSampleExtent(commands, dirty_bounds, 1);
+}
+
+/// Backend-aware form of `incrementalDamageIntersectsBackdropBlur`. Values
+/// below one are normalized to the shared one-radius floor; wider renderers
+/// pass their conservative maximum sampling support.
+pub fn incrementalDamageIntersectsBackdropBlurWithSampleExtent(
+    commands: []const RenderCommand,
+    dirty_bounds: ?geometry.RectF,
+    requested_sample_extent_multiplier: f32,
+) bool {
     const dirty = dirty_bounds orelse return false;
     const normalized_dirty = dirty.normalized();
+    const sample_extent_multiplier = if (std.math.isFinite(requested_sample_extent_multiplier))
+        @max(1, requested_sample_extent_multiplier)
+    else
+        1;
     for (commands) |command| {
         switch (command.command) {
             .blur => |blur| {
@@ -677,14 +701,25 @@ pub fn incrementalDamageIntersectsBackdropBlur(commands: []const RenderCommand, 
                 if (output.isEmpty()) continue;
 
                 // Do not use `command.bounds` here: the render planner
-                // intersects that inflated bound with the output clip,
-                // while a clipped output pixel still samples backdrop
-                // pixels up to `radius` OUTSIDE the clip. Transforming
-                // the full local read footprint is a conservative AABB
-                // for every sample the surviving output can consume.
-                const read_footprint = command.transform.transformRect(
-                    blur.rect.normalized().inflate(geometry.InsetsF.all(@max(0, blur.radius))),
-                ).normalized();
+                // intersects that radius-inflated bound with the output
+                // clip, while a clipped output pixel still samples backdrop
+                // outside the clip. Preserve the established local-radius
+                // footprint for one-radius renderers. Wider renderers operate
+                // on the transformed output with an isotropic device-space
+                // kernel, so scale their support by the transform's largest
+                // axis before inflating that output.
+                const read_footprint = if (sample_extent_multiplier == 1)
+                    command.transform.transformRect(
+                        blur.rect.normalized().inflate(geometry.InsetsF.all(@max(0, blur.radius))),
+                    ).normalized()
+                else extended: {
+                    const transform = command.transform;
+                    const x_scale = @sqrt(transform.a * transform.a + transform.b * transform.b);
+                    const y_scale = @sqrt(transform.c * transform.c + transform.d * transform.d);
+                    const transform_scale = @max(0.0001, @max(x_scale, y_scale));
+                    const sample_extent = @max(0, blur.radius) * transform_scale * sample_extent_multiplier;
+                    break :extended output.normalized().inflate(geometry.InsetsF.all(sample_extent));
+                };
                 if (read_footprint.intersects(normalized_dirty)) return true;
             },
             else => {},

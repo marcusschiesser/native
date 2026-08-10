@@ -2,6 +2,7 @@
 
 #import <AppKit/AppKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
 /* Spectrum analysis of the app's own playback: MediaToolbox provides
  * the MTAudioProcessingTap that hands the player's PCM to the host, and
  * Accelerate (vDSP) provides the FFT that turns it into band
@@ -25,6 +26,8 @@
 #include <string.h>
 
 @class NativeSdkAppKitHost;
+@class NativeSdkAudioCaptureTarget;
+@class NativeSdkScreenAudioCapture;
 
 static const NSUInteger NativeSdkMaxChildWebViews = 16;
 static const NSUInteger NativeSdkMaxNativeViews = 32;
@@ -811,6 +814,13 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
  * when a new load replaces the stream; orphaned (left to finish) when
  * the stream completes naturally. */
 @property(nonatomic, strong) NSURLSessionDownloadTask *audioCacheDownload;
+/* Independent microphone and system-output PCM capture. The target owns
+ * callback quiescence; the concrete producers own AVAudioEngine and
+ * ScreenCaptureKit respectively. */
+@property(nonatomic, strong) NativeSdkAudioCaptureTarget *microphoneCaptureTarget;
+@property(nonatomic, strong) AVAudioEngine *microphoneCaptureEngine;
+@property(nonatomic, strong) NativeSdkAudioCaptureTarget *systemCaptureTarget;
+@property(nonatomic, strong) NativeSdkScreenAudioCapture *systemCapture;
 /* The app's single video player and its two timers. One player is the
  * whole surface, exactly like audio: a video app shows one stream at a
  * time, and a second concurrent decode would be compositor design the
@@ -1027,6 +1037,9 @@ static NSMutableDictionary *NativeSdkCredentialQuery(NSString *service, NSString
 - (int)audioStop;
 - (int)audioSeekToMs:(uint64_t)positionMs;
 - (int)audioSetVolume:(double)volume;
+- (int)audioCaptureStartSource:(int)source sampleRate:(uint32_t)sampleRate channels:(uint8_t)channels pushFn:(native_sdk_appkit_audio_capture_push_t)pushFn pushContext:(void *)pushContext;
+- (int)audioCaptureStopSource:(int)source;
+- (void)startMicrophoneCaptureTarget:(NativeSdkAudioCaptureTarget *)target;
 - (void)emitAudioEventOfKind:(int)kind;
 - (void)stopAudioPositionTimer;
 - (void)audioInstallSpectrumTapForItem:(AVPlayerItem *)item asset:(AVURLAsset *)asset;
@@ -1749,6 +1762,29 @@ static CGFloat NativeSdkPacketTransformScale(id value) {
     return fmax(0.0001, fmax(xScale, yScale));
 }
 
+/* Three box filters approximate a Gaussian closely while retaining the
+ * O(pixels) sliding-window implementation in vImage. `sigma` is the CSS-like
+ * blur radius in device pixels; the widths below are the standard optimal
+ * three-box approximation, split between the neighboring odd widths whose
+ * combined variance is closest to sigma squared. */
+static void NativeSdkGaussianBoxRadii(NSUInteger sigma, NSUInteger radii[3]) {
+    const double passCount = 3.0;
+    const double idealWidth = sqrt((12.0 * (double)sigma * (double)sigma / passCount) + 1.0);
+    NSUInteger lowerWidth = (NSUInteger)floor(idealWidth);
+    if ((lowerWidth & 1u) == 0) lowerWidth -= 1;
+    lowerWidth = MAX((NSUInteger)1, lowerWidth);
+    const NSUInteger upperWidth = lowerWidth + 2;
+    const double lowerCountValue =
+        (12.0 * (double)sigma * (double)sigma - passCount * (double)lowerWidth * (double)lowerWidth -
+            4.0 * passCount * (double)lowerWidth - 3.0 * passCount) /
+        (-4.0 * (double)lowerWidth - 4.0);
+    const NSInteger lowerCount = MAX((NSInteger)0, MIN((NSInteger)3, (NSInteger)llround(lowerCountValue)));
+    for (NSUInteger pass = 0; pass < 3; pass++) {
+        const NSUInteger width = pass < (NSUInteger)lowerCount ? lowerWidth : upperWidth;
+        radii[pass] = (width - 1) / 2;
+    }
+}
+
 static BOOL NativeSdkPacketApplyBlur(NSDictionary *effect, CGFloat opacity, CGContextRef context, CGFloat scale, id transformValue, BOOL hasClip, NSRect clipRect) {
     if (!effect || !context) return NO;
     void *contextData = CGBitmapContextGetData(context);
@@ -1780,16 +1816,19 @@ static BOOL NativeSdkPacketApplyBlur(NSDictionary *effect, CGFloat opacity, CGCo
     NSUInteger maxY = (NSUInteger)maxYFloat;
     if (maxX <= minX || maxY <= minY) return YES;
 
-    NSUInteger radius = (NSUInteger)llround(fmax(0.0, NativeSdkPacketNumber(effect[@"radius"], 0) * normalizedScale * NativeSdkPacketTransformScale(transformValue)));
-    radius = MIN(radius, (NSUInteger)64);
-    if (radius == 0) return YES;
+    NSUInteger sigma = (NSUInteger)llround(fmax(0.0, NativeSdkPacketNumber(effect[@"radius"], 0) * normalizedScale * NativeSdkPacketTransformScale(transformValue)));
+    sigma = MIN(sigma, (NSUInteger)64);
+    if (sigma == 0) return YES;
     CGFloat mix = fmax(0.0, fmin(1.0, opacity));
     if (mix <= 0) return YES;
 
-    NSUInteger expandedMinX = minX > radius ? minX - radius : 0;
-    NSUInteger expandedMaxX = MIN((NSUInteger)width, maxX + radius);
-    NSUInteger expandedMinY = minY > radius ? minY - radius : 0;
-    NSUInteger expandedMaxY = MIN((NSUInteger)height, maxY + radius);
+    NSUInteger boxRadii[3] = {0, 0, 0};
+    NativeSdkGaussianBoxRadii(sigma, boxRadii);
+    const NSUInteger sampleExtent = boxRadii[0] + boxRadii[1] + boxRadii[2];
+    NSUInteger expandedMinX = minX > sampleExtent ? minX - sampleExtent : 0;
+    NSUInteger expandedMaxX = MIN((NSUInteger)width, maxX + sampleExtent);
+    NSUInteger expandedMinY = minY > sampleExtent ? minY - sampleExtent : 0;
+    NSUInteger expandedMaxY = MIN((NSUInteger)height, maxY + sampleExtent);
     if (expandedMaxX <= expandedMinX || expandedMaxY <= expandedMinY) return YES;
 
     NSUInteger regionWidth = expandedMaxX - expandedMinX;
@@ -1797,11 +1836,13 @@ static BOOL NativeSdkPacketApplyBlur(NSDictionary *effect, CGFloat opacity, CGCo
     size_t regionBytesPerRow = regionWidth * 4;
     size_t regionByteLength = regionBytesPerRow * regionHeight;
     NSMutableData *sourceData = [NSMutableData dataWithLength:regionByteLength];
-    NSMutableData *horizontalData = [NSMutableData dataWithLength:regionByteLength];
-    if (!sourceData || !horizontalData) return NO;
+    NSMutableData *firstPassData = [NSMutableData dataWithLength:regionByteLength];
+    NSMutableData *secondPassData = [NSMutableData dataWithLength:regionByteLength];
+    if (!sourceData || !firstPassData || !secondPassData) return NO;
     uint8_t *destination = (uint8_t *)contextData;
     uint8_t *source = (uint8_t *)sourceData.mutableBytes;
-    uint8_t *horizontal = (uint8_t *)horizontalData.mutableBytes;
+    uint8_t *firstPass = (uint8_t *)firstPassData.mutableBytes;
+    uint8_t *secondPass = (uint8_t *)secondPassData.mutableBytes;
     for (NSUInteger row = 0; row < regionHeight; row++) {
         memcpy(
             source + row * regionBytesPerRow,
@@ -1810,91 +1851,37 @@ static BOOL NativeSdkPacketApplyBlur(NSDictionary *effect, CGFloat opacity, CGCo
         );
     }
 
-    /* Both passes keep the ORIGINAL clamped-window box average — the
-     * window shrinks at the surface edges exactly as before — but slide
-     * the window incrementally (add the entering sample, subtract the
-     * leaving one), turning O(region x radius) into O(region). The sums
-     * are the same integers the per-pixel rescan produced, so the output
-     * is byte-identical; a full-window dirty pass that repaints a
-     * backdrop-blurred popover stops costing milliseconds of scalar
-     * resampling. */
-    for (NSUInteger y = expandedMinY; y < expandedMaxY; y++) {
-        const uint8_t *sourceRow = source + (y - expandedMinY) * regionBytesPerRow;
-        uint8_t *horizontalRow = horizontal + (y - expandedMinY) * regionBytesPerRow;
-        NSUInteger windowMinX = minX > radius ? minX - radius : 0;
-        NSUInteger windowMaxX = MIN((NSUInteger)width - 1, minX + radius);
-        uint64_t sums[4] = {0, 0, 0, 0};
-        for (NSUInteger sx = windowMinX; sx <= windowMaxX; sx++) {
-            const uint8_t *pixel = sourceRow + (sx - expandedMinX) * 4;
-            sums[0] += pixel[0];
-            sums[1] += pixel[1];
-            sums[2] += pixel[2];
-            sums[3] += pixel[3];
+    vImage_Buffer buffers[3] = {
+        { .data = source, .height = regionHeight, .width = regionWidth, .rowBytes = regionBytesPerRow },
+        { .data = firstPass, .height = regionHeight, .width = regionWidth, .rowBytes = regionBytesPerRow },
+        { .data = secondPass, .height = regionHeight, .width = regionWidth, .rowBytes = regionBytesPerRow },
+    };
+    const Pixel_8888 edgeColor = {0, 0, 0, 0};
+    for (NSUInteger pass = 0; pass < 3; pass++) {
+        const vImage_Buffer *input = pass == 0 ? &buffers[0] : (pass == 1 ? &buffers[1] : &buffers[2]);
+        const vImage_Buffer *output = pass == 1 ? &buffers[2] : &buffers[1];
+        const uint32_t kernelSize = (uint32_t)(boxRadii[pass] * 2 + 1);
+        if (kernelSize == 1) {
+            memcpy(output->data, input->data, regionByteLength);
+            continue;
         }
-        for (NSUInteger x = minX; x < maxX; x++) {
-            NSUInteger sampleMinX = x > radius ? x - radius : 0;
-            NSUInteger sampleMaxX = MIN((NSUInteger)width - 1, x + radius);
-            while (windowMaxX < sampleMaxX) {
-                windowMaxX += 1;
-                const uint8_t *pixel = sourceRow + (windowMaxX - expandedMinX) * 4;
-                sums[0] += pixel[0];
-                sums[1] += pixel[1];
-                sums[2] += pixel[2];
-                sums[3] += pixel[3];
-            }
-            while (windowMinX < sampleMinX) {
-                const uint8_t *pixel = sourceRow + (windowMinX - expandedMinX) * 4;
-                sums[0] -= pixel[0];
-                sums[1] -= pixel[1];
-                sums[2] -= pixel[2];
-                sums[3] -= pixel[3];
-                windowMinX += 1;
-            }
-            NSUInteger count = sampleMaxX - sampleMinX + 1;
-            uint8_t *out = horizontalRow + (x - expandedMinX) * 4;
-            out[0] = (uint8_t)(sums[0] / count);
-            out[1] = (uint8_t)(sums[1] / count);
-            out[2] = (uint8_t)(sums[2] / count);
-            out[3] = (uint8_t)(sums[3] / count);
-        }
+        const vImage_Error error = vImageBoxConvolve_ARGB8888(
+            input, output, NULL, 0, 0, kernelSize, kernelSize, edgeColor, kvImageEdgeExtend
+        );
+        if (error != kvImageNoError) return NO;
     }
 
-    for (NSUInteger x = minX; x < maxX; x++) {
-        const uint8_t *horizontalColumn = horizontal + (x - expandedMinX) * 4;
-        NSUInteger windowMinY = minY > radius ? minY - radius : 0;
-        NSUInteger windowMaxY = MIN((NSUInteger)height - 1, minY + radius);
-        uint64_t sums[4] = {0, 0, 0, 0};
-        for (NSUInteger sy = windowMinY; sy <= windowMaxY; sy++) {
-            const uint8_t *pixel = horizontalColumn + (sy - expandedMinY) * regionBytesPerRow;
-            sums[0] += pixel[0];
-            sums[1] += pixel[1];
-            sums[2] += pixel[2];
-            sums[3] += pixel[3];
-        }
-        for (NSUInteger y = minY; y < maxY; y++) {
-            NSUInteger sampleMinY = y > radius ? y - radius : 0;
-            NSUInteger sampleMaxY = MIN((NSUInteger)height - 1, y + radius);
-            while (windowMaxY < sampleMaxY) {
-                windowMaxY += 1;
-                const uint8_t *pixel = horizontalColumn + (windowMaxY - expandedMinY) * regionBytesPerRow;
-                sums[0] += pixel[0];
-                sums[1] += pixel[1];
-                sums[2] += pixel[2];
-                sums[3] += pixel[3];
-            }
-            while (windowMinY < sampleMinY) {
-                const uint8_t *pixel = horizontalColumn + (windowMinY - expandedMinY) * regionBytesPerRow;
-                sums[0] -= pixel[0];
-                sums[1] -= pixel[1];
-                sums[2] -= pixel[2];
-                sums[3] -= pixel[3];
-                windowMinY += 1;
-            }
-            NSUInteger count = sampleMaxY - sampleMinY + 1;
+    /* The third pass lands in firstPass. Preserve command opacity by
+     * mixing that Gaussian approximation with the untouched backdrop. */
+    for (NSUInteger y = minY; y < maxY; y++) {
+        const NSUInteger regionY = y - expandedMinY;
+        for (NSUInteger x = minX; x < maxX; x++) {
+            const NSUInteger regionX = x - expandedMinX;
+            const size_t regionIndex = regionY * regionBytesPerRow + regionX * 4;
             uint8_t *out = destination + y * bytesPerRow + x * 4;
             for (NSUInteger channel = 0; channel < 4; channel++) {
-                CGFloat blurred = (CGFloat)(sums[channel] / count);
-                CGFloat original = (CGFloat)source[(y - expandedMinY) * regionBytesPerRow + (x - expandedMinX) * 4 + channel];
+                const CGFloat original = (CGFloat)source[regionIndex + channel];
+                const CGFloat blurred = (CGFloat)firstPass[regionIndex + channel];
                 out[channel] = (uint8_t)llround(original + (blurred - original) * mix);
             }
         }
@@ -4033,7 +4020,7 @@ static const char *NativeSdkGpuShotDir(void) {
  *     through the same CG code, clipped to the repaint region, and draw
  *     as transient textured quads;
  *   - blur reads the backdrop, so the pass splits around it: commit +
- *     wait, read the target back, run the existing scalar box blur on
+ *     wait, read the target back, run the vImage Gaussian approximation on
  *     the readback, upload the blurred rect, and continue — a hybrid
  *     frame, CPU only where the effect is inherently a backdrop read.
  * Scissor/dirty-rect semantics mirror the CPU path: full passes clear
@@ -4520,7 +4507,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         if (op->type == 0) continue;
         if (op->type == 3) {
             /* Blur sandwich: flush the pass, read the target back, run
-             * the reference scalar blur on the readback, upload the
+             * the vImage Gaussian approximation on the readback, upload the
              * blurred rect, and continue compositing above it. */
             [encoder endEncoding];
             encoder = nil;
@@ -7277,6 +7264,333 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 @implementation NativeSdkShortcut
 @end
 
+/* ------------------------------------------------------- audio capture
+ * Both native sources feed this one converter/quiescence target. AVAudioEngine
+ * and ScreenCaptureKit normally hand us planar float PCM; the converter also
+ * accepts interleaved float and signed-16 input, remixes mono/stereo, performs
+ * linear sample-rate conversion, and emits <=20 ms signed-16 LE chunks. */
+@interface NativeSdkAudioCaptureTarget : NSObject {
+    double _resamplePosition;
+    double _resampleInputRate;
+    uint32_t _resampleInputChannels;
+    BOOL _resampleHasPrevious;
+    BOOL _started;
+    float _resamplePrevious[2];
+}
+@property(nonatomic, assign) int source;
+@property(nonatomic, assign) uint32_t sampleRate;
+@property(nonatomic, assign) uint8_t channels;
+@property(nonatomic, assign) native_sdk_appkit_audio_capture_push_t pushFn;
+@property(nonatomic, assign) void *pushContext;
+@property(nonatomic, strong) NSCondition *condition;
+@property(nonatomic, assign) BOOL active;
+@property(nonatomic, assign) NSUInteger inFlight;
+- (instancetype)initWithSource:(int)source sampleRate:(uint32_t)sampleRate channels:(uint8_t)channels pushFn:(native_sdk_appkit_audio_capture_push_t)pushFn pushContext:(void *)pushContext;
+- (BOOL)isCaptureActive;
+- (void)markInactive;
+- (void)deactivateAndWait;
+- (void)emitStarted;
+- (void)emitKind:(int)kind;
+- (void)consumeBufferList:(const AudioBufferList *)buffers format:(const AudioStreamBasicDescription *)format frames:(uint32_t)frames timestampNs:(uint64_t)timestampNs;
+@end
+
+static float NativeSdkCaptureReadSample(const AudioBufferList *buffers, const AudioStreamBasicDescription *format, uint32_t frame, uint32_t channel) {
+    if (!buffers || buffers->mNumberBuffers == 0) return 0.0f;
+    const uint32_t inputChannels = MAX(1u, format->mChannelsPerFrame);
+    const BOOL nonInterleaved = (format->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+    const uint32_t bufferIndex = nonInterleaved ? MIN(channel, buffers->mNumberBuffers - 1) : 0;
+    const AudioBuffer *buffer = &buffers->mBuffers[bufferIndex];
+    if (!buffer->mData) return 0.0f;
+    const uint32_t sampleIndex = nonInterleaved ? frame : frame * inputChannels + MIN(channel, inputChannels - 1);
+    if ((format->mFormatFlags & kAudioFormatFlagIsFloat) && format->mBitsPerChannel == 32) {
+        return ((const float *)buffer->mData)[sampleIndex];
+    }
+    if ((format->mFormatFlags & kAudioFormatFlagIsFloat) && format->mBitsPerChannel == 64) {
+        return (float)((const double *)buffer->mData)[sampleIndex];
+    }
+    if ((format->mFormatFlags & kAudioFormatFlagIsSignedInteger) && format->mBitsPerChannel == 16) {
+        return (float)((const int16_t *)buffer->mData)[sampleIndex] / 32768.0f;
+    }
+    return 0.0f;
+}
+
+static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, const AudioStreamBasicDescription *format, uint32_t frame, uint8_t outputChannels, uint32_t outputChannel) {
+    const uint32_t inputChannels = MAX(1u, format->mChannelsPerFrame);
+    if (outputChannels == 1) {
+        float sample = 0.0f;
+        for (uint32_t inputChannel = 0; inputChannel < inputChannels; inputChannel += 1) {
+            sample += NativeSdkCaptureReadSample(buffers, format, frame, inputChannel);
+        }
+        return sample / (float)inputChannels;
+    }
+    return NativeSdkCaptureReadSample(buffers, format, frame, MIN(outputChannel, inputChannels - 1));
+}
+
+@implementation NativeSdkAudioCaptureTarget
+- (instancetype)initWithSource:(int)source sampleRate:(uint32_t)sampleRate channels:(uint8_t)channels pushFn:(native_sdk_appkit_audio_capture_push_t)pushFn pushContext:(void *)pushContext {
+    self = [super init];
+    if (!self) return nil;
+    self.source = source;
+    self.sampleRate = sampleRate;
+    self.channels = channels;
+    self.pushFn = pushFn;
+    self.pushContext = pushContext;
+    self.condition = [[NSCondition alloc] init];
+    self.active = YES;
+    return self;
+}
+- (BOOL)isCaptureActive {
+    [self.condition lock];
+    BOOL value = self.active;
+    [self.condition unlock];
+    return value;
+}
+- (void)markInactive {
+    [self.condition lock];
+    self.active = NO;
+    [self.condition unlock];
+}
+- (BOOL)beginPush {
+    [self.condition lock];
+    if (!self.active) { [self.condition unlock]; return NO; }
+    self.inFlight += 1;
+    [self.condition unlock];
+    return YES;
+}
+- (BOOL)beginDataPush {
+    [self.condition lock];
+    if (!self.active || !_started) { [self.condition unlock]; return NO; }
+    self.inFlight += 1;
+    [self.condition unlock];
+    return YES;
+}
+- (void)endPush {
+    [self.condition lock];
+    self.inFlight -= 1;
+    if (self.inFlight == 0) [self.condition broadcast];
+    [self.condition unlock];
+}
+- (void)deactivateAndWait {
+    [self.condition lock];
+    self.active = NO;
+    while (self.inFlight > 0) [self.condition wait];
+    [self.condition unlock];
+}
+- (void)emitStarted {
+    [self.condition lock];
+    if (!self.active || _started) { [self.condition unlock]; return; }
+    self.inFlight += 1;
+    [self.condition unlock];
+
+    int result = self.pushFn ? self.pushFn(self.pushContext, 0, self.source,
+        self.sampleRate, self.channels, 0, 0, NULL, 0) : 1;
+
+    [self.condition lock];
+    if (result == 1) self.active = NO;
+    else if (self.active) _started = YES;
+    self.inFlight -= 1;
+    if (self.inFlight == 0) [self.condition broadcast];
+    [self.condition unlock];
+}
+- (void)emitKind:(int)kind {
+    if (![self beginPush]) return;
+    int result = self.pushFn ? self.pushFn(self.pushContext, kind, self.source,
+        self.sampleRate, self.channels, 0, 0, NULL, 0) : 1;
+    [self endPush];
+    if (result == 1) [self deactivateAndWait];
+}
+- (void)consumeBufferList:(const AudioBufferList *)buffers format:(const AudioStreamBasicDescription *)format frames:(uint32_t)frames timestampNs:(uint64_t)timestampNs {
+    if (!buffers || !format || frames == 0 || format->mSampleRate <= 0 || ![self beginDataPush]) return;
+    const uint32_t inputChannels = MAX(1u, format->mChannelsPerFrame);
+    if (_resampleInputRate != format->mSampleRate || _resampleInputChannels != inputChannels) {
+        _resamplePosition = 0.0;
+        _resampleInputRate = format->mSampleRate;
+        _resampleInputChannels = inputChannels;
+        _resampleHasPrevious = NO;
+    }
+    const double step = format->mSampleRate / (double)self.sampleRate;
+    const uint32_t chunkLimit = MAX(1u, self.sampleRate / 50u);
+    int16_t output[1920];
+    uint32_t chunkFrames = 0;
+    uint64_t emittedFrames = 0;
+    BOOL closed = NO;
+    while (_resamplePosition <= (double)frames - 1.0) {
+        const double flooredPosition = floor(_resamplePosition);
+        const int64_t inputFrame = (int64_t)flooredPosition;
+        const float fraction = (float)(_resamplePosition - flooredPosition);
+        if (inputFrame < 0 && !_resampleHasPrevious) {
+            _resamplePosition = 0.0;
+            continue;
+        }
+        // A fractional sample at the end needs the next callback's first
+        // frame. Defer it instead of repeating the current buffer's tail.
+        if (inputFrame >= 0 && inputFrame + 1 >= frames && fraction > 0.0000001f) break;
+
+        for (uint32_t outChannel = 0; outChannel < self.channels; outChannel += 1) {
+            const float first = inputFrame < 0
+                ? _resamplePrevious[outChannel]
+                : NativeSdkCaptureReadRemixedSample(buffers, format, (uint32_t)inputFrame, self.channels, outChannel);
+            const float second = inputFrame < 0
+                ? NativeSdkCaptureReadRemixedSample(buffers, format, 0, self.channels, outChannel)
+                : (inputFrame + 1 < frames
+                    ? NativeSdkCaptureReadRemixedSample(buffers, format, (uint32_t)(inputFrame + 1), self.channels, outChannel)
+                    : first);
+            float sample = first + (second - first) * fraction;
+            sample = fmaxf(-1.0f, fminf(1.0f, sample));
+            output[chunkFrames * self.channels + outChannel] = (int16_t)lrintf(sample * 32767.0f);
+        }
+        chunkFrames += 1;
+        _resamplePosition += step;
+
+        if (chunkFrames == chunkLimit) {
+            const size_t byteLen = (size_t)chunkFrames * self.channels * sizeof(int16_t);
+            const int result = self.pushFn ? self.pushFn(self.pushContext, 1, self.source,
+                self.sampleRate, self.channels, timestampNs + emittedFrames * NSEC_PER_SEC / self.sampleRate, chunkFrames,
+                (const uint8_t *)output, byteLen) : 1;
+            emittedFrames += chunkFrames;
+            chunkFrames = 0;
+            if (result == 1) {
+                [self markInactive];
+                closed = YES;
+                break;
+            }
+        }
+    }
+    if (!closed && chunkFrames > 0) {
+        const size_t byteLen = (size_t)chunkFrames * self.channels * sizeof(int16_t);
+        const int result = self.pushFn ? self.pushFn(self.pushContext, 1, self.source,
+            self.sampleRate, self.channels, timestampNs + emittedFrames * NSEC_PER_SEC / self.sampleRate, chunkFrames,
+            (const uint8_t *)output, byteLen) : 1;
+        if (result == 1) [self markInactive];
+    }
+    _resamplePosition -= frames;
+    for (uint32_t outChannel = 0; outChannel < self.channels; outChannel += 1) {
+        _resamplePrevious[outChannel] = NativeSdkCaptureReadRemixedSample(buffers, format, frames - 1, self.channels, outChannel);
+    }
+    _resampleHasPrevious = YES;
+    [self endPush];
+}
+@end
+
+@interface NativeSdkScreenAudioCapture : NSObject <SCStreamOutput, SCStreamDelegate>
+@property(nonatomic, strong) NativeSdkAudioCaptureTarget *target;
+@property(nonatomic, strong) SCStream *stream;
+@property(nonatomic, strong) dispatch_queue_t queue;
+@property(nonatomic, strong) NSLock *lifecycleLock;
+- (instancetype)initWithTarget:(NativeSdkAudioCaptureTarget *)target;
+- (void)start;
+- (void)stopAndWait;
+@end
+
+@implementation NativeSdkScreenAudioCapture
+- (instancetype)initWithTarget:(NativeSdkAudioCaptureTarget *)target {
+    self = [super init];
+    if (!self) return nil;
+    self.target = target;
+    self.queue = dispatch_queue_create("dev.native-sdk.system-audio", DISPATCH_QUEUE_SERIAL);
+    self.lifecycleLock = [[NSLock alloc] init];
+    return self;
+}
+- (void)start {
+    if (@available(macOS 13.0, *)) {
+        __weak NativeSdkScreenAudioCapture *weakSelf = self;
+        [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent *content, NSError *error) {
+            NativeSdkScreenAudioCapture *strongSelf = weakSelf;
+            if (!strongSelf || ![strongSelf.target isCaptureActive]) return;
+            SCDisplay *display = content.displays.firstObject;
+            if (error || !display) { [strongSelf.target emitKind:2]; return; }
+            SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingApplications:@[] exceptingWindows:@[]];
+            SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
+            configuration.width = 2;
+            configuration.height = 2;
+            configuration.showsCursor = NO;
+            configuration.capturesAudio = YES;
+            configuration.excludesCurrentProcessAudio = NO;
+            configuration.sampleRate = strongSelf.target.sampleRate;
+            /* ScreenCaptureKit on Sonoma can accept a mono request but then
+             * produce no audio sample buffers for a display stream. Capture
+             * the system mix in its native stereo shape and let the shared
+             * target converter downmix when the app requested mono. */
+            configuration.channelCount = 2;
+            configuration.minimumFrameInterval = CMTimeMake(1, 1);
+            configuration.queueDepth = 1;
+            SCStream *stream = [[SCStream alloc] initWithFilter:filter configuration:configuration delegate:strongSelf];
+            NSError *outputError = nil;
+            /* ScreenCaptureKit still creates a remote video queue for an
+             * audio-enabled display stream. Register a tiny ignored screen
+             * output so that queue stays valid; without it Sonoma reports a
+             * recurring "stream output NOT found" error for every frame. */
+            if (![stream addStreamOutput:strongSelf type:SCStreamOutputTypeScreen sampleHandlerQueue:strongSelf.queue error:&outputError] ||
+                ![stream addStreamOutput:strongSelf type:SCStreamOutputTypeAudio sampleHandlerQueue:strongSelf.queue error:&outputError]) {
+                [strongSelf.target emitKind:2];
+                return;
+            }
+            /* Publish and start under the same lock stop uses to detach the
+             * current stream. The shareable-content lookup is asynchronous:
+             * without this final activity check, stop can observe stream=nil,
+             * return, and then have this completion start an orphan capture. */
+            [strongSelf.lifecycleLock lock];
+            if (![strongSelf.target isCaptureActive]) {
+                [strongSelf.lifecycleLock unlock];
+                return;
+            }
+            strongSelf.stream = stream;
+            [stream startCaptureWithCompletionHandler:^(NSError *startError) {
+                if (startError) [strongSelf.target emitKind:2];
+                else [strongSelf.target emitStarted];
+            }];
+            [strongSelf.lifecycleLock unlock];
+        }];
+    } else {
+        [self.target emitKind:2];
+    }
+}
+- (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type API_AVAILABLE(macos(13.0)) {
+    (void)stream;
+    if (type != SCStreamOutputTypeAudio || !CMSampleBufferDataIsReady(sampleBuffer)) return;
+    /* Query the exact AudioBufferList size. ScreenCaptureKit's Sonoma
+     * buffers can require more storage than their two-channel ASBD suggests,
+     * so a fixed "enough channels" allocation loses every audio sample with
+     * kCMSampleBufferError_ArrayTooSmall. */
+    size_t capacity = 0;
+    OSStatus status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sampleBuffer, &capacity,
+        NULL, 0, NULL, NULL, kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment, NULL);
+    if (status != noErr || capacity < sizeof(AudioBufferList) || capacity > 64 * 1024) return;
+    AudioBufferList *buffers = malloc(capacity);
+    if (!buffers) return;
+    CMBlockBufferRef block = NULL;
+    status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sampleBuffer, NULL,
+        buffers, capacity, NULL, NULL, kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment, &block);
+    const AudioStreamBasicDescription *format = CMAudioFormatDescriptionGetStreamBasicDescription((CMAudioFormatDescriptionRef)CMSampleBufferGetFormatDescription(sampleBuffer));
+    if (status == noErr && format) {
+        [self.target consumeBufferList:buffers format:format frames:(uint32_t)CMSampleBufferGetNumSamples(sampleBuffer) timestampNs:NativeSdkTimestampNanoseconds()];
+    }
+    if (block) CFRelease(block);
+    free(buffers);
+}
+- (void)stream:(SCStream *)stream didStopWithError:(NSError *)error API_AVAILABLE(macos(12.3)) {
+    (void)stream; (void)error;
+    [self.target emitKind:2];
+}
+- (void)stopAndWait {
+    [self.target deactivateAndWait];
+    if (@available(macOS 13.0, *)) {
+        /* Detach under the startup lock. Once this unlocks, an in-flight
+         * shareable-content completion either published its stream here (and
+         * we stop it below), or sees the inactive target and cannot start. */
+        [self.lifecycleLock lock];
+        SCStream *stream = self.stream;
+        self.stream = nil;
+        [self.lifecycleLock unlock];
+        if (stream) {
+            dispatch_semaphore_t done = dispatch_semaphore_create(0);
+            [stream stopCaptureWithCompletionHandler:^(NSError *error) { (void)error; dispatch_semaphore_signal(done); }];
+            dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        }
+    }
+}
+@end
+
 @implementation NativeSdkAppKitHost
 
 - (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
@@ -7551,6 +7865,8 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 
 - (void)dealloc {
     [self invalidateAppTimers];
+    [self audioCaptureStopSource:0];
+    [self audioCaptureStopSource:1];
     [self audioStop];
     [self videoStop];
     /* The vDSP plan outlives individual playbacks (created lazily
@@ -9381,6 +9697,8 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [self.timer invalidate];
     self.timer = nil;
     [self invalidateAppTimers];
+    [self audioCaptureStopSource:0];
+    [self audioCaptureStopSource:1];
     [self audioStop];
     [self videoStop];
     if (self.shortcutEventMonitor) {
@@ -10418,6 +10736,90 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
     if (!player) return 0;
     player.volume = (float)volume;
     return 1;
+}
+
+- (void)startMicrophoneCaptureTarget:(NativeSdkAudioCaptureTarget *)target {
+    if (![target isCaptureActive] || self.microphoneCaptureTarget != target) return;
+    AVAudioEngine *engine = [[AVAudioEngine alloc] init];
+    AVAudioInputNode *input = engine.inputNode;
+    AVAudioFormat *inputFormat = [input outputFormatForBus:0];
+    if (!input || inputFormat.channelCount == 0 || inputFormat.sampleRate <= 0) {
+        [target emitKind:2];
+        return;
+    }
+    __weak NativeSdkAudioCaptureTarget *weakTarget = target;
+    [input installTapOnBus:0 bufferSize:480 format:nil block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
+        (void)when;
+        NativeSdkAudioCaptureTarget *strongTarget = weakTarget;
+        if (!strongTarget) return;
+        [strongTarget consumeBufferList:buffer.audioBufferList format:buffer.format.streamDescription frames:(uint32_t)buffer.frameLength timestampNs:NativeSdkTimestampNanoseconds()];
+    }];
+    [engine prepare];
+    NSError *error = nil;
+    if (![engine startAndReturnError:&error]) {
+        [input removeTapOnBus:0];
+        [target emitKind:2];
+        return;
+    }
+    self.microphoneCaptureEngine = engine;
+    [target emitStarted];
+}
+
+- (int)audioCaptureStartSource:(int)source sampleRate:(uint32_t)sampleRate channels:(uint8_t)channels pushFn:(native_sdk_appkit_audio_capture_push_t)pushFn pushContext:(void *)pushContext {
+    if ((source != 0 && source != 1) || !pushFn ||
+        (sampleRate != 16000 && sampleRate != 24000 && sampleRate != 48000) ||
+        (channels != 1 && channels != 2)) return 0;
+    [self audioCaptureStopSource:source];
+    NativeSdkAudioCaptureTarget *target = [[NativeSdkAudioCaptureTarget alloc]
+        initWithSource:source sampleRate:sampleRate channels:channels pushFn:pushFn pushContext:pushContext];
+    if (!target) return 0;
+    if (source == 0) {
+        self.microphoneCaptureTarget = target;
+        AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+        if (status == AVAuthorizationStatusAuthorized) {
+            [self startMicrophoneCaptureTarget:target];
+        } else if (status == AVAuthorizationStatusNotDetermined) {
+            __weak NativeSdkAppKitHost *weakSelf = self;
+            [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NativeSdkAppKitHost *strongSelf = weakSelf;
+                    if (!strongSelf || strongSelf.microphoneCaptureTarget != target || ![target isCaptureActive]) return;
+                    if (granted) [strongSelf startMicrophoneCaptureTarget:target];
+                    else [target emitKind:2];
+                });
+            }];
+        } else {
+            [target emitKind:2];
+        }
+    } else {
+        self.systemCaptureTarget = target;
+        NativeSdkScreenAudioCapture *capture = [[NativeSdkScreenAudioCapture alloc] initWithTarget:target];
+        self.systemCapture = capture;
+        [capture start];
+    }
+    return 1;
+}
+
+- (int)audioCaptureStopSource:(int)source {
+    if (source == 0) {
+        NativeSdkAudioCaptureTarget *target = self.microphoneCaptureTarget;
+        [target deactivateAndWait];
+        AVAudioInputNode *input = self.microphoneCaptureEngine.inputNode;
+        if (input) [input removeTapOnBus:0];
+        [self.microphoneCaptureEngine stop];
+        self.microphoneCaptureEngine = nil;
+        self.microphoneCaptureTarget = nil;
+        return target ? 1 : 0;
+    }
+    if (source == 1) {
+        NativeSdkScreenAudioCapture *capture = self.systemCapture;
+        [capture stopAndWait];
+        [self.systemCaptureTarget deactivateAndWait];
+        self.systemCapture = nil;
+        self.systemCaptureTarget = nil;
+        return capture ? 1 : 0;
+    }
+    return 0;
 }
 
 /* ---------------------------------------------------- video player
@@ -11755,6 +12157,26 @@ int native_sdk_appkit_audio_seek(native_sdk_appkit_host_t *host, uint64_t positi
 int native_sdk_appkit_audio_set_volume(native_sdk_appkit_host_t *host, double volume) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     return [object audioSetVolume:volume];
+}
+
+int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, int source, uint32_t sample_rate, uint8_t channels, native_sdk_appkit_audio_capture_push_t push_fn, void *push_context) {
+    if (!host) return 0;
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object audioCaptureStartSource:source sampleRate:sample_rate channels:channels pushFn:push_fn pushContext:push_context];
+}
+
+int native_sdk_appkit_audio_capture_stop(native_sdk_appkit_host_t *host, int source) {
+    if (!host) return 0;
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    return [object audioCaptureStopSource:source];
+}
+
+int native_sdk_appkit_audio_capture_supported(native_sdk_appkit_host_t *host, int source) {
+    (void)host;
+    if (source == 0) return 1;
+    if (source != 1) return 0;
+    if (@available(macOS 13.0, *)) return NSClassFromString(@"SCStream") != nil;
+    return 0;
 }
 
 int native_sdk_appkit_video_load(native_sdk_appkit_host_t *host, const char *path, size_t path_len, uint64_t token, native_sdk_appkit_video_sink_push_t push_fn, void *push_context) {

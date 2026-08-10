@@ -206,6 +206,9 @@ extern fn native_sdk_windows_audio_pause(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_audio_stop(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_audio_seek(host: *WindowsHost, position_ms: u64) c_int;
 extern fn native_sdk_windows_audio_set_volume(host: *WindowsHost, volume: f64) c_int;
+const WindowsAudioCapturePush = *const fn (context: ?*anyopaque, kind: c_int, source: c_int, sample_rate: u32, channels: u8, timestamp_ns: u64, frames: u32, pcm: ?[*]const u8, pcm_len: usize) callconv(.c) c_int;
+extern fn native_sdk_windows_audio_capture_start(host: *WindowsHost, source: c_int, sample_rate: u32, channels: u8, push_fn: WindowsAudioCapturePush, push_context: ?*anyopaque) c_int;
+extern fn native_sdk_windows_audio_capture_stop(host: *WindowsHost, source: c_int) c_int;
 extern fn native_sdk_windows_audio_spectrum_supported(host: *WindowsHost) c_int;
 extern fn native_sdk_windows_show_context_menu(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, token: u64, items: [*]const WindowsContextMenuItem, count: usize) c_int;
 
@@ -315,6 +318,7 @@ pub const WindowsPlatform = struct {
     /// `createWithOptions` and retire it through `destroy`, the
     /// latch-gated free.
     channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    audio_capture_sinks: [2]platform_mod.AudioCaptureSink = [_]platform_mod.AudioCaptureSink{.{}} ** 2,
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!WindowsPlatform {
         return initWithEngine(title, size, .system);
@@ -476,6 +480,8 @@ pub const WindowsPlatform = struct {
                 .audio_stop_fn = audioStop,
                 .audio_seek_fn = audioSeek,
                 .audio_set_volume_fn = audioSetVolume,
+                .audio_capture_start_fn = if (self.web_engine == .system) audioCaptureStart else null,
+                .audio_capture_stop_fn = if (self.web_engine == .system) audioCaptureStop else null,
                 // The video load verbs are teaching refusals (see
                 // `videoLoad`); the transport verbs stay null — the
                 // channel never activates without a successful load.
@@ -519,6 +525,8 @@ pub const WindowsPlatform = struct {
             .gpu_surfaces,
             .audio_playback,
             .audio_streaming,
+            .microphone_capture,
+            .system_audio_capture,
             => self.web_engine == .system,
             // close_policy .hide: WM_CLOSE hides (ShowWindow SW_HIDE),
             // the window stays in the host map, and the tray is the
@@ -1624,6 +1632,54 @@ fn audioSeek(context: ?*anyopaque, position_ms: u64) anyerror!void {
 fn audioSetVolume(context: ?*anyopaque, volume: f32) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     _ = native_sdk_windows_audio_set_volume(self.host, volume);
+}
+
+fn nativeSdkAudioCapturePush(context: ?*anyopaque, kind: c_int, source_value: c_int, sample_rate: u32, channels: u8, timestamp_ns: u64, frames: u32, pcm: ?[*]const u8, pcm_len: usize) callconv(.c) c_int {
+    const sink: *platform_mod.AudioCaptureSink = @ptrCast(@alignCast(context orelse return 1));
+    const source: platform_mod.AudioCaptureSource = switch (source_value) {
+        1 => .system,
+        else => .microphone,
+    };
+    const event_kind: platform_mod.AudioCaptureEventKind = switch (kind) {
+        0 => .started,
+        1 => .data,
+        else => .failed,
+    };
+    const bytes = if (pcm) |ptr| ptr[0..pcm_len] else "";
+    return switch (sink.push(.{
+        .kind = event_kind,
+        .source = source,
+        .format = .{ .sample_rate = sample_rate, .channels = channels },
+        .timestamp_ns = timestamp_ns,
+        .frames = frames,
+        .pcm_s16le = bytes,
+    })) {
+        .accepted => 0,
+        .closed => 1,
+        .dropped_full => 2,
+        .dropped_oversized => 3,
+    };
+}
+
+fn audioCaptureStart(context: ?*anyopaque, source: platform_mod.AudioCaptureSource, format: platform_mod.AudioCaptureFormat, sink: platform_mod.AudioCaptureSink) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (self.web_engine != .system) return error.UnsupportedService;
+    const stored = &self.audio_capture_sinks[@intFromEnum(source)];
+    // The native stop is a synchronous callback fence. Quiesce the old
+    // producer before replacing the memory its callback context points at;
+    // otherwise a final old-source callback can be delivered to the new sink.
+    _ = native_sdk_windows_audio_capture_stop(self.host, @intFromEnum(source));
+    stored.* = sink;
+    if (native_sdk_windows_audio_capture_start(self.host, @intFromEnum(source), format.sample_rate, format.channels, nativeSdkAudioCapturePush, stored) == 0) {
+        stored.* = .{};
+        return error.AudioCaptureStartFailed;
+    }
+}
+
+fn audioCaptureStop(context: ?*anyopaque, source: platform_mod.AudioCaptureSource) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    _ = native_sdk_windows_audio_capture_stop(self.host, @intFromEnum(source));
+    self.audio_capture_sinks[@intFromEnum(source)] = .{};
 }
 
 /// The video tier's teaching refusal: the load verbs exist so a video

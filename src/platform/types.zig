@@ -158,6 +158,13 @@ pub const PlatformFeature = enum {
     /// keeps emitting; the null platform models the rule through its
     /// windows' modeled occlusion so the suites can pin it.
     audio_spectrum,
+    /// Capture from the default microphone as interleaved signed 16-bit
+    /// little-endian PCM. The source delivers through `AudioCaptureSink`
+    /// from its native audio thread until `audioCaptureStop` returns.
+    microphone_capture,
+    /// Capture the system output mix (WASAPI loopback on Windows,
+    /// ScreenCaptureKit audio on macOS) through the same bounded PCM sink.
+    system_audio_capture,
     /// The `close_policy = .hide` window shape: the host can intercept
     /// the user's close affordance, keep the window alive off the
     /// glass, and re-show it later (`show_window_fn`, tray actions, the
@@ -1456,6 +1463,79 @@ pub const AudioLoadResolution = enum(u8) {
     stream,
 };
 
+/// The two independently-addressable capture sources. A host may run one
+/// stream of each kind concurrently.
+pub const AudioCaptureSource = enum(u8) {
+    microphone,
+    system,
+};
+
+/// The canonical format requested from a capture host. First-party hosts
+/// resample and remix their device-native format to this exact shape.
+pub const AudioCaptureFormat = struct {
+    sample_rate: u32 = 48_000,
+    channels: u8 = 1,
+
+    pub fn valid(self: AudioCaptureFormat) bool {
+        return (self.sample_rate == 16_000 or self.sample_rate == 24_000 or self.sample_rate == 48_000) and
+            (self.channels == 1 or self.channels == 2);
+    }
+};
+
+/// Capture reports are small, bounded records. `.data` bytes are interleaved
+/// signed 16-bit little-endian PCM in the requested format. First-party hosts
+/// keep chunks at or below 20 ms so the largest supported packet (48 kHz,
+/// stereo) is 3840 bytes and fits the effects channel's 4 KiB envelope.
+pub const max_audio_capture_pcm_bytes: usize = 3840;
+
+pub const AudioCaptureEventKind = enum(u8) {
+    started,
+    data,
+    failed,
+};
+
+pub const AudioCaptureEvent = struct {
+    kind: AudioCaptureEventKind,
+    source: AudioCaptureSource,
+    format: AudioCaptureFormat,
+    timestamp_ns: u64 = 0,
+    frames: u32 = 0,
+    pcm_s16le: []const u8 = "",
+};
+
+pub const AudioCapturePushResult = enum(u8) {
+    accepted,
+    dropped_full,
+    dropped_oversized,
+    closed,
+};
+
+/// Thread-safe, non-blocking destination retained by a native capture host.
+/// `audio_capture_stop_fn` must quiesce the source before returning: no later
+/// call may enter this sink. A source exits permanently when `push` answers
+/// `.closed`; back-pressure drops are counted and reported by the effects
+/// channel that owns the sink.
+pub const AudioCaptureSink = struct {
+    context: ?*anyopaque = null,
+    generation: u64 = 0,
+    push_fn: ?*const fn (context: ?*anyopaque, generation: u64, event: AudioCaptureEvent) AudioCapturePushResult = null,
+
+    pub fn push(self: AudioCaptureSink, event: AudioCaptureEvent) AudioCapturePushResult {
+        const push_fn = self.push_fn orelse return .closed;
+        if (!event.format.valid()) return .dropped_oversized;
+        if (event.kind == .data) {
+            if (event.pcm_s16le.len > max_audio_capture_pcm_bytes or
+                event.pcm_s16le.len != @as(usize, event.frames) * @as(usize, event.format.channels) * 2)
+            {
+                return .dropped_oversized;
+            }
+        } else if (event.frames != 0 or event.pcm_s16le.len != 0) {
+            return .dropped_oversized;
+        }
+        return push_fn(self.context, self.generation, event);
+    }
+};
+
 /// Longest video source string (local path or URL) `videoLoad`/
 /// `videoLoadUrl` accepts; longer strings are rejected with
 /// `error.VideoPathTooLarge` before the platform is asked.
@@ -2465,6 +2545,14 @@ pub const PlatformServices = struct {
     audio_seek_fn: ?*const fn (context: ?*anyopaque, position_ms: u64) anyerror!void = null,
     /// Set the player volume, `0.0` (silent) through `1.0` (full).
     audio_set_volume_fn: ?*const fn (context: ?*anyopaque, volume: f32) anyerror!void = null,
+    /// Start one microphone or system-output capture. Sources are independent,
+    /// but a second start of the same source replaces its current stream.
+    /// Startup and asynchronous failures are reported through `sink`; a
+    /// synchronous error means no source was retained.
+    audio_capture_start_fn: ?*const fn (context: ?*anyopaque, source: AudioCaptureSource, format: AudioCaptureFormat, sink: AudioCaptureSink) anyerror!void = null,
+    /// Stop and synchronously quiesce one source. No sink call from that source
+    /// may occur after this function returns.
+    audio_capture_stop_fn: ?*const fn (context: ?*anyopaque, source: AudioCaptureSource) anyerror!void = null,
     /// Load a local video file into THE app's single video player,
     /// leaving it PAUSED at position zero (transport is a separate
     /// verb, exactly like audio). Loading replaces whatever was loaded
@@ -3068,6 +3156,17 @@ pub const PlatformServices = struct {
         return volume_fn(self.context, volume);
     }
 
+    pub fn audioCaptureStart(self: PlatformServices, source: AudioCaptureSource, format: AudioCaptureFormat, sink: AudioCaptureSink) anyerror!void {
+        if (!format.valid() or sink.push_fn == null) return error.InvalidAudioOptions;
+        const start_fn = self.audio_capture_start_fn orelse return error.UnsupportedService;
+        return start_fn(self.context, source, format, sink);
+    }
+
+    pub fn audioCaptureStop(self: PlatformServices, source: AudioCaptureSource) anyerror!void {
+        const stop_fn = self.audio_capture_stop_fn orelse return error.UnsupportedService;
+        return stop_fn(self.context, source);
+    }
+
     /// Load a local video file into the app's single video player (see
     /// `video_load_fn`). Platforms without video playback answer
     /// `error.UnsupportedService`; bad arguments are rejected here
@@ -3307,6 +3406,7 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         // cannot see it; platforms that analyze answer through their own
         // `supports_fn` (like file_drops and gpu_surfaces above).
         .audio_spectrum => false,
+        .microphone_capture, .system_audio_capture => services.audio_capture_start_fn != null and services.audio_capture_stop_fn != null,
         // Hide-on-close is host close-delegate behavior, not a service
         // verb: hosts that implement it answer through their own
         // `supports_fn`. The generic floor is honest refusal.

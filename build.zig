@@ -783,6 +783,11 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSAccessibilityProgressIndicatorRole" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "view.accessibilityRole = NativeSdkAccessibilityRoleForNativeViewKind(kind)" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-audio-capture-start-stop-serialized", "Verify asynchronous ScreenCaptureKit startup cannot publish a stream after stop returns", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "@property(nonatomic, strong) NSLock *lifecycleLock;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[strongSelf.lifecycleLock lock];\n            if (![strongSelf.target isCaptureActive]) {\n                [strongSelf.lifecycleLock unlock];\n                return;\n            }\n            strongSelf.stream = stream;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self.lifecycleLock lock];\n        SCStream *stream = self.stream;\n        self.stream = nil;\n        [self.lifecycleLock unlock];" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-input-repaints-retained-canvas", "Verify GPU input wakes retained canvas frames", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "- (void)requestRetainedCanvasFrame" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[self requestRetainedCanvasFrame];" },
@@ -1017,6 +1022,8 @@ pub fn build(b: *std.Build) void {
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-gpu-packet-blur-effects", "Verify AppKit GPU packet presenter applies blur effects", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketApplyBlur" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "CGBitmapContextGetData(context)" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkGaussianBoxRadii" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "vImageBoxConvolve_ARGB8888" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSIntersectionRect(rect, clipRect)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkPacketTransformRect(transformValue, NativeSdkPacketRect(effect[@\"rect\"]))" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return NativeSdkPacketApplyBlur(effect, opacity, context, scale, transformValue, hasClip, clipRect)" },
@@ -1414,6 +1421,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-soundboard", "Run soundboard example tests", "examples/soundboard", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-video-player", "Run video player example tests", "examples/video-player", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-soundboard-ts", "Run soundboard-ts example tests", "examples/soundboard-ts", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-voice-memo", "Run voice memo example tests", "examples/voice-memo", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-deck", "Run deck example tests", "examples/deck", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-markdown-viewer", "Run markdown viewer example tests", "examples/markdown-viewer", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-code-editor", "Run code editor example tests", "examples/code-editor", .managed),
