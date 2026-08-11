@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Textarea
 
-Multi-line text entry. Like [input](/docs/components/input), `text` and `placeholder` bind from the model and `on-input` names a Msg variant that receives every edit as a text-input event — see [input](/docs/components/input) for the core-side contract in both languages. Enter (and Shift+Enter) inserts a newline instead of submitting; when a textarea carries `on-submit`, the submit rides the primary chord — Cmd+Enter on macOS, Ctrl+Enter elsewhere. Give it a definite `width` and `height` (or a `grow`) to size the editing box.
+Multi-line text entry. Like [input](/docs/components/input), `text` and `placeholder` bind from the model and `on-input` names a Msg variant that receives every edit as a text-input event — see [input](/docs/components/input) for the core-side contract in both languages. By default, Enter (and Shift+Enter) inserts a newline; when a textarea carries `on-submit`, submission rides Cmd+Enter on macOS or Ctrl+Enter elsewhere. Chat composers can set `submit-on-enter="true"`: plain Enter then submits, Shift+Enter still inserts a newline, and the primary chord still submits. Give it a definite `width` and `height` (or a `grow`) to size the editing box.
 
 <ComponentPreview name="textarea" alt="A textarea rendered by the engine" />
 
@@ -35,6 +35,7 @@ ui.el(.textarea, .{
     "placeholder",
     "disabled",
     "autofocus",
+    "submit-on-enter",
     "on-input",
     "on-submit",
   ]}

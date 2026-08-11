@@ -86,6 +86,13 @@ The manifest drives packaging metadata:
     .platforms = .{ "macos", "linux" },
     .web_engine = "system",
     .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+    .dmg = .{
+        .background = "assets/dmg-background.png",
+        .window_width = 660,
+        .window_height = 400,
+        .app_position = .{ .x = 166, .y = 182 },
+        .applications_position = .{ .x = 486, .y = 182 },
+    },
 }
 ```
 
@@ -125,6 +132,10 @@ The manifest drives packaging metadata:
       <td><code>platforms</code></td>
       <td>Which platform packages to generate</td>
     </tr>
+    <tr>
+      <td><code>dmg</code></td>
+      <td>Optional macOS disk-image branding and Finder layout; defaults already produce a styled drag-to-Applications image</td>
+    </tr>
   </tbody>
 </table>
 
@@ -147,6 +158,55 @@ Drop one square image in your project — `assets/icon.png` (1:1, ideally 1024x1
 macOS app bundles declare `LSMinimumSystemVersion` as `11.0`. File associations and URL schemes are emitted as `CFBundleDocumentTypes` and `CFBundleURLTypes` entries in `Contents/Info.plist`.
 
 See [Code Signing](/docs/packaging/signing) for signing, notarization, and DMG creation.
+
+### DMG archives
+
+Add <code>--archive</code> to turn the packaged app into the disk image users download:
+
+```bash
+native build
+native package --target macos --archive
+```
+
+Without any extra configuration, Native creates a 660×400 Finder window with a quiet generated background and arrow, packages matching 1× and 2× representations for crisp Retina rendering, positions the app and an `/Applications` alias on either side, hides the Finder chrome, and compresses the result as a `.dmg`. The package diagnostic prints both the `.app` and `.dmg` paths.
+
+Customize the presentation in `app.zon`:
+
+```zig
+.dmg = .{
+    .volume_name = "My App",
+    .background = "assets/dmg-background.png",
+    .window_width = 720,
+    .window_height = 440,
+    .icon_size = 144,
+    .app_position = .{ .x = 180, .y = 210 },
+    .applications_position = .{ .x = 540, .y = 210 },
+    .applications_link = true,
+},
+```
+
+The window dimensions are the usable background canvas, excluding Finder's title bar. Positions are icon centers measured from the canvas's top-left corner. The background must be a project-relative PNG, JPEG, or TIFF at the configured window size; Finder displays it at its natural size. `native validate` and packaging reject malformed images or dimensions that do not match the configured canvas. For Retina artwork, put a double-sized sibling next to it using the `@2x` convention—for example, `dmg-background.png` at 720×440 and `dmg-background@2x.png` at 1440×880. Native discovers the pair, verifies that the sibling is exactly double-sized, and packages both representations. A prebuilt multi-resolution TIFF also works.
+
+Omitting `background` keeps Native's generated Retina-aware gradient and draws the arrow between the configured app and Applications positions. Set `applications_link = false` only for a disk image that is not meant to use the conventional drag-to-install flow.
+
+For complete control over which Finder items appear and where they sit, replace the fixed app/Applications pair with `items`:
+
+```zig
+.dmg = .{
+    .background = "assets/dmg-background.png",
+    .window_width = 760,
+    .window_height = 480,
+    .icon_size = 112,
+    .items = .{
+        .{ .kind = "app", .position = .{ .x = 150, .y = 180 } },
+        .{ .kind = "applications", .position = .{ .x = 610, .y = 180 } },
+        .{ .kind = "file", .path = "README.pdf", .name = "Read Me.pdf", .position = .{ .x = 250, .y = 370 } },
+        .{ .kind = "link", .path = "/Library/QuickLook", .name = "QuickLook", .position = .{ .x = 510, .y = 370 } },
+    },
+},
+```
+
+An explicit list must contain exactly one `app`; its optional `name` changes only the bundle name shown in the DMG. `applications` creates the `/Applications` alias. `file` copies a project-relative file or directory, with an optional display `name`, while `link` creates a named symbolic link to an absolute path. When `items` is present, it replaces `app_position`, `applications_position`, and `applications_link`. The generated background draws its arrow whenever the list includes both `app` and `applications`.
 
 ## Linux
 

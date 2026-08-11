@@ -314,6 +314,10 @@ test "structural validation reports positions for grammar misuse" {
     var autofocus_parser = markup.Parser.init(arena_state.allocator(), autofocus_source);
     try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try autofocus_parser.parse()));
 
+    const submit_on_enter_source = "<column>\n  <textarea submit-on-enter=\"true\" label=\"Prompt\" on-input=\"edit\" on-submit=\"send\" />\n</column>";
+    var submit_on_enter_parser = markup.Parser.init(arena_state.allocator(), submit_on_enter_source);
+    try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try submit_on_enter_parser.parse()));
+
     const cases = [_]struct { source: []const u8, message: []const u8 }{
         .{ .source = "<column>\n  <weird />\n</column>", .message = "unknown element" },
         .{ .source = "<column bogus=\"1\" />", .message = "unknown attribute" },
@@ -362,6 +366,7 @@ test "structural validation reports positions for grammar misuse" {
         // elements can never take the keyboard.
         .{ .source = "<column>\n  <row autofocus=\"true\">\n    <text>x</text>\n  </row>\n</column>", .message = markup.autofocus_element_message },
         .{ .source = "<column>\n  <badge autofocus=\"true\">3</badge>\n</column>", .message = markup.autofocus_element_message },
+        .{ .source = "<column>\n  <text-field submit-on-enter=\"true\" label=\"Prompt\" />\n</column>", .message = markup.submit_on_enter_element_message },
     };
     for (cases) |case| {
         var case_parser = markup.Parser.init(arena_state.allocator(), case.source);

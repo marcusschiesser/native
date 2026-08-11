@@ -73,6 +73,15 @@
 //!                  ("truncated") rather than passing a silently cut
 //!                  body as ok. Wire timeout 0 means the engine
 //!                  default.
+//!   fetch_stream -> `fx.fetch` (`.stream`) through the STREAM table;
+//!                  every complete response line routes the line arm,
+//!                  and the ONE terminal retires the entry: `.ok`
+//!                  routes the HTTP status through the one-number ok
+//!                  arm, every other outcome routes the err arm with
+//!                  its name. Wire timeout 0 and max-line 0 select the
+//!                  engine defaults. `cancel` is loud for a live fetch
+//!                  stream: it ends with err "cancelled", with no lines
+//!                  after the cancel.
 //!   clip_write  -> `fx.writeClipboard` fire-and-forget (`on_result`
 //!                  null): a refused or over-bound write is dropped by
 //!                  design — there is no route to report on. Engine
@@ -513,7 +522,7 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         };
 
-        /// One live spawn STREAM — the non-retiring entry kind: line
+        /// One live spawn or fetch STREAM — the non-retiring entry kind: line
         /// results route through it repeatedly across dispatches, and
         /// only the exit terminal (or the engine's `.cancelled` end
         /// after a wire cancel) retires it. The table index IS the
@@ -523,11 +532,17 @@ pub fn TsCoreHost(comptime core: type) type {
             used: bool = false,
             key_len: usize = 0,
             key: [max_wire_key_bytes]u8 = undefined,
-            /// `spawn_no_line_tag` = lines dispatch nothing.
+            /// `spawn_no_line_tag` = lines dispatch nothing (spawn only;
+            /// fetch streams always carry a line route).
             line_tag: u8 = spawn_no_line_tag,
             exit_tag: u8 = 0,
             err_tag: u8 = 0,
             collect: bool = false,
+            /// Fetch lines are data records, so a cut or dropped line makes
+            /// the eventual success terminal unusable. Spawn line mode keeps
+            /// its existing best-effort contract.
+            fetch: bool = false,
+            damaged: bool = false,
 
             fn wireKey(entry: *const StreamEntry) []const u8 {
                 return entry.key[0..entry.key_len];
@@ -966,17 +981,27 @@ pub fn TsCoreHost(comptime core: type) type {
                             headers[i] = .{ .name = name, .value = value };
                         }
                         const body = takeLongBytes(cmd, &at);
-                        fx.fetch(.{
-                            .key = effect_key_base + allocEffectEntry(fx, head),
-                            .method = method,
-                            .url = url,
-                            .headers = headers[0..header_count],
-                            .body = if (body.len > 0) body else null,
-                            // Wire 0 = "the engine's default" — the record
-                            // never bakes the default in.
-                            .timeout_ms = if (timeout_ms == 0) runtime_effects.default_effect_fetch_timeout_ms else timeout_ms,
-                            .on_response = fetchResultMsg,
-                        });
+                        // Both Cmd.fetch overloads occupy one public key
+                        // space. A buffered fetch must not start beside a
+                        // live line stream under the same key: cancel would
+                        // otherwise find this named op first and leave the
+                        // stream running. The live stream owns the key, so
+                        // reject the newcomer through its own err arm.
+                        if (head.key.len > 0 and findStream(head.key) != null) {
+                            fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                        } else {
+                            fx.fetch(.{
+                                .key = effect_key_base + allocEffectEntry(fx, head),
+                                .method = method,
+                                .url = url,
+                                .headers = headers[0..header_count],
+                                .body = if (body.len > 0) body else null,
+                                // Wire 0 = "the engine's default" — the record
+                                // never bakes the default in.
+                                .timeout_ms = if (timeout_ms == 0) runtime_effects.default_effect_fetch_timeout_ms else timeout_ms,
+                                .on_response = fetchResultMsg,
+                            });
+                        }
                     },
                     // clip_write [op][bytes_len u32 LE][bytes]
                     0x0A => {
@@ -1270,6 +1295,48 @@ pub fn TsCoreHost(comptime core: type) type {
                         const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
                         runAudioCaptureStop(fx, key_value);
                     },
+                    // fetch_stream [op][key_len][key][line][ok][err]
+                    //              [method u8][timeout u32 LE]
+                    //              [max_line_bytes u32 LE]
+                    //              [url_len u32 LE][url][header_count u8]
+                    //              ([name_len u8][name][value_len u32 LE][value])*
+                    //              [body_len u32 LE][body]
+                    0x20 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const line_tag = takeByte(cmd, &at);
+                        const ok_tag = takeByte(cmd, &at);
+                        const err_tag = takeByte(cmd, &at);
+                        const method = fetchMethod(takeByte(cmd, &at));
+                        const timeout_bytes = takeBytes(cmd, &at, 4);
+                        const timeout_ms = std.mem.readInt(u32, timeout_bytes[0..4], .little);
+                        const max_line_bytes_wire = takeBytes(cmd, &at, 4);
+                        const max_line_bytes = std.mem.readInt(u32, max_line_bytes_wire[0..4], .little);
+                        const url = takeLongBytes(cmd, &at);
+                        const header_count: usize = takeByte(cmd, &at);
+                        if (header_count > runtime_effects.max_effect_fetch_headers) {
+                            @panic("ts core host: a streaming fetch wire record carries more headers than the engine accepts - the frontend's own bound should have stopped this build");
+                        }
+                        var headers: [runtime_effects.max_effect_fetch_headers]std.http.Header = undefined;
+                        for (0..header_count) |i| {
+                            const name = takeShortBytes(cmd, &at);
+                            const value = takeLongBytes(cmd, &at);
+                            headers[i] = .{ .name = name, .value = value };
+                        }
+                        const body = takeLongBytes(cmd, &at);
+                        issueFetchStream(fx, .{
+                            .key = key,
+                            .line_tag = line_tag,
+                            .exit_tag = ok_tag,
+                            .err_tag = err_tag,
+                        }, .{
+                            .method = method,
+                            .url = url,
+                            .headers = headers[0..header_count],
+                            .body = if (body.len > 0) body else null,
+                            .timeout_ms = if (timeout_ms == 0) runtime_effects.default_effect_fetch_timeout_ms else timeout_ms,
+                            .max_line_bytes = if (max_line_bytes == 0) runtime_effects.max_effect_line_bytes else max_line_bytes,
+                        });
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1384,7 +1451,7 @@ pub fn TsCoreHost(comptime core: type) type {
             return null;
         }
 
-        // ------------------------------------------------ spawn streams
+        // ------------------------------------------- spawn / fetch streams
 
         const SpawnHead = struct { key: []const u8, line_tag: u8, exit_tag: u8, err_tag: u8 };
 
@@ -1407,8 +1474,14 @@ pub fn TsCoreHost(comptime core: type) type {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
             }
-            const index = freeStreamIndex() orelse
-                @panic("ts core host: more than 16 spawn streams in flight - the stream table mirrors the engine's max_effects slots");
+            const index = freeStreamIndex() orelse {
+                // Resource refusal is an ordinary stream terminal. The
+                // engine would report the same rejection if it owned one
+                // more routing slot; the bridge table must not turn that
+                // public outcome into a process panic.
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                return;
+            };
             const entry = &streams[index];
             entry.used = true;
             entry.key_len = head.key.len;
@@ -1417,13 +1490,63 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.exit_tag = head.exit_tag;
             entry.err_tag = head.err_tag;
             entry.collect = collect;
+            entry.fetch = false;
+            entry.damaged = false;
             fx.spawn(.{
                 .key = spawn_key_base + index,
                 .argv = argv,
                 .stdin = if (stdin.len > 0) stdin else null,
                 .output = if (collect) .collect else .lines,
-                .on_line = if (head.line_tag != spawn_no_line_tag) spawnLineMsg else null,
+                .on_line = if (head.line_tag != spawn_no_line_tag) streamLineMsg else null,
                 .on_exit = spawnExitMsg,
+            });
+        }
+
+        const FetchStreamOptions = struct {
+            method: std.http.Method,
+            url: []const u8,
+            headers: []const std.http.Header,
+            body: ?[]const u8,
+            timeout_ms: u32,
+            max_line_bytes: usize,
+        };
+
+        /// Open a line-streamed fetch in the shared stream table. Like a
+        /// spawn, a duplicate live wire key is rejected rather than replaced:
+        /// replacing a source that has already delivered lines would splice
+        /// two HTTP responses into one app-owned stream.
+        fn issueFetchStream(fx: *Fx, head: SpawnHead, options: FetchStreamOptions) void {
+            if (head.key.len > 0 and
+                (findStream(head.key) != null or findEffect(head.key) != null))
+            {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                return;
+            }
+            const index = freeStreamIndex() orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                return;
+            };
+            const entry = &streams[index];
+            entry.used = true;
+            entry.key_len = head.key.len;
+            @memcpy(entry.key[0..head.key.len], head.key);
+            entry.line_tag = head.line_tag;
+            entry.exit_tag = head.exit_tag;
+            entry.err_tag = head.err_tag;
+            entry.collect = false;
+            entry.fetch = true;
+            entry.damaged = false;
+            fx.fetch(.{
+                .key = spawn_key_base + index,
+                .method = options.method,
+                .url = options.url,
+                .headers = options.headers,
+                .body = options.body,
+                .timeout_ms = options.timeout_ms,
+                .response = .stream,
+                .on_line = streamLineMsg,
+                .max_line_bytes = options.max_line_bytes,
+                .on_response = fetchStreamResultMsg,
             });
         }
 
@@ -1441,26 +1564,30 @@ pub fn TsCoreHost(comptime core: type) type {
             return null;
         }
 
-        /// The stream entry an engine spawn result names — looked up
+        /// The stream entry an engine spawn/fetch result names — looked up
         /// WITHOUT retiring (lines flow through it repeatedly; only the
-        /// exit terminal retires, in `spawnExitMsg`).
+        /// terminal retires it).
         fn streamAt(key: u64) *StreamEntry {
             if (key < spawn_key_base) {
-                @panic("ts core host: a spawn result arrived outside the bridge's stream key namespace");
+                @panic("ts core host: a stream result arrived outside the bridge's stream key namespace");
             }
             const index = key - spawn_key_base;
             if (index >= streams.len or !streams[index].used) {
-                @panic("ts core host: a spawn result arrived for a stream the bridge is not tracking");
+                @panic("ts core host: a result arrived for a stream the bridge is not tracking");
             }
             return &streams[index];
         }
 
-        /// `LineMsgFn` for spawn streams: every stdout line routes the
-        /// entry's line arm with the line bytes; the entry stays live.
-        /// Only set when the wire carries a line arm, so this never
-        /// sees `spawn_no_line_tag`.
-        fn spawnLineMsg(line: runtime_effects.EffectLine) Msg {
+        /// Shared `LineMsgFn` for spawn and fetch streams: every delivered
+        /// source line routes the entry's line arm; the entry stays live.
+        /// Fetch streams additionally remember any cut line or preceding
+        /// queue loss so their terminal cannot later claim the response was
+        /// complete.
+        fn streamLineMsg(line: runtime_effects.EffectLine) Msg {
             const entry = streamAt(line.key);
+            if (entry.fetch and (line.truncated or line.dropped_before != 0)) {
+                entry.damaged = true;
+            }
             return msgFromTagBytes(entry.line_tag, line.line);
         }
 
@@ -1484,6 +1611,23 @@ pub fn TsCoreHost(comptime core: type) type {
             }
             const reason = if (exit.reason == .exited) "truncated" else @tagName(exit.reason);
             return msgFromTagBytes(entry.err_tag, reason);
+        }
+
+        /// The streamed fetch's ONE terminal. A delivered, lossless response
+        /// — any HTTP status, including non-2xx — routes the status through
+        /// the ok arm. A cut/dropped line routes `truncated`; transport
+        /// failure, timeout, rejection, and cancellation route their
+        /// machine-readable outcome through err. The terminal retires the
+        /// shared stream entry, so no later line can route for the key.
+        fn fetchStreamResultMsg(response: runtime_effects.EffectResponse) Msg {
+            const entry = streamAt(response.key);
+            const damaged = entry.damaged or response.truncated or response.dropped_before != 0;
+            entry.used = false;
+            if (response.outcome == .ok) {
+                if (damaged) return msgFromTagStaticBytes(entry.err_tag, "truncated");
+                return msgFromTagNumber(entry.exit_tag, @floatFromInt(response.status));
+            }
+            return msgFromTagBytes(entry.err_tag, @tagName(response.outcome));
         }
 
         // ------------------------------------------------- audio stream
@@ -2088,10 +2232,10 @@ pub fn TsCoreHost(comptime core: type) type {
         /// keyed tables — requests (silent drop), named engine ops
         /// (silent drop: the entry is marked dropped, the engine's
         /// `.cancelled` terminal retires it, and its Msg is swallowed —
-        /// no arm dispatches), spawn streams (the child dies and its
-        /// exit routes the err arm with "cancelled" — killing a process
-        /// IS an observable event, so spawn's cancel stays loud), then
-        /// delays (silent — a cancelled delay just never fires).
+        /// no arm dispatches), spawn/fetch streams (their terminal routes
+        /// the err arm with "cancelled" — ending a stream is observable,
+        /// so stream cancellation stays loud), then delays (silent — a
+        /// cancelled delay just never fires).
         /// Unknown keys are a no-op; the audio stream is not cancel's
         /// to end (audio_ctl `stop` closes it).
         fn cancelWireKey(fx: *Fx, key: []const u8) void {
@@ -2106,8 +2250,8 @@ pub fn TsCoreHost(comptime core: type) type {
                 return;
             }
             if (findStream(key)) |index| {
-                // Same shape: the engine ends the child and the
-                // `.cancelled` exit retires the entry in spawnExitMsg.
+                // The engine's `.cancelled` terminal retires the entry in
+                // spawnExitMsg or fetchStreamResultMsg.
                 fx.cancel(spawn_key_base + index);
                 return;
             }

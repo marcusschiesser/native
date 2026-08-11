@@ -40,7 +40,7 @@ The question behind "can I use npm?" is almost always one of these four:
 
 ## Calling APIs, AI endpoints included
 
-Most packages people reach for first — API clients, AI SDKs — are HTTP wrappers. The HTTP is already in the toolkit: `Cmd.fetch` performs a buffered exchange on the effect engine and routes the result back as an ordinary Msg carrying `{ status, body }`. The request is data, the response is a message, and a recorded session replays the whole conversation with zero network — which is not something an SDK dependency can offer. A complete client for an OpenAI-compatible chat endpoint:
+Most packages people reach for first — API clients, AI SDKs — are HTTP wrappers. The HTTP is already in the toolkit: `Cmd.fetch` can perform a buffered exchange and route `{ status, body }`, or line-stream an SSE/NDJSON response through repeated Msgs. The request is data, every response event is a message, and a recorded session replays the whole conversation with zero network — which is not something an SDK dependency can offer. A complete buffered client for an OpenAI-compatible chat endpoint:
 
 <CodeToggle>
 
@@ -83,7 +83,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     case "answered":
       // The status is the real HTTP status - a 404 is a delivered
       // response. Parse the body in pure TypeScript over bytes; the
-      // ai-chat-ts example ships the complete JSON walk.
+      // The Chatbot example ships the complete JSON walk.
       return { ...model, waiting: false, answer: msg.body };
     case "ask_failed":
       // The transport reason ("timed_out", "connect_failed", ...) -
@@ -108,7 +108,25 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
 
 </CodeToggle>
 
-The flagship version of this pattern is [`examples/ai-chat-ts`](https://github.com/vercel-labs/native/tree/main/examples/ai-chat-ts): a chat client for an OpenAI-compatible endpoint — conversation history in the Model, request encoding and response parsing as plain subset TypeScript over bytes, endpoint and credentials through the env channel with the key riding a runtime-built `Authorization: Bearer` header (header names are compile-time; header values may be runtime bytes), honest sending/failed/unconfigured states — with an end-to-end suite that pins the exact request bytes and replays a recorded conversation with no network in the room and none of the launch variables set. One v1 boundary, stated plainly: responses are buffered, not token-streamed (the engine underneath already streams line-framed bodies on the Zig channel; the TS Cmd surface for it is roadmap).
+For token-by-token UI, request the endpoint's streaming mode and add a `line` route:
+
+```ts
+Cmd.fetch(
+  {
+    url: endpoint,
+    method: "POST",
+    headers: { accept: "text/event-stream", authorization: bearerToken },
+    body: requestBody,
+    timeoutMs: 120000,
+    maxLineBytes: 65536,
+  },
+  { key: "chat", line: "chat_event", ok: "chat_done", err: "chat_failed" },
+)
+```
+
+`chat_event` carries one `Uint8Array` field for each complete SSE/NDJSON line; parse its `data:` payload and append the delta to the assistant message in the Model. `chat_done` carries one number field with the terminal HTTP status. Cancellation and transport failures reach `chat_failed` as reason bytes, including `cancelled`, so a partially displayed answer never ends silently.
+
+The flagship [`examples/chatbot`](https://github.com/vercel-labs/native/tree/main/examples/chatbot) uses that streaming shape against Vercel AI Gateway: the Gateway URL and `openai/gpt-5.6-luna` default are fixed, a dropdown inside the prompt group lists the Luna, Terra, and Sol variants in that order, `AI_GATEWAY_API_KEY` and an optional initial `NATIVE_SDK_CHAT_MODEL` override arrive through the env channel, and every `choices[0].delta.content` extends the visible pending assistant reply before `[DONE]` and the terminal status commit it to history. Its end-to-end suite pins the request, observes partial UI updates, and replays every stream line without network or launch variables.
 
 ## Full npm ecosystem UIs
 
@@ -150,6 +168,6 @@ import { containsIgnoreCase } from "@native-sdk/core/text"; // the SDK library c
 ```
 
 - **Vendor it under `src/`.** Subset-clean TypeScript compiles into the core like your own modules ([splitting a core into modules](/docs/typescript#splitting-a-core-into-modules)); the subset checker tells you immediately — by rule ID, with the rewrite — whether a vendored file fits. Code that leans on classes, exceptions, or regexes generally wants rewriting rather than vendoring, and the rewrite is usually smaller than the dependency.
-- **`@native-sdk/core/*` is the curated library channel**: SDK modules written in the same subset, compiled into your core when imported and absent when not. Today that is `@native-sdk/core/text` — the byte-splice text engine (caret, selection, IME, case-insensitive search) — and `@native-sdk/core/events` — the canonical event record types markup and the wiring channels match. The channel grows with the toolkit; JSON encoding/parsing over bytes, today demonstrated in `examples/ai-chat-ts/src/api.ts`, is the kind of module it exists to absorb.
+- **`@native-sdk/core/*` is the curated library channel**: SDK modules written in the same subset, compiled into your core when imported and absent when not. Today that is `@native-sdk/core/text` — the byte-splice text engine (caret, selection, IME, case-insensitive search) — and `@native-sdk/core/events` — the canonical event record types markup and the wiring channels match. The channel grows with the toolkit; JSON encoding/parsing over bytes, today demonstrated in `examples/chatbot/src/api.ts`, is the kind of module it exists to absorb.
 
 One thing deliberately does not exist: a package manager for cores. A core's import graph is exactly the files under `src/` plus the SDK modules — the whole program is readable, the build is hermetic, and nothing arrives at build time that you have not checked in.

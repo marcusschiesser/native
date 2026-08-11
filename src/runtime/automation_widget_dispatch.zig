@@ -508,6 +508,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
                 self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
                 try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
             }
+            _ = try self.views[view_index].ensureCanvasWidgetFocusedTextCaret();
         }
 
         pub fn dispatchAutomationWidgetKey(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId, key: []const u8) anyerror!void {

@@ -10294,6 +10294,33 @@ pub fn Effects(comptime Msg: type) type {
             }
         }
 
+        /// Feed one synthetic line-mode result with the same loss metadata a
+        /// real executor can attach. This is the exact fake/replay seam for
+        /// testing consumers that must reject cut or dropped stream data;
+        /// collect-mode spawns have no `EffectLine` results and are refused.
+        pub fn feedLineWithMetadata(
+            self: *Self,
+            key: u64,
+            bytes: []const u8,
+            truncated: bool,
+            dropped_before: u32,
+        ) error{ EffectNotFound, EffectQueueFull }!void {
+            const slot_index = self.findActiveFakeSlot(key, .spawn) orelse blk: {
+                const fetch_index = self.findActiveFakeSlot(key, .fetch) orelse return error.EffectNotFound;
+                if (self.slots[fetch_index].fetch_response_mode != .stream) return error.EffectNotFound;
+                break :blk fetch_index;
+            };
+            const slot = &self.slots[slot_index];
+            if (slot.kind == .spawn and slot.output_mode == .collect) return error.EffectNotFound;
+
+            const prior_dropped = slot.dropped_pending;
+            slot.dropped_pending +|= dropped_before;
+            if (!self.produceLine(slot, @intCast(slot_index), slot.generation, bytes, truncated, true)) {
+                slot.dropped_pending = prior_dropped;
+                return error.EffectQueueFull;
+            }
+        }
+
         /// Feed synthetic stderr bytes to the fake `.collect` effect with
         /// `key`. Mirrors the real tail: only the last
         /// `max_effect_stderr_tail_bytes` are kept and earlier bytes are
@@ -10388,6 +10415,21 @@ pub fn Effects(comptime Msg: type) type {
         /// `.connect_failed`, ...). Non-`.ok` outcomes carry no body,
         /// mirroring the real executor.
         pub fn feedResponseOutcome(self: *Self, key: u64, outcome: EffectFetchOutcome, status: u16, body: []const u8) error{EffectNotFound}!void {
+            return self.feedResponseOutcomeWithMetadata(key, outcome, status, body, false, 0);
+        }
+
+        /// Exact synthetic response feed, including loss metadata recorded on
+        /// a real `EffectResponse`. The ordinary helper above derives body
+        /// truncation and supplies zero additional loss.
+        pub fn feedResponseOutcomeWithMetadata(
+            self: *Self,
+            key: u64,
+            outcome: EffectFetchOutcome,
+            status: u16,
+            body: []const u8,
+            truncated: bool,
+            dropped_before: u32,
+        ) error{EffectNotFound}!void {
             const slot_index = self.findActiveFakeSlot(key, .fetch) orelse return error.EffectNotFound;
             const slot = &self.slots[slot_index];
             const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
@@ -10409,8 +10451,8 @@ pub fn Effects(comptime Msg: type) type {
                 .generation = slot.generation,
                 .key = slot.key,
                 .line_len = @intCast(slot.body_len),
-                .truncated = slot.fetch_truncated,
-                .dropped_before = slot.dropped_pending,
+                .truncated = slot.fetch_truncated or truncated,
+                .dropped_before = slot.dropped_pending +| dropped_before,
                 .status = status,
                 .outcome = outcome,
                 .response_fn = slot.on_response,

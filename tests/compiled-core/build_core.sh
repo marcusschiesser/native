@@ -54,7 +54,7 @@ fi
 
 case "$fixture" in
   ai-chat)
-    source_root="examples/ai-chat-ts/src"
+    source_root="examples/chatbot/src"
     sources="core.ts api.ts"
     contract="ai-chat"
     ;;

@@ -53,6 +53,7 @@ pub const Metadata = struct {
     shortcuts: []const ShortcutMetadata = &.{},
     file_associations: []const FileAssociationMetadata = &.{},
     url_schemes: []const UrlSchemeMetadata = &.{},
+    dmg: DmgMetadata = .{},
 
     pub fn displayName(self: Metadata) []const u8 {
         return self.display_name orelse self.name;
@@ -186,6 +187,13 @@ pub const Metadata = struct {
             allocator.free(scheme.role);
         }
         if (self.url_schemes.len > 0) allocator.free(self.url_schemes);
+        if (self.dmg.volume_name) |value| allocator.free(value);
+        if (self.dmg.background) |value| allocator.free(value);
+        for (self.dmg.items) |item| {
+            if (item.path) |value| allocator.free(value);
+            if (item.name) |value| allocator.free(value);
+        }
+        if (self.dmg.items.len > 0) allocator.free(self.dmg.items);
     }
 };
 
@@ -329,6 +337,37 @@ pub const UrlSchemeMetadata = struct {
     role: []const u8 = "viewer",
 };
 
+pub const DmgPosition = struct {
+    x: u16,
+    y: u16,
+};
+
+pub const DmgItemKind = enum {
+    app,
+    applications,
+    file,
+    link,
+};
+
+pub const DmgItemMetadata = struct {
+    kind: DmgItemKind,
+    path: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    position: DmgPosition,
+};
+
+pub const DmgMetadata = struct {
+    volume_name: ?[]const u8 = null,
+    background: ?[]const u8 = null,
+    window_width: u16 = 660,
+    window_height: u16 = 400,
+    icon_size: u16 = 128,
+    app_position: DmgPosition = .{ .x = 166, .y = 182 },
+    applications_position: DmgPosition = .{ .x = 486, .y = 182 },
+    applications_link: bool = true,
+    items: []const DmgItemMetadata = &.{},
+};
+
 pub const FrontendDevMetadata = struct {
     url: []const u8,
     command: []const []const u8 = &.{},
@@ -375,6 +414,8 @@ const RawMenuItem = raw_manifest.RawMenuItem;
 const RawShortcut = raw_manifest.RawShortcut;
 const RawFileAssociation = raw_manifest.RawFileAssociation;
 const RawUrlScheme = raw_manifest.RawUrlScheme;
+const RawDmg = raw_manifest.RawDmg;
+const RawDmgItem = raw_manifest.RawDmgItem;
 
 pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !ValidationResult {
     const source = try readFile(allocator, io, path);
@@ -433,6 +474,14 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer allocator.free(file_associations);
     const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app.zon URL schemes are invalid" };
     defer allocator.free(url_schemes);
+    // General manifest validation owns only values the app explicitly
+    // declared. Archive-time fallbacks (notably display_name as the volume
+    // name) are validated when a macOS archive is actually requested, so an
+    // otherwise valid display name does not make every `native check` fail.
+    validateDmgSettings(metadata.dmg) catch return .{ .ok = false, .message = "app.zon dmg settings are invalid - check the volume/bundle names, window/icon geometry, and positions; an explicit items list needs exactly one app and unique safe destination names" };
+    if (try checkDmgSources(allocator, io, std.fs.path.dirname(path) orelse ".", metadata.dmg)) |dmg_message| {
+        return .{ .ok = false, .message = dmg_message };
+    }
     const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app.zon web engine is invalid" };
     const manifest_webview_layer = parseWebViewLayer(metadata.webview_layer) catch return .{ .ok = false, .message = "app.zon webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"" };
     if (!std.mem.eql(u8, metadata.core_compiler, "external")) {
@@ -539,7 +588,59 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .shortcuts = try convertRawShortcuts(allocator, raw.shortcuts),
         .file_associations = try convertRawFileAssociations(allocator, raw.file_associations),
         .url_schemes = try convertRawUrlSchemes(allocator, raw.url_schemes),
+        .dmg = try convertRawDmg(allocator, raw.dmg),
     };
+}
+
+fn convertRawDmg(allocator: std.mem.Allocator, dmg: RawDmg) !DmgMetadata {
+    return .{
+        .volume_name = try duplicateOptionalString(allocator, dmg.volume_name),
+        .background = try duplicateOptionalString(allocator, dmg.background),
+        .window_width = dmg.window_width,
+        .window_height = dmg.window_height,
+        .icon_size = dmg.icon_size,
+        .app_position = .{ .x = dmg.app_position.x, .y = dmg.app_position.y },
+        .applications_position = .{ .x = dmg.applications_position.x, .y = dmg.applications_position.y },
+        .applications_link = dmg.applications_link,
+        .items = try convertRawDmgItems(allocator, dmg.items),
+    };
+}
+
+fn convertRawDmgItems(allocator: std.mem.Allocator, items: []const RawDmgItem) ![]const DmgItemMetadata {
+    if (items.len == 0) return &.{};
+    const converted = try allocator.alloc(DmgItemMetadata, items.len);
+    errdefer allocator.free(converted);
+    var initialized: usize = 0;
+    errdefer for (converted[0..initialized]) |item| {
+        if (item.path) |value| allocator.free(value);
+        if (item.name) |value| allocator.free(value);
+    };
+    for (items, 0..) |item, index| {
+        converted[index] = try convertRawDmgItem(allocator, item);
+        initialized += 1;
+    }
+    return converted;
+}
+
+fn convertRawDmgItem(allocator: std.mem.Allocator, item: RawDmgItem) !DmgItemMetadata {
+    const path = try duplicateOptionalString(allocator, item.path);
+    errdefer if (path) |value| allocator.free(value);
+    const name = try duplicateOptionalString(allocator, item.name);
+    errdefer if (name) |value| allocator.free(value);
+    return .{
+        .kind = try parseDmgItemKind(item.kind),
+        .path = path,
+        .name = name,
+        .position = .{ .x = item.position.x, .y = item.position.y },
+    };
+}
+
+fn parseDmgItemKind(value: []const u8) !DmgItemKind {
+    if (std.mem.eql(u8, value, "app")) return .app;
+    if (std.mem.eql(u8, value, "applications")) return .applications;
+    if (std.mem.eql(u8, value, "file")) return .file;
+    if (std.mem.eql(u8, value, "link")) return .link;
+    return error.InvalidDmgItemKind;
 }
 
 fn duplicateOptionalString(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
@@ -1531,6 +1632,589 @@ fn validateRelativePath(path: []const u8) !void {
     try validatePathSegment(path[segment_start..]);
 }
 
+pub fn validateDmgSettings(dmg: DmgMetadata) !void {
+    if (dmg.window_width < 320 or dmg.window_width > 2000) return error.InvalidDmgWindow;
+    if (dmg.window_height < 240 or dmg.window_height > 1400) return error.InvalidDmgWindow;
+    if (dmg.icon_size < 32 or dmg.icon_size > 256) return error.InvalidDmgIconSize;
+    if (dmg.items.len == 0) {
+        if (!dmgPositionInsideWindow(dmg, dmg.app_position)) return error.InvalidDmgPosition;
+        if (dmg.applications_link and !dmgPositionInsideWindow(dmg, dmg.applications_position)) return error.InvalidDmgPosition;
+    } else {
+        if (dmg.items.len > 64) return error.TooManyDmgItems;
+        var app_count: usize = 0;
+        var applications_count: usize = 0;
+        for (dmg.items, 0..) |item, index| {
+            if (!dmgPositionInsideWindow(dmg, item.position)) return error.InvalidDmgPosition;
+            switch (item.kind) {
+                .app => {
+                    app_count += 1;
+                    if (item.path != null) return error.InvalidDmgItem;
+                    if (item.name) |name| try validateDmgItemName(name);
+                },
+                .applications => {
+                    applications_count += 1;
+                    if (item.path != null or item.name != null) return error.InvalidDmgItem;
+                },
+                .file => {
+                    const path = item.path orelse return error.InvalidDmgItem;
+                    try validateRelativePath(path);
+                    if (item.name) |name| try validateDmgItemName(name);
+                },
+                .link => {
+                    const target = item.path orelse return error.InvalidDmgItem;
+                    if (!std.fs.path.isAbsolute(target)) return error.InvalidDmgItem;
+                    for (target) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidDmgItem;
+                    if (item.name) |name| try validateDmgItemName(name);
+                },
+            }
+            const name = dmgItemDestinationName(item) orelse continue;
+            try validateDmgItemName(name);
+            for (dmg.items[0..index]) |previous| {
+                const previous_name = dmgItemDestinationName(previous) orelse continue;
+                if (std.ascii.eqlIgnoreCase(previous_name, name)) return error.DuplicateDmgItem;
+            }
+        }
+        if (app_count != 1 or applications_count > 1) return error.InvalidDmgItem;
+    }
+    if (dmg.volume_name) |name| try validateDmgVolumeName(name);
+    if (dmg.background) |background| {
+        try validateRelativePath(background);
+        if (!dmgBackgroundExtensionSupported(background)) return error.InvalidDmgBackground;
+    }
+}
+
+/// Validate the derived values packaging actually passes to `hdiutil` and
+/// `ditto`, not only the optional raw overrides. In particular, an absent
+/// volume name falls back to the app display name, and an app item without an
+/// `.app` suffix gains one before it becomes a filesystem component.
+pub fn validateDmgPackageSettings(metadata: Metadata) !void {
+    try validateDmgSettings(metadata.dmg);
+    try validateDmgVolumeName(metadata.dmg.volume_name orelse metadata.displayName());
+
+    var app_name_buffer: [255]u8 = undefined;
+    const app_name = try dmgAppBundleName(&app_name_buffer, metadata);
+    for (metadata.dmg.items) |item| {
+        const destination_name = dmgItemDestinationName(item) orelse continue;
+        if (std.ascii.eqlIgnoreCase(destination_name, app_name)) return error.DuplicateDmgItem;
+    }
+}
+
+fn dmgConfiguredAppName(metadata: Metadata) []const u8 {
+    if (metadata.dmg.items.len > 0) {
+        for (metadata.dmg.items) |item| {
+            if (item.kind == .app) return item.name orelse metadata.displayName();
+        }
+    }
+    return metadata.displayName();
+}
+
+/// Resolve the exact app-bundle filesystem name used inside the DMG. Keeping
+/// this beside validation ensures collision checks and staging cannot drift.
+pub fn dmgAppBundleName(buffer: []u8, metadata: Metadata) ![]const u8 {
+    const configured_name = dmgConfiguredAppName(metadata);
+    const has_app_suffix = configured_name.len >= 4 and std.ascii.eqlIgnoreCase(configured_name[configured_name.len - 4 ..], ".app");
+    const configured_stem = if (has_app_suffix) configured_name[0 .. configured_name.len - 4] else configured_name;
+    const stem = if (configured_stem.len == 0) metadata.name else configured_stem;
+    if (stem.len > 255 - ".app".len or buffer.len < stem.len + ".app".len) return error.InvalidDmgItem;
+
+    for (stem, 0..) |byte, index| {
+        buffer[index] = switch (byte) {
+            '/', ':', '\\', 0...0x1f, 0x7f => '-',
+            else => byte,
+        };
+    }
+    @memcpy(buffer[stem.len..][0..".app".len], ".app");
+    return buffer[0 .. stem.len + ".app".len];
+}
+
+fn validateDmgVolumeName(name: []const u8) !void {
+    if (name.len == 0 or name.len > 127) return error.InvalidDmgVolumeName;
+    for (name) |byte| {
+        if (byte < 0x20 or byte == 0x7f or byte == '/' or byte == ':') return error.InvalidDmgVolumeName;
+    }
+}
+
+fn dmgPositionInsideWindow(dmg: DmgMetadata, position: DmgPosition) bool {
+    return position.x < dmg.window_width and position.y < dmg.window_height;
+}
+
+pub fn dmgItemDestinationName(item: DmgItemMetadata) ?[]const u8 {
+    return switch (item.kind) {
+        .app => null,
+        .applications => "Applications",
+        .file, .link => item.name orelse if (item.path) |path| std.fs.path.basename(path) else null,
+    };
+}
+
+fn validateDmgItemName(name: []const u8) !void {
+    if (name.len == 0 or name.len > 255) return error.InvalidDmgItem;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidDmgItem;
+    if (std.ascii.eqlIgnoreCase(name, ".background") or std.ascii.eqlIgnoreCase(name, ".DS_Store")) return error.InvalidDmgItem;
+    for (name) |byte| {
+        if (byte < 0x20 or byte == 0x7f or byte == '/' or byte == ':' or byte == '\\') return error.InvalidDmgItem;
+    }
+}
+
+fn dmgBackgroundExtensionSupported(path: []const u8) bool {
+    return app_icon_tool.pathHasExtension(path, ".png") or
+        app_icon_tool.pathHasExtension(path, ".jpg") or
+        app_icon_tool.pathHasExtension(path, ".jpeg") or
+        app_icon_tool.pathHasExtension(path, ".tif") or
+        app_icon_tool.pathHasExtension(path, ".tiff");
+}
+
+const max_dmg_background_bytes = 64 * 1024 * 1024;
+
+const DmgImageDimensions = struct {
+    width: usize,
+    height: usize,
+};
+
+pub fn dmgRetinaRelativePathAlloc(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
+    if (app_icon_tool.pathHasExtension(path, ".tif") or app_icon_tool.pathHasExtension(path, ".tiff")) return null;
+    const extension = std.fs.path.extension(path);
+    const retina_path = try std.fmt.allocPrint(allocator, "{s}@2x{s}", .{ path[0 .. path.len - extension.len], extension });
+    return retina_path;
+}
+
+fn dmgImageDimensions(path: []const u8, bytes: []const u8) ?DmgImageDimensions {
+    if (app_icon_tool.pathHasExtension(path, ".png")) return pngDimensions(bytes);
+    if (app_icon_tool.pathHasExtension(path, ".jpg") or app_icon_tool.pathHasExtension(path, ".jpeg")) return jpegDimensions(bytes);
+    if (app_icon_tool.pathHasExtension(path, ".tif") or app_icon_tool.pathHasExtension(path, ".tiff")) return tiffDimensions(bytes);
+    return null;
+}
+
+/// Validate the complete PNG chunk envelope (including CRCs and IEND), while
+/// leaving pixel decoding to Finder. This accepts interlaced/background PNGs
+/// beyond the deliberately narrower app-icon rasterizer dialect.
+fn pngDimensions(bytes: []const u8) ?DmgImageDimensions {
+    const signature = "\x89PNG\r\n\x1a\n";
+    if (bytes.len < signature.len or !std.mem.eql(u8, bytes[0..signature.len], signature)) return null;
+    var offset: usize = signature.len;
+    var dimensions: ?DmgImageDimensions = null;
+    var saw_idat = false;
+    while (offset < bytes.len) {
+        if (bytes.len - offset < 12) return null;
+        const data_len: usize = std.mem.readInt(u32, bytes[offset..][0..4], .big);
+        if (data_len > bytes.len - offset - 12) return null;
+        const chunk_type = bytes[offset + 4 .. offset + 8];
+        const data = bytes[offset + 8 .. offset + 8 + data_len];
+        const expected_crc = std.mem.readInt(u32, bytes[offset + 8 + data_len ..][0..4], .big);
+        var crc = std.hash.Crc32.init();
+        crc.update(chunk_type);
+        crc.update(data);
+        if (crc.final() != expected_crc) return null;
+        offset += 12 + data_len;
+
+        if (std.mem.eql(u8, chunk_type, "IHDR")) {
+            if (dimensions != null or data.len != 13 or saw_idat) return null;
+            const width = std.mem.readInt(u32, data[0..4], .big);
+            const height = std.mem.readInt(u32, data[4..8], .big);
+            if (width == 0 or height == 0 or data[10] != 0 or data[11] != 0 or data[12] > 1) return null;
+            const valid_depth = switch (data[9]) {
+                0 => data[8] == 1 or data[8] == 2 or data[8] == 4 or data[8] == 8 or data[8] == 16,
+                2, 4, 6 => data[8] == 8 or data[8] == 16,
+                3 => data[8] == 1 or data[8] == 2 or data[8] == 4 or data[8] == 8,
+                else => false,
+            };
+            if (!valid_depth) return null;
+            dimensions = .{ .width = width, .height = height };
+        } else if (std.mem.eql(u8, chunk_type, "IDAT")) {
+            if (dimensions == null) return null;
+            saw_idat = true;
+        } else if (std.mem.eql(u8, chunk_type, "IEND")) {
+            if (data.len != 0 or !saw_idat or offset != bytes.len) return null;
+            return dimensions;
+        }
+    }
+    return null;
+}
+
+fn jpegDimensions(bytes: []const u8) ?DmgImageDimensions {
+    if (bytes.len < 4 or bytes[0] != 0xff or bytes[1] != 0xd8) return null;
+    var offset: usize = 2;
+    var dimensions: ?DmgImageDimensions = null;
+    var in_scan = false;
+    var saw_scan = false;
+    while (offset < bytes.len) {
+        if (in_scan) {
+            while (offset < bytes.len and bytes[offset] != 0xff) : (offset += 1) {}
+            if (offset == bytes.len) return null;
+        } else if (bytes[offset] != 0xff) {
+            return null;
+        }
+        while (offset < bytes.len and bytes[offset] == 0xff) : (offset += 1) {}
+        if (offset == bytes.len) return null;
+        const marker = bytes[offset];
+        offset += 1;
+        if (marker == 0x00) {
+            if (!in_scan) return null;
+            continue;
+        }
+        if (marker == 0xd9) return if (saw_scan) dimensions else null;
+        if (marker >= 0xd0 and marker <= 0xd7) {
+            if (!in_scan) return null;
+            continue;
+        }
+        if (marker == 0x01) continue;
+        if (marker == 0xd8) return null;
+        if (bytes.len - offset < 2) return null;
+        const segment_len: usize = std.mem.readInt(u16, bytes[offset..][0..2], .big);
+        if (segment_len < 2 or segment_len > bytes.len - offset) return null;
+        const segment = bytes[offset + 2 .. offset + segment_len];
+        if (jpegMarkerCarriesDimensions(marker)) {
+            if (segment.len < 6) return null;
+            const height = std.mem.readInt(u16, segment[1..3], .big);
+            const width = std.mem.readInt(u16, segment[3..5], .big);
+            if (width == 0 or height == 0) return null;
+            dimensions = .{ .width = width, .height = height };
+        }
+        in_scan = marker == 0xda;
+        saw_scan = saw_scan or in_scan;
+        offset += segment_len;
+    }
+    return null;
+}
+
+fn jpegMarkerCarriesDimensions(marker: u8) bool {
+    return switch (marker) {
+        0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf => true,
+        else => false,
+    };
+}
+
+fn tiffDimensions(bytes: []const u8) ?DmgImageDimensions {
+    if (bytes.len < 8) return null;
+    const endian: std.builtin.Endian = if (std.mem.eql(u8, bytes[0..2], "II"))
+        .little
+    else if (std.mem.eql(u8, bytes[0..2], "MM"))
+        .big
+    else
+        return null;
+    return switch (readEndianU16(bytes, 2, endian) orelse return null) {
+        42 => classicTiffDimensions(bytes, endian),
+        43 => bigTiffDimensions(bytes, endian),
+        else => null,
+    };
+}
+
+const max_tiff_directories = 64;
+
+const TiffIntegerKind = enum {
+    short,
+    long,
+    long8,
+};
+
+const TiffIntegerField = struct {
+    kind: TiffIntegerKind,
+    count: usize,
+    data_offset: usize,
+};
+
+const TiffDirectory = struct {
+    dimensions: DmgImageDimensions,
+    next_offset: usize,
+};
+
+fn classicTiffDimensions(bytes: []const u8, endian: std.builtin.Endian) ?DmgImageDimensions {
+    var ifd_offset = std.math.cast(usize, readEndianU32(bytes, 4, endian) orelse return null) orelse return null;
+    var dimensions: ?DmgImageDimensions = null;
+    var directory_count: usize = 0;
+    while (ifd_offset != 0) {
+        if (directory_count == max_tiff_directories) return null;
+        const directory = classicTiffDirectory(bytes, ifd_offset, endian) orelse return null;
+        if (dimensions == null) dimensions = directory.dimensions;
+        ifd_offset = directory.next_offset;
+        directory_count += 1;
+    }
+    return dimensions;
+}
+
+fn classicTiffDirectory(bytes: []const u8, ifd_offset: usize, endian: std.builtin.Endian) ?TiffDirectory {
+    const entry_count = readEndianU16(bytes, ifd_offset, endian) orelse return null;
+    const entries_start = std.math.add(usize, ifd_offset, 2) catch return null;
+    const entries_bytes = std.math.mul(usize, entry_count, 12) catch return null;
+    const entries_end = std.math.add(usize, entries_start, entries_bytes) catch return null;
+    if (entries_end > bytes.len or bytes.len - entries_end < 4) return null;
+    var width: ?usize = null;
+    var height: ?usize = null;
+    var strip_offsets: ?TiffIntegerField = null;
+    var strip_byte_counts: ?TiffIntegerField = null;
+    var tile_offsets: ?TiffIntegerField = null;
+    var tile_byte_counts: ?TiffIntegerField = null;
+    for (0..entry_count) |index| {
+        const entry_offset = entries_start + index * 12;
+        const tag = readEndianU16(bytes, entry_offset, endian) orelse return null;
+        switch (tag) {
+            256, 257 => {
+                const field = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+                if (field.count != 1) return null;
+                const value = tiffIntegerValue(bytes, field, 0, endian) orelse return null;
+                if (tag == 256) {
+                    if (width != null) return null;
+                    width = value;
+                } else {
+                    if (height != null) return null;
+                    height = value;
+                }
+            },
+            273 => {
+                if (strip_offsets != null) return null;
+                strip_offsets = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            279 => {
+                if (strip_byte_counts != null) return null;
+                strip_byte_counts = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            324 => {
+                if (tile_offsets != null) return null;
+                tile_offsets = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            325 => {
+                if (tile_byte_counts != null) return null;
+                tile_byte_counts = classicTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            else => {},
+        }
+    }
+    if ((width orelse 0) == 0 or (height orelse 0) == 0) return null;
+    if (!tiffImagePayloadsValid(bytes, endian, strip_offsets, strip_byte_counts, tile_offsets, tile_byte_counts)) return null;
+    return .{
+        .dimensions = .{ .width = width.?, .height = height.? },
+        .next_offset = std.math.cast(usize, readEndianU32(bytes, entries_end, endian) orelse return null) orelse return null,
+    };
+}
+
+fn classicTiffIntegerField(bytes: []const u8, entry_offset: usize, endian: std.builtin.Endian) ?TiffIntegerField {
+    const kind: TiffIntegerKind = switch (readEndianU16(bytes, entry_offset + 2, endian) orelse return null) {
+        3 => .short,
+        4 => .long,
+        else => return null,
+    };
+    const count = std.math.cast(usize, readEndianU32(bytes, entry_offset + 4, endian) orelse return null) orelse return null;
+    const payload_bytes = std.math.mul(usize, count, tiffIntegerSize(kind)) catch return null;
+    const data_offset = if (payload_bytes <= 4)
+        entry_offset + 8
+    else
+        std.math.cast(usize, readEndianU32(bytes, entry_offset + 8, endian) orelse return null) orelse return null;
+    if (data_offset > bytes.len or payload_bytes > bytes.len - data_offset) return null;
+    return .{ .kind = kind, .count = count, .data_offset = data_offset };
+}
+
+fn bigTiffDimensions(bytes: []const u8, endian: std.builtin.Endian) ?DmgImageDimensions {
+    if (bytes.len < 16 or (readEndianU16(bytes, 4, endian) orelse return null) != 8 or (readEndianU16(bytes, 6, endian) orelse return null) != 0) return null;
+    var ifd_offset = std.math.cast(usize, readEndianU64(bytes, 8, endian) orelse return null) orelse return null;
+    var dimensions: ?DmgImageDimensions = null;
+    var directory_count: usize = 0;
+    while (ifd_offset != 0) {
+        if (directory_count == max_tiff_directories) return null;
+        const directory = bigTiffDirectory(bytes, ifd_offset, endian) orelse return null;
+        if (dimensions == null) dimensions = directory.dimensions;
+        ifd_offset = directory.next_offset;
+        directory_count += 1;
+    }
+    return dimensions;
+}
+
+fn bigTiffDirectory(bytes: []const u8, ifd_offset: usize, endian: std.builtin.Endian) ?TiffDirectory {
+    const entry_count = std.math.cast(usize, readEndianU64(bytes, ifd_offset, endian) orelse return null) orelse return null;
+    const entries_start = std.math.add(usize, ifd_offset, 8) catch return null;
+    const entries_bytes = std.math.mul(usize, entry_count, 20) catch return null;
+    const entries_end = std.math.add(usize, entries_start, entries_bytes) catch return null;
+    if (entries_end > bytes.len or bytes.len - entries_end < 8) return null;
+    var width: ?usize = null;
+    var height: ?usize = null;
+    var strip_offsets: ?TiffIntegerField = null;
+    var strip_byte_counts: ?TiffIntegerField = null;
+    var tile_offsets: ?TiffIntegerField = null;
+    var tile_byte_counts: ?TiffIntegerField = null;
+    for (0..entry_count) |index| {
+        const entry_offset = entries_start + index * 20;
+        const tag = readEndianU16(bytes, entry_offset, endian) orelse return null;
+        switch (tag) {
+            256, 257 => {
+                const field = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+                if (field.count != 1) return null;
+                const value = tiffIntegerValue(bytes, field, 0, endian) orelse return null;
+                if (tag == 256) {
+                    if (width != null) return null;
+                    width = value;
+                } else {
+                    if (height != null) return null;
+                    height = value;
+                }
+            },
+            273 => {
+                if (strip_offsets != null) return null;
+                strip_offsets = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            279 => {
+                if (strip_byte_counts != null) return null;
+                strip_byte_counts = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            324 => {
+                if (tile_offsets != null) return null;
+                tile_offsets = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            325 => {
+                if (tile_byte_counts != null) return null;
+                tile_byte_counts = bigTiffIntegerField(bytes, entry_offset, endian) orelse return null;
+            },
+            else => {},
+        }
+    }
+    if ((width orelse 0) == 0 or (height orelse 0) == 0) return null;
+    if (!tiffImagePayloadsValid(bytes, endian, strip_offsets, strip_byte_counts, tile_offsets, tile_byte_counts)) return null;
+    return .{
+        .dimensions = .{ .width = width.?, .height = height.? },
+        .next_offset = std.math.cast(usize, readEndianU64(bytes, entries_end, endian) orelse return null) orelse return null,
+    };
+}
+
+fn bigTiffIntegerField(bytes: []const u8, entry_offset: usize, endian: std.builtin.Endian) ?TiffIntegerField {
+    const kind: TiffIntegerKind = switch (readEndianU16(bytes, entry_offset + 2, endian) orelse return null) {
+        3 => .short,
+        4 => .long,
+        16 => .long8,
+        else => return null,
+    };
+    const count = std.math.cast(usize, readEndianU64(bytes, entry_offset + 4, endian) orelse return null) orelse return null;
+    const payload_bytes = std.math.mul(usize, count, tiffIntegerSize(kind)) catch return null;
+    const data_offset = if (payload_bytes <= 8)
+        entry_offset + 12
+    else
+        std.math.cast(usize, readEndianU64(bytes, entry_offset + 12, endian) orelse return null) orelse return null;
+    if (data_offset > bytes.len or payload_bytes > bytes.len - data_offset) return null;
+    return .{ .kind = kind, .count = count, .data_offset = data_offset };
+}
+
+fn tiffIntegerSize(kind: TiffIntegerKind) usize {
+    return switch (kind) {
+        .short => 2,
+        .long => 4,
+        .long8 => 8,
+    };
+}
+
+fn tiffIntegerValue(bytes: []const u8, field: TiffIntegerField, index: usize, endian: std.builtin.Endian) ?usize {
+    if (index >= field.count) return null;
+    const value_offset = std.math.add(usize, field.data_offset, std.math.mul(usize, index, tiffIntegerSize(field.kind)) catch return null) catch return null;
+    return switch (field.kind) {
+        .short => readEndianU16(bytes, value_offset, endian) orelse return null,
+        .long => std.math.cast(usize, readEndianU32(bytes, value_offset, endian) orelse return null) orelse return null,
+        .long8 => std.math.cast(usize, readEndianU64(bytes, value_offset, endian) orelse return null) orelse return null,
+    };
+}
+
+fn tiffImagePayloadsValid(
+    bytes: []const u8,
+    endian: std.builtin.Endian,
+    strip_offsets: ?TiffIntegerField,
+    strip_byte_counts: ?TiffIntegerField,
+    tile_offsets: ?TiffIntegerField,
+    tile_byte_counts: ?TiffIntegerField,
+) bool {
+    const has_strips = strip_offsets != null or strip_byte_counts != null;
+    const has_tiles = tile_offsets != null or tile_byte_counts != null;
+    if (!has_strips and !has_tiles) return false;
+    if (has_strips) {
+        if (strip_offsets == null or strip_byte_counts == null) return false;
+        if (!tiffPayloadRangesValid(bytes, endian, strip_offsets.?, strip_byte_counts.?)) return false;
+    }
+    if (has_tiles) {
+        if (tile_offsets == null or tile_byte_counts == null) return false;
+        if (!tiffPayloadRangesValid(bytes, endian, tile_offsets.?, tile_byte_counts.?)) return false;
+    }
+    return true;
+}
+
+fn tiffPayloadRangesValid(bytes: []const u8, endian: std.builtin.Endian, offsets: TiffIntegerField, byte_counts: TiffIntegerField) bool {
+    if (offsets.count == 0 or offsets.count != byte_counts.count) return false;
+    for (0..offsets.count) |index| {
+        const payload_offset = tiffIntegerValue(bytes, offsets, index, endian) orelse return false;
+        const payload_bytes = tiffIntegerValue(bytes, byte_counts, index, endian) orelse return false;
+        if (payload_bytes == 0 or payload_offset > bytes.len or payload_bytes > bytes.len - payload_offset) return false;
+    }
+    return true;
+}
+
+fn readEndianU16(bytes: []const u8, offset: usize, endian: std.builtin.Endian) ?u16 {
+    if (offset > bytes.len or bytes.len - offset < 2) return null;
+    return switch (endian) {
+        .little => std.mem.readInt(u16, bytes[offset..][0..2], .little),
+        .big => std.mem.readInt(u16, bytes[offset..][0..2], .big),
+    };
+}
+
+fn readEndianU32(bytes: []const u8, offset: usize, endian: std.builtin.Endian) ?u32 {
+    if (offset > bytes.len or bytes.len - offset < 4) return null;
+    return switch (endian) {
+        .little => std.mem.readInt(u32, bytes[offset..][0..4], .little),
+        .big => std.mem.readInt(u32, bytes[offset..][0..4], .big),
+    };
+}
+
+fn readEndianU64(bytes: []const u8, offset: usize, endian: std.builtin.Endian) ?u64 {
+    if (offset > bytes.len or bytes.len - offset < 8) return null;
+    return switch (endian) {
+        .little => std.mem.readInt(u64, bytes[offset..][0..8], .little),
+        .big => std.mem.readInt(u64, bytes[offset..][0..8], .big),
+    };
+}
+
+pub fn checkDmgSources(allocator: std.mem.Allocator, io: std.Io, manifest_dir: []const u8, dmg: DmgMetadata) !?[]const u8 {
+    if (try checkDmgBackground(allocator, io, manifest_dir, dmg)) |message| return message;
+    return checkDmgItemSources(allocator, io, manifest_dir, dmg.items);
+}
+
+fn checkDmgBackground(allocator: std.mem.Allocator, io: std.Io, manifest_dir: []const u8, dmg: DmgMetadata) !?[]const u8 {
+    const path = dmg.background orelse return null;
+    validateRelativePath(path) catch return "app.zon dmg background is invalid - use a project-relative PNG, JPEG, or TIFF path";
+    if (!dmgBackgroundExtensionSupported(path)) return "app.zon dmg background is invalid - Finder backgrounds must be PNG, JPEG, or TIFF";
+    const resolved = try std.fs.path.join(allocator, &.{ manifest_dir, path });
+    defer allocator.free(resolved);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, resolved, allocator, .limited(max_dmg_background_bytes)) catch return "app.zon dmg background could not be read";
+    defer allocator.free(bytes);
+    const dimensions = dmgImageDimensions(path, bytes) orelse return "app.zon dmg background is not a structurally valid PNG, JPEG, or TIFF image";
+    if (dimensions.width != dmg.window_width or dimensions.height != dmg.window_height) {
+        const message = try std.fmt.allocPrint(allocator, "app.zon dmg background is {d}x{d} - expected {d}x{d} to match window_width/window_height", .{ dimensions.width, dimensions.height, dmg.window_width, dmg.window_height });
+        return message;
+    }
+
+    const retina_relative = (try dmgRetinaRelativePathAlloc(allocator, path)) orelse return null;
+    defer allocator.free(retina_relative);
+    const retina_resolved = try std.fs.path.join(allocator, &.{ manifest_dir, retina_relative });
+    defer allocator.free(retina_resolved);
+    _ = std.Io.Dir.cwd().statFile(io, retina_resolved, .{}) catch return null;
+    const retina_bytes = std.Io.Dir.cwd().readFileAlloc(io, retina_resolved, allocator, .limited(max_dmg_background_bytes)) catch return "app.zon dmg @2x background could not be read";
+    defer allocator.free(retina_bytes);
+    const retina_dimensions = dmgImageDimensions(retina_relative, retina_bytes) orelse return "app.zon dmg @2x background is not a structurally valid PNG or JPEG image";
+    const expected_width: usize = @as(usize, dmg.window_width) * 2;
+    const expected_height: usize = @as(usize, dmg.window_height) * 2;
+    if (retina_dimensions.width != expected_width or retina_dimensions.height != expected_height) {
+        const message = try std.fmt.allocPrint(allocator, "app.zon dmg @2x background is {d}x{d} - expected {d}x{d}", .{ retina_dimensions.width, retina_dimensions.height, expected_width, expected_height });
+        return message;
+    }
+    return null;
+}
+
+fn checkDmgItemSources(allocator: std.mem.Allocator, io: std.Io, manifest_dir: []const u8, items: []const DmgItemMetadata) !?[]const u8 {
+    for (items) |item| {
+        if (item.kind != .file) continue;
+        const path = item.path orelse continue;
+        const resolved = try std.fs.path.join(allocator, &.{ manifest_dir, path });
+        defer allocator.free(resolved);
+        var file = std.Io.Dir.cwd().openFile(io, resolved, .{}) catch {
+            var dir = std.Io.Dir.cwd().openDir(io, resolved, .{}) catch return "app.zon dmg item source could not be read";
+            dir.close(io);
+            continue;
+        };
+        file.close(io);
+    }
+    return null;
+}
+
 fn validatePathSegment(segment: []const u8) !void {
     if (segment.len == 0) return error.InvalidPath;
     if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return error.InvalidPath;
@@ -1582,6 +2266,16 @@ test "manifest metadata parser reads identity version and lists" {
         \\  .url_schemes = .{
         \\    .{ .scheme = "example-app" },
         \\  },
+        \\  .dmg = .{
+        \\    .volume_name = "Example Installer",
+        \\    .background = "assets/dmg-background.png",
+        \\    .window_width = 720,
+        \\    .window_height = 440,
+        \\    .icon_size = 144,
+        \\    .app_position = .{ .x = 180, .y = 210 },
+        \\    .applications_position = .{ .x = 540, .y = 210 },
+        \\    .applications_link = false,
+        \\  },
         \\}
     );
     defer metadata.deinit(std.testing.allocator);
@@ -1631,6 +2325,15 @@ test "manifest metadata parser reads identity version and lists" {
     try std.testing.expectEqualStrings("text/markdown", metadata.file_associations[0].mime_types[0]);
     try std.testing.expectEqualStrings("assets/markdown.icns", metadata.file_associations[0].icon.?);
     try std.testing.expectEqualStrings("example-app", metadata.url_schemes[0].scheme);
+    try std.testing.expectEqualStrings("Example Installer", metadata.dmg.volume_name.?);
+    try std.testing.expectEqualStrings("assets/dmg-background.png", metadata.dmg.background.?);
+    try std.testing.expectEqual(@as(u16, 720), metadata.dmg.window_width);
+    try std.testing.expectEqual(@as(u16, 440), metadata.dmg.window_height);
+    try std.testing.expectEqual(@as(u16, 144), metadata.dmg.icon_size);
+    try std.testing.expectEqual(@as(u16, 180), metadata.dmg.app_position.x);
+    try std.testing.expectEqual(@as(u16, 210), metadata.dmg.app_position.y);
+    try std.testing.expectEqual(@as(u16, 540), metadata.dmg.applications_position.x);
+    try std.testing.expect(!metadata.dmg.applications_link);
     try std.testing.expectEqualStrings("chromium", metadata.web_engine);
     try std.testing.expectEqualStrings("third_party/cef/macos", metadata.cef.dir);
     try std.testing.expect(metadata.cef.auto_install);
@@ -2393,4 +3096,334 @@ test "manifest validates the theme accent hex color" {
     try std.testing.expect(!isHexColor("#df267"));
     try std.testing.expect(!isHexColor("#df26700"));
     try std.testing.expect(!isHexColor("#df267g"));
+}
+
+test "DMG settings default to a complete drag-to-Applications layout" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try validateDmgSettings(metadata.dmg);
+    try std.testing.expectEqual(@as(u16, 660), metadata.dmg.window_width);
+    try std.testing.expectEqual(@as(u16, 400), metadata.dmg.window_height);
+    try std.testing.expectEqual(@as(u16, 128), metadata.dmg.icon_size);
+    try std.testing.expectEqual(@as(u16, 166), metadata.dmg.app_position.x);
+    try std.testing.expectEqual(@as(u16, 182), metadata.dmg.app_position.y);
+    try std.testing.expectEqual(@as(u16, 486), metadata.dmg.applications_position.x);
+    try std.testing.expectEqual(@as(u16, 182), metadata.dmg.applications_position.y);
+    try std.testing.expect(metadata.dmg.applications_link);
+    try std.testing.expect(metadata.dmg.background == null);
+    try std.testing.expectEqual(@as(usize, 0), metadata.dmg.items.len);
+}
+
+test "manifest validation does not apply an implicit DMG volume name" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-manifest-dmg-implicit-volume";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .display_name = "Example: Studio",
+        \\  .version = "1.0.0",
+        \\}
+    });
+
+    const result = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(result.ok);
+}
+
+test "DMG settings reject unsafe paths and out-of-window positions" {
+    try std.testing.expectError(error.InvalidPath, validateDmgSettings(.{ .background = "../outside.png" }));
+    try std.testing.expectError(error.InvalidDmgBackground, validateDmgSettings(.{ .background = "assets/background.svg" }));
+    try std.testing.expectError(error.InvalidDmgPosition, validateDmgSettings(.{ .app_position = .{ .x = 660, .y = 190 } }));
+    try std.testing.expectError(error.InvalidDmgVolumeName, validateDmgSettings(.{ .volume_name = "Bad/Name" }));
+    try validateDmgSettings(.{ .window_width = 400, .applications_link = false });
+    try validateDmgSettings(.{ .background = "assets/background.tiff" });
+}
+
+test "DMG package settings validate effective volume and app bundle names" {
+    var maximum_volume: [127]u8 = @splat('v');
+    try validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = &maximum_volume,
+        .version = "1.0.0",
+    });
+
+    var oversized_volume: [128]u8 = @splat('v');
+    try std.testing.expectError(error.InvalidDmgVolumeName, validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = &oversized_volume,
+        .version = "1.0.0",
+    }));
+
+    var maximum_stem: [251]u8 = @splat('a');
+    const maximum_items = [_]DmgItemMetadata{
+        .{ .kind = .app, .name = &maximum_stem, .position = .{ .x = 170, .y = 182 } },
+    };
+    try validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .version = "1.0.0",
+        .dmg = .{ .items = &maximum_items },
+    });
+
+    var oversized_stem: [252]u8 = @splat('a');
+    const oversized_items = [_]DmgItemMetadata{
+        .{ .kind = .app, .name = &oversized_stem, .position = .{ .x = 170, .y = 182 } },
+    };
+    try std.testing.expectError(error.InvalidDmgItem, validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .version = "1.0.0",
+        .dmg = .{ .items = &oversized_items },
+    }));
+
+    const conflicting_items = [_]DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .file, .path = "docs/demo.app", .name = "Demo.app", .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.DuplicateDmgItem, validateDmgPackageSettings(.{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = "Demo",
+        .version = "1.0.0",
+        .dmg = .{ .items = &conflicting_items },
+    }));
+}
+
+test "DMG background readers validate JPEG and TIFF envelopes" {
+    const jpeg =
+        "\xff\xd8" ++
+        "\xff\xc0\x00\x11\x08\x01\x90\x02\x94\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00" ++
+        "\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00" ++
+        "\x00\xff\xd9";
+    const jpeg_dimensions = jpegDimensions(jpeg) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 660), jpeg_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 400), jpeg_dimensions.height);
+    try std.testing.expect(jpegDimensions(jpeg[0 .. jpeg.len - 2]) == null);
+
+    // A complete 1x1 baseline TIFF: nine IFD entries followed by one strip
+    // byte. This makes the positive fixture a usable image, not merely a
+    // header carrying width and height tags.
+    var tiff: [123]u8 = @splat(0);
+    tiff[0] = 'I';
+    tiff[1] = 'I';
+    std.mem.writeInt(u16, tiff[2..4], 42, .little);
+    std.mem.writeInt(u32, tiff[4..8], 8, .little);
+    std.mem.writeInt(u16, tiff[8..10], 9, .little);
+    const entries = [_][4]u32{
+        .{ 256, 4, 1, 1 }, // ImageWidth
+        .{ 257, 4, 1, 1 }, // ImageLength
+        .{ 258, 3, 1, 8 }, // BitsPerSample
+        .{ 259, 3, 1, 1 }, // Compression: none
+        .{ 262, 3, 1, 1 }, // PhotometricInterpretation: black is zero
+        .{ 273, 4, 1, 122 }, // StripOffsets
+        .{ 277, 3, 1, 1 }, // SamplesPerPixel
+        .{ 278, 4, 1, 1 }, // RowsPerStrip
+        .{ 279, 4, 1, 1 }, // StripByteCounts
+    };
+    for (entries, 0..) |entry, index| {
+        const offset = 10 + index * 12;
+        std.mem.writeInt(u16, tiff[offset..][0..2], @intCast(entry[0]), .little);
+        std.mem.writeInt(u16, tiff[offset + 2 ..][0..2], @intCast(entry[1]), .little);
+        std.mem.writeInt(u32, tiff[offset + 4 ..][0..4], entry[2], .little);
+        std.mem.writeInt(u32, tiff[offset + 8 ..][0..4], entry[3], .little);
+    }
+    tiff[122] = 0;
+    const tiff_dimensions = tiffDimensions(&tiff) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), tiff_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 1), tiff_dimensions.height);
+    try std.testing.expect(tiffDimensions(tiff[0..122]) == null);
+}
+
+test "TIFF background reader validates indirect strips and BigTIFF payloads" {
+    var multi_strip_tiff: [80]u8 = @splat(0);
+    multi_strip_tiff[0] = 'I';
+    multi_strip_tiff[1] = 'I';
+    std.mem.writeInt(u16, multi_strip_tiff[2..4], 42, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[4..8], 8, .little);
+    std.mem.writeInt(u16, multi_strip_tiff[8..10], 4, .little);
+    const classic_entries = [_][4]u32{
+        .{ 256, 4, 1, 1 }, // ImageWidth
+        .{ 257, 4, 1, 2 }, // ImageLength
+        .{ 273, 4, 2, 62 }, // StripOffsets array
+        .{ 279, 4, 2, 70 }, // StripByteCounts array
+    };
+    for (classic_entries, 0..) |entry, index| {
+        const offset = 10 + index * 12;
+        std.mem.writeInt(u16, multi_strip_tiff[offset..][0..2], @intCast(entry[0]), .little);
+        std.mem.writeInt(u16, multi_strip_tiff[offset + 2 ..][0..2], @intCast(entry[1]), .little);
+        std.mem.writeInt(u32, multi_strip_tiff[offset + 4 ..][0..4], entry[2], .little);
+        std.mem.writeInt(u32, multi_strip_tiff[offset + 8 ..][0..4], entry[3], .little);
+    }
+    std.mem.writeInt(u32, multi_strip_tiff[62..66], 78, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[66..70], 79, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[70..74], 1, .little);
+    std.mem.writeInt(u32, multi_strip_tiff[74..78], 1, .little);
+    const multi_strip_dimensions = tiffDimensions(&multi_strip_tiff) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), multi_strip_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 2), multi_strip_dimensions.height);
+    try std.testing.expect(tiffDimensions(multi_strip_tiff[0..79]) == null);
+
+    var big_tiff: [113]u8 = @splat(0);
+    big_tiff[0] = 'I';
+    big_tiff[1] = 'I';
+    std.mem.writeInt(u16, big_tiff[2..4], 43, .little);
+    std.mem.writeInt(u16, big_tiff[4..6], 8, .little);
+    std.mem.writeInt(u64, big_tiff[8..16], 16, .little);
+    std.mem.writeInt(u64, big_tiff[16..24], 4, .little);
+    const big_entries = [_][4]u64{
+        .{ 256, 16, 1, 1 }, // ImageWidth
+        .{ 257, 16, 1, 1 }, // ImageLength
+        .{ 273, 16, 1, 112 }, // StripOffsets
+        .{ 279, 16, 1, 1 }, // StripByteCounts
+    };
+    for (big_entries, 0..) |entry, index| {
+        const offset = 24 + index * 20;
+        std.mem.writeInt(u16, big_tiff[offset..][0..2], @intCast(entry[0]), .little);
+        std.mem.writeInt(u16, big_tiff[offset + 2 ..][0..2], @intCast(entry[1]), .little);
+        std.mem.writeInt(u64, big_tiff[offset + 4 ..][0..8], entry[2], .little);
+        std.mem.writeInt(u64, big_tiff[offset + 12 ..][0..8], entry[3], .little);
+    }
+    const big_dimensions = tiffDimensions(&big_tiff) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), big_dimensions.width);
+    try std.testing.expectEqual(@as(usize, 1), big_dimensions.height);
+    try std.testing.expect(tiffDimensions(big_tiff[0..112]) == null);
+}
+
+test "DMG explicit items select and position Finder contents" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\  .dmg = .{
+        \\    .items = .{
+        \\      .{ .kind = "app", .position = .{ .x = 150, .y = 170 } },
+        \\      .{ .kind = "applications", .position = .{ .x = 510, .y = 170 } },
+        \\      .{ .kind = "file", .path = "docs/README.pdf", .name = "Read Me.pdf", .position = .{ .x = 260, .y = 330 } },
+        \\      .{ .kind = "link", .path = "/Library/QuickLook", .name = "QuickLook", .position = .{ .x = 400, .y = 330 } },
+        \\    },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try validateDmgSettings(metadata.dmg);
+    try std.testing.expectEqual(@as(usize, 4), metadata.dmg.items.len);
+    try std.testing.expectEqual(DmgItemKind.app, metadata.dmg.items[0].kind);
+    try std.testing.expectEqual(DmgItemKind.file, metadata.dmg.items[2].kind);
+    try std.testing.expectEqualStrings("Read Me.pdf", dmgItemDestinationName(metadata.dmg.items[2]).?);
+    try std.testing.expectEqualStrings("QuickLook", dmgItemDestinationName(metadata.dmg.items[3]).?);
+}
+
+test "DMG explicit items require one app and reject unsafe or duplicate destinations" {
+    const applications_only = [_]DmgItemMetadata{
+        .{ .kind = .applications, .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.InvalidDmgItem, validateDmgSettings(.{ .items = &applications_only }));
+
+    const duplicate_applications = [_]DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .applications, .position = .{ .x = 490, .y = 182 } },
+        .{ .kind = .link, .path = "/Applications", .name = "applications", .position = .{ .x = 330, .y = 320 } },
+    };
+    try std.testing.expectError(error.DuplicateDmgItem, validateDmgSettings(.{ .items = &duplicate_applications }));
+
+    const unsafe_file = [_]DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .file, .path = "../README.pdf", .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.InvalidPath, validateDmgSettings(.{ .items = &unsafe_file }));
+
+    const relative_link = [_]DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .link, .path = "Library/QuickLook", .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.InvalidDmgItem, validateDmgSettings(.{ .items = &relative_link }));
+}
+
+test "manifest validation resolves a custom DMG background beside app.zon" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-manifest-dmg-background";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/art");
+    const pixels = try gpa.alloc(u8, 320 * 240 * 4);
+    @memset(pixels, 255);
+    const encoded = try app_icon_tool.encodePng(gpa, pixels, 320, 240);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer.png", .data = encoded });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\  .dmg = .{ .background = "art/installer.png", .window_width = 320, .window_height = 240, .applications_link = false },
+        \\}
+    });
+
+    const valid = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(valid.ok);
+
+    const retina_pixels = try gpa.alloc(u8, 640 * 480 * 4);
+    @memset(retina_pixels, 255);
+    const retina_encoded = try app_icon_tool.encodePng(gpa, retina_pixels, 640, 480);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer@2x.png", .data = retina_encoded });
+    const retina_valid = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(retina_valid.ok);
+
+    const wrong_retina = try app_icon_tool.encodePng(gpa, retina_pixels[0 .. 640 * 479 * 4], 640, 479);
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer@2x.png", .data = wrong_retina });
+    const retina_mismatch = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!retina_mismatch.ok);
+    try std.testing.expect(std.mem.indexOf(u8, retina_mismatch.message, "@2x background is 640x479") != null);
+    try cwd.deleteFile(std.testing.io, root ++ "/art/installer@2x.png");
+
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer.png", .data = "not a png" });
+    const malformed = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!malformed.ok);
+    try std.testing.expect(std.mem.indexOf(u8, malformed.message, "not a structurally valid") != null);
+
+    try cwd.deleteFile(std.testing.io, root ++ "/art/installer.png");
+    const missing = try validateFile(gpa, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!missing.ok);
+    try std.testing.expect(std.mem.indexOf(u8, missing.message, "dmg background could not be read") != null);
+}
+
+test "manifest validation resolves explicit DMG file items beside app.zon" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-manifest-dmg-items";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/docs");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/docs/README.pdf", .data = "fixture" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/app.zon", .data =
+        \\.{
+        \\  .id = "com.example.app",
+        \\  .name = "example",
+        \\  .version = "1.0.0",
+        \\  .dmg = .{ .items = .{
+        \\    .{ .kind = "app", .position = .{ .x = 170, .y = 182 } },
+        \\    .{ .kind = "file", .path = "docs/README.pdf", .position = .{ .x = 490, .y = 182 } },
+        \\  } },
+        \\}
+    });
+
+    const valid = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(valid.ok);
+    try cwd.deleteFile(std.testing.io, root ++ "/docs/README.pdf");
+    const missing = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
+    try std.testing.expect(!missing.ok);
+    try std.testing.expect(std.mem.indexOf(u8, missing.message, "dmg item source could not be read") != null);
 }

@@ -67,6 +67,13 @@ export interface FetchRoute<M extends Msgish> {
   readonly err: M["kind"];
 }
 
+export interface FetchStreamRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly line: M["kind"];
+  readonly ok: M["kind"];
+  readonly err: M["kind"];
+}
+
 export interface SpawnRoute<M extends Msgish> {
   readonly key?: string;
   readonly stdin?: Uint8Array;
@@ -170,6 +177,10 @@ export interface FetchSpec {
   readonly timeoutMs?: number;
 }
 
+export interface FetchStreamSpec extends FetchSpec {
+  readonly maxLineBytes?: number;
+}
+
 export interface NotificationSpec {
   readonly title: Uint8Array;
   readonly subtitle?: Uint8Array;
@@ -216,6 +227,19 @@ export type CmdData =
       readonly errKind: string;
       readonly method: FetchMethod;
       readonly timeoutMs: number;
+      readonly url: Uint8Array;
+      readonly headers: readonly { readonly name: string; readonly value: string | Uint8Array }[];
+      readonly body: Uint8Array;
+    }
+  | {
+      readonly op: "fetch_stream";
+      readonly key: string;
+      readonly lineKind: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly method: FetchMethod;
+      readonly timeoutMs: number;
+      readonly maxLineBytes: number;
       readonly url: Uint8Array;
       readonly headers: readonly { readonly name: string; readonly value: string | Uint8Array }[];
       readonly body: Uint8Array;
@@ -391,11 +415,29 @@ export const Cmd = {
     return { op: "write_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
   },
 
-  fetch(spec: FetchSpec, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+  fetch(
+    spec: FetchStreamSpec,
+    route: { readonly key?: string; readonly line?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
     const names = Object.keys(spec.headers ?? {}).sort();
     const headers: { readonly name: string; readonly value: string | Uint8Array }[] = [];
     for (const n of names) {
       headers.push({ name: n, value: spec.headers![n]! });
+    }
+    if (route.line !== undefined) {
+      return {
+        op: "fetch_stream",
+        key: route.key ?? "",
+        lineKind: route.line,
+        okKind: route.ok,
+        errKind: route.err,
+        method: spec.method ?? "GET",
+        timeoutMs: spec.timeoutMs ?? 0,
+        maxLineBytes: spec.maxLineBytes ?? 0,
+        url: spec.url,
+        headers: headers,
+        body: spec.body ?? new Uint8Array(0),
+      };
     }
     return {
       op: "fetch",

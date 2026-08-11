@@ -86,7 +86,7 @@ export interface AudioCaptureRoute<M extends Msgish> {
 export type PtyState = "output" | "exit";
 export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
 export type PtyEventArm = {
-    readonly key: string;
+    readonly key: Uint8Array;
     readonly state: PtyState;
     readonly bytes: Uint8Array;
     readonly code: number;
@@ -119,6 +119,12 @@ export interface WriteRoute<M extends Msgish> {
 export interface FetchRoute<M extends Msgish> {
     readonly key?: string;
     readonly ok: FetchedKind<M>;
+    readonly err: BytesKind<M>;
+}
+export interface FetchStreamRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly line: BytesKind<M>;
+    readonly ok: TimestampKind<M>;
     readonly err: BytesKind<M>;
 }
 export interface SpawnRoute<M extends Msgish> {
@@ -174,6 +180,9 @@ export interface FetchSpec {
     readonly body?: Uint8Array;
     readonly timeoutMs?: number;
 }
+export interface FetchStreamSpec extends FetchSpec {
+    readonly maxLineBytes?: number;
+}
 export interface NotificationSpec {
     readonly title: Uint8Array;
     readonly subtitle?: Uint8Array;
@@ -224,6 +233,21 @@ export type Cmd<M extends Msgish> = {
     readonly errKind: string;
     readonly method: FetchMethod;
     readonly timeoutMs: number;
+    readonly url: Uint8Array;
+    readonly headers: readonly {
+        readonly name: string;
+        readonly value: string | Uint8Array;
+    }[];
+    readonly body: Uint8Array;
+} | {
+    readonly op: "fetch_stream";
+    readonly key: string;
+    readonly lineKind: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly method: FetchMethod;
+    readonly timeoutMs: number;
+    readonly maxLineBytes: number;
     readonly url: Uint8Array;
     readonly headers: readonly {
         readonly name: string;
@@ -348,6 +372,8 @@ export type Cmd<M extends Msgish> = {
 export declare function hostRecordBytes(payload: HostRecord): Uint8Array;
 declare function hostCmd(name: string, payload: Uint8Array | HostRecord): Cmd<never>;
 declare function hostCmd(name: string, ...args: readonly number[]): Cmd<never>;
+declare function fetchCmd<M extends Msgish>(spec: FetchSpec, route: FetchRoute<M>): Cmd<M>;
+declare function fetchCmd<M extends Msgish>(spec: FetchStreamSpec, route: FetchStreamRoute<M>): Cmd<M>;
 export declare const Cmd: {
     none: Cmd<never>;
     persist(): Cmd<never>;
@@ -357,7 +383,7 @@ export declare const Cmd: {
     cancel(key: string): Cmd<never>;
     readFile<M extends Msgish>(path: Uint8Array, route: RequestRoute<M>): Cmd<M>;
     writeFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
-    fetch<M extends Msgish>(spec: FetchSpec, route: FetchRoute<M>): Cmd<M>;
+    fetch: typeof fetchCmd;
     clipboardWrite(bytes: Uint8Array): Cmd<never>;
     clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
     showNotification(spec: NotificationSpec): Cmd<never>;

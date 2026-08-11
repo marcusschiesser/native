@@ -30,6 +30,7 @@ pub const RawManifest = struct {
     shortcuts: []const RawShortcut = &.{},
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
+    dmg: RawDmg = .{},
 };
 
 pub const RawCef = struct {
@@ -220,4 +221,38 @@ pub const RawFileAssociation = struct {
 pub const RawUrlScheme = struct {
     scheme: []const u8,
     role: []const u8 = "viewer",
+};
+
+pub const RawDmgPosition = struct {
+    x: u16,
+    y: u16,
+};
+
+/// One visible Finder item in an explicitly art-directed DMG. `app` names
+/// the packaged bundle (and may override its DMG-only display name),
+/// `applications` creates the conventional alias,
+/// `file` copies a project-relative file or directory, and `link` creates a
+/// symlink to an absolute path. An explicit list replaces the legacy fixed
+/// app/Applications pair.
+pub const RawDmgItem = struct {
+    kind: []const u8,
+    path: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    position: RawDmgPosition,
+};
+
+/// Finder presentation for the macOS archive produced by
+/// `native package --target macos --archive`. The defaults are a complete
+/// drag-to-Applications layout; apps only declare this block when they want
+/// to art-direct it.
+pub const RawDmg = struct {
+    volume_name: ?[]const u8 = null,
+    background: ?[]const u8 = null,
+    window_width: u16 = 660,
+    window_height: u16 = 400,
+    icon_size: u16 = 128,
+    app_position: RawDmgPosition = .{ .x = 166, .y = 182 },
+    applications_position: RawDmgPosition = .{ .x = 486, .y = 182 },
+    applications_link: bool = true,
+    items: []const RawDmgItem = &.{},
 };

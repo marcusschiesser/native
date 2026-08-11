@@ -3560,7 +3560,7 @@ export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "
 export interface Model { readonly chunks: number; readonly errs: number; }
 export type Msg =
   | { readonly kind: "go"; readonly which: number }
-  | { readonly kind: "pty_evt"; readonly key: string; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
+  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
 export function initialModel(): Model { return { chunks: 0, errs: 0 }; }
 `;
 
@@ -3749,6 +3749,20 @@ export function f(x: number, y: number): number { return pick(x, y, x < y); }`,
 // event stream — emit-clean in their documented shapes, gated with the
 // taught rules everywhere else.
 const streamingCases: Case[] = [
+  {
+    name: "fetch streams route response lines and one terminal HTTP status",
+    src: `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+${streamMsg}
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.fetch(
+      { url: asciiBytes("https://a.test/events"), method: "POST", headers: { accept: "text/event-stream" }, body: model.out, timeoutMs: 60000, maxLineBytes: 65536 },
+      { key: "events", line: "line", ok: "done", err: "failed" },
+    )];
+${streamTail}
+`,
+  },
   {
     name: "the window verbs emit in their documented shapes",
     src: `
@@ -4403,7 +4417,7 @@ export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "
 export interface Model { readonly chunks: number; readonly errs: number; }
 export type Msg =
   | { readonly kind: "go"; readonly which: number }
-  | { readonly kind: "pty_evt"; readonly key: string; readonly state: NarrowState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
+  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: NarrowState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
 export function initialModel(): Model { return { chunks: 0, errs: 0 }; }
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
@@ -4507,7 +4521,7 @@ export type NarrowReason = "exited" | "cancelled";
 export interface Model { readonly chunks: number; readonly errs: number; }
 export type Msg =
   | { readonly kind: "go"; readonly which: number }
-  | { readonly kind: "pty_evt"; readonly key: string; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: NarrowReason; readonly signal: number; readonly droppedWrites: number };
+  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: NarrowReason; readonly signal: number; readonly droppedWrites: number };
 export function initialModel(): Model { return { chunks: 0, errs: 0 }; }
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {

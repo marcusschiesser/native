@@ -2,9 +2,12 @@
 // v2 effect record — an init-command request, keyed replace and cancel,
 // a fire-and-forget bytes command, Cmd.now, a model-gated timer
 // subscription, the named engine ops (readFile/writeFile/fetch/
-// clipboard) plus the one-shot delay, and the streaming ops (a real
-// subprocess spawn with line/exit routing and mid-stream cancel, and
-// the audio and video event streams with their control verbs).
+// clipboard) plus the one-shot delay, and the streaming ops (a line-
+// streamed fetch, a real subprocess spawn with line/exit routing and
+// mid-stream cancel, and the audio and video event streams with their
+// control verbs), plus pty spawn and its seven-field event
+// record. Keeping pty here makes the generated facade compile as part of
+// the real external-core lane, not only the frontend conformance pass.
 // Transpiled at build time by the repo's own transpiler (never committed
 // as Zig) and driven through the real runtime by
 // tests/ts-core/host_e2e_tests.zig.
@@ -22,6 +25,10 @@ export type ImageState =
   | "alloc_failed";
 
 export type ChannelState = "data" | "closed" | "rejected";
+
+export type PtyState = "output" | "exit";
+
+export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
 
 export interface Model {
   readonly polling: boolean;
@@ -103,6 +110,9 @@ export type Msg =
   | { readonly kind: "wrote" }
   | { readonly kind: "get" }
   | { readonly kind: "fetched"; readonly status: number; readonly body: Uint8Array }
+  | { readonly kind: "stream" }
+  | { readonly kind: "streamed"; readonly status: number }
+  | { readonly kind: "cancel_stream" }
   | { readonly kind: "share" }
   | { readonly kind: "paste" }
   | { readonly kind: "later" }
@@ -142,7 +152,9 @@ export type Msg =
   | { readonly kind: "mix_reject" }
   | { readonly kind: "mix_reject_flip" }
   | { readonly kind: "chan_evt"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number }
-  | { readonly kind: "notify" };
+  | { readonly kind: "notify" }
+  | { readonly kind: "open_pty" }
+  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -234,6 +246,18 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       ];
     case "fetched":
       return [{ ...model, code: msg.status, status: msg.body }, Cmd.none];
+    case "stream":
+      return [
+        model,
+        Cmd.fetch(
+          { url: asciiBytes("https://status.test/events"), method: "POST", headers: { accept: "text/event-stream" }, body: model.status, timeoutMs: 60000, maxLineBytes: 65536 },
+          { key: "events", line: "lined", ok: "streamed", err: "failed" },
+        ),
+      ];
+    case "streamed":
+      return [{ ...model, code: msg.status }, Cmd.none];
+    case "cancel_stream":
+      return [model, Cmd.cancel("events")];
     case "share":
       return [model, Cmd.clipboardWrite(model.status)];
     case "paste":
@@ -428,6 +452,10 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
         subtitle: asciiBytes("native-sdk"),
         body: asciiBytes("TS core notification"),
       })];
+    case "open_pty":
+      return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "fixture-pty", event: "pty_evt" })];
+    case "pty_evt":
+      return [{ ...model, status: msg.key }, Cmd.none];
   }
 }
 

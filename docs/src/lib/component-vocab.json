@@ -413,6 +413,10 @@
       "doc": "Width floor (plain number) without width's definite max: the element may grow past it but never shrink below. On split panes it bounds the divider drag."
     },
     {
+      "name": "max-width",
+      "doc": "Width ceiling (plain number) without width's definite min: the element still shrinks with a narrow parent. Use a growing child inside a centered row for a responsive content column."
+    },
+    {
       "name": "expanded",
       "doc": "Tree rows (role=\"treeitem\"): disclosure state (true/false or a {binding}). Omit on leaves; expanded rows collapse on Left, collapsed ones expand on Right, both through on-toggle - the model owns the state."
     },
@@ -427,6 +431,10 @@
     {
       "name": "autofocus",
       "doc": "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create."
+    },
+    {
+      "name": "submit-on-enter",
+      "doc": "textarea only: true makes plain Enter dispatch on-submit while Shift+Enter inserts a newline; Cmd/Ctrl+Enter still submits. False or absent keeps the multiline default where Enter inserts and submission uses the primary chord."
     },
     {
       "name": "icon",
