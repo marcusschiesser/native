@@ -318,6 +318,12 @@ export type Cmd<M extends Msgish> = {
     readonly label: string;
     readonly url: Uint8Array;
 } | {
+    readonly op: "window_hide";
+    readonly label: string;
+} | {
+    readonly op: "dock_presence";
+    readonly visible: boolean;
+} | {
     readonly op: "quit_app";
 } | {
     readonly op: "image_load";
@@ -410,6 +416,10 @@ export declare const Cmd: {
     videoSetLoop(key: string, loop: boolean): Cmd<never>;
     showWindow(label: string): Cmd<never>;
     navigateWebView(label: string, url: Uint8Array): Cmd<never>;
+    hideWindow(label: string): Cmd<never>;
+    setDockPresence(visible: boolean): Cmd<never>;
+    launchAtLoginStatus<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
+    setLaunchAtLogin<M extends Msgish>(enabled: boolean, route: RequestRoute<M>): Cmd<M>;
     quitApp(): Cmd<never>;
     imageLoad<M extends Msgish>(id: number, source: ImageSource, route: ImageRoute<M>): Cmd<M>;
     imageCancel(id: number): Cmd<never>;

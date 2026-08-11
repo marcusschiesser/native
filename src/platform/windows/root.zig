@@ -160,6 +160,7 @@ extern fn native_sdk_windows_cancel_timer(host: *WindowsHost, timer_id: u64) voi
 extern fn native_sdk_windows_focus_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_close_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_minimize_window(host: *WindowsHost, window_id: u64) c_int;
+extern fn native_sdk_windows_hide_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_show_window(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_close_policy(host: *WindowsHost, window_id: u64, close_policy: c_int) c_int;
 extern fn native_sdk_windows_create_view(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, gpu_backend_request: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
@@ -434,6 +435,7 @@ pub const WindowsPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
                 .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
@@ -936,6 +938,7 @@ fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     return switch (mode) {
         .immediate => 0,
         .on_first_present => 1,
+        .hidden => 2,
     };
 }
 
@@ -945,6 +948,7 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (options.always_on_top) flags |= 1 << 1;
     if (options.click_through) flags |= 1 << 2;
     if (!options.activate_on_show) flags |= 1 << 3;
+    if (!options.allows_fullscreen) flags |= 1 << 4;
     return flags;
 }
 
@@ -983,6 +987,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
         .scale_factor = 1,
         .open = true,
         .focused = options.activate_on_show and options.show == .immediate,
+        .hidden = options.show == .hidden,
     };
 }
 
@@ -999,6 +1004,11 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_windows_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn hideWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_windows_hide_window(self.host, window_id) == 0) return error.WindowNotFound;
 }
 
 fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
@@ -2442,6 +2452,70 @@ test "windows first-present windows have a fallback reveal deadline" {
         host_source,
         "window.deferred_show_started_ms = window.show_on_first_present ? GetTickCount64() : 0;",
     ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (!window.hwnd || window.shown || window.policy_hidden) return;",
+    ) != null);
+}
+
+test "windows busy message loop drains due gpu frames outside input callbacks" {
+    // The waitable timer is the precise idle wake source, but queued input
+    // may win the message-loop race. Pin the complementary post-dispatch
+    // drain: it must run only after DispatchMessage returns (outside the
+    // runtime callback that requested the frame) while the host is still
+    // running. The helper must retire the one-shot before emitting so
+    // synchronous presentation can re-arm it, and abort if that callback
+    // stops the host so no later due surface receives a post-shutdown event.
+    const host_source = @embedFile("webview2_host.cpp");
+    const run_at = std.mem.indexOf(u8, host_source, "void native_sdk_windows_run(") orelse return error.TestExpectedEqual;
+    const run_tail = host_source[run_at..];
+    const dispatch_at = std.mem.indexOf(u8, run_tail, "DispatchMessageW(&message);") orelse return error.TestExpectedEqual;
+    const post_dispatch = run_tail[dispatch_at..];
+    try std.testing.expect(std.mem.indexOf(u8, post_dispatch, "if (host->running) gpuSurfaceDrainDueFrameEmissions(host);") != null);
+
+    const helper_at = std.mem.indexOf(u8, host_source, "static void gpuSurfaceDrainDueFrameEmissions(Host *host)") orelse return error.TestExpectedEqual;
+    const helper_tail = host_source[helper_at..];
+    const helper_end = std.mem.indexOf(u8, helper_tail, "static void paintGpuSurface(") orelse return error.TestExpectedEqual;
+    const helper = helper_tail[0..helper_end];
+    try std.testing.expect(std.mem.indexOf(u8, helper, "if (!host || !host->running) return;") != null);
+    const loop_at = std.mem.indexOf(u8, helper, "for (const std::string &key : due_keys)") orelse return error.TestExpectedEqual;
+    const loop = helper[loop_at..];
+    const before_emit_guard_at = std.mem.indexOf(u8, loop, "if (!host->running) return;") orelse return error.TestExpectedEqual;
+    const kill_at = std.mem.indexOf(u8, helper, "KillTimer(hwnd, kGpuEmitTimerId);") orelse return error.TestExpectedEqual;
+    const clear_at = std.mem.indexOf(u8, helper, "view.gpu_emission_scheduled = false;") orelse return error.TestExpectedEqual;
+    const emit_at = std.mem.indexOf(u8, helper, "gpuSurfaceEmitFrame(host, view, hwnd);") orelse return error.TestExpectedEqual;
+    const after_emit = helper[emit_at + "gpuSurfaceEmitFrame(host, view, hwnd);".len ..];
+    try std.testing.expect(std.mem.indexOf(u8, after_emit, "if (!host->running) return;") != null);
+    try std.testing.expect(loop_at + before_emit_guard_at < emit_at);
+    try std.testing.expect(kill_at < clear_at);
+    try std.testing.expect(clear_at < emit_at);
+}
+
+test "windows gpu frame deadlines use a high resolution waitable timer" {
+    // A nominal 16.67 ms SetTimer is commonly rounded to the legacy timer
+    // grid. Pin the host's precise path: one process-owned high-resolution
+    // waitable timer follows the earliest scheduled surface, participates in
+    // the message loop, refreshes after an emission, and closes at teardown.
+    const host_source = @embedFile("webview2_host.cpp");
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "CREATE_WAITABLE_TIMER_HIGH_RESOLUTION") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "SetWaitableTimer(host->gpu_frame_wake_timer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "MsgWaitForMultipleObjectsEx(") != null);
+
+    const schedule_at = std.mem.indexOf(u8, host_source, "static void gpuSurfaceScheduleFrameEmission(Host *host, NativeView &view)") orelse return error.TestExpectedEqual;
+    const schedule_tail = host_source[schedule_at..];
+    const schedule_end = std.mem.indexOf(u8, schedule_tail, "static void gpuSurfaceDrainDueFrameEmissions(") orelse return error.TestExpectedEqual;
+    const schedule = schedule_tail[0..schedule_end];
+    const scheduled_at = std.mem.indexOf(u8, schedule, "view.gpu_emission_scheduled = true;") orelse return error.TestExpectedEqual;
+    const wake_at = std.mem.indexOf(u8, schedule, "gpuSurfaceRefreshFrameWakeTimer(host);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(scheduled_at < wake_at);
+
+    const timer_at = std.mem.indexOf(u8, host_source, "if (wparam == kGpuEmitTimerId)") orelse return error.TestExpectedEqual;
+    const timer_tail = host_source[timer_at..];
+    const emit_at = std.mem.indexOf(u8, timer_tail, "gpuSurfaceEmitFrame(host, *view, hwnd);") orelse return error.TestExpectedEqual;
+    const refresh_at = std.mem.indexOf(u8, timer_tail, "gpuSurfaceRefreshFrameWakeTimer(host);") orelse return error.TestExpectedEqual;
+    try std.testing.expect(emit_at < refresh_at);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "gpuSurfaceDestroyFrameWakeTimer(host);") != null);
 }
 
 test "windows window focus includes focused native child views" {

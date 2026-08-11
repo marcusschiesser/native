@@ -299,6 +299,12 @@
 //!                  main window. The runtime applies the normal WebView
 //!                  label, target, and origin-policy checks; invalid or
 //!                  denied requests do not abort dispatch.
+//!   window_hide -> `fx.hideWindow(label)` — retain the live window and
+//!                  its views while ordering it out; window_show is the
+//!                  inverse.
+//!   dock_presence -> `fx.setDockPresence(visible)` — macOS regular/
+//!                  accessory activation-policy switch; unsupported
+//!                  hosts safely ignore it.
 //!   quit_app    -> `fx.quitApp()` — the graceful terminate through the
 //!                  same shutdown path a last-window close takes.
 //!   show_notification -> `fx.showNotification` fire-and-forget; invalid or
@@ -1111,7 +1117,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // webview_navigate [op][label_len][label]
                     //                  [url_len u32 LE][url]
-                    0x21 => {
+                    0x23 => {
                         const label = takeShortBytes(cmd, &at);
                         const url = takeLongBytes(cmd, &at);
                         fx.navigateWebView(label, url);
@@ -1349,6 +1355,13 @@ pub fn TsCoreHost(comptime core: type) type {
                             .max_line_bytes = if (max_line_bytes == 0) runtime_effects.max_effect_line_bytes else max_line_bytes,
                         });
                     },
+                    // window_hide [op][label_len][label]
+                    0x21 => {
+                        const label = takeShortBytes(cmd, &at);
+                        fx.hideWindow(label);
+                    },
+                    // dock_presence [op][visible u8]
+                    0x22 => fx.setDockPresence(takeByte(cmd, &at) != 0),
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }

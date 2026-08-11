@@ -660,6 +660,63 @@ test "canvas shell windows present before they become visible" {
             try std.testing.expect(harness.null_platform.window_visible[i]);
         }
     }
+
+    // An explicitly hidden startup/menu-bar surface is stronger than
+    // present-before-show: even a completed first canvas frame does not
+    // reveal it. Only the app's show/focus verb does.
+    const hidden_views = [_]app_manifest.ShellView{
+        .{ .label = "agent-canvas", .kind = .gpu_surface, .fill = true },
+    };
+    const hidden = try harness.runtime.createShellWindow(.{
+        .label = "agent-host",
+        .title = "Agent Host",
+        .initially_hidden = true,
+        .views = &hidden_views,
+    }, null);
+    const hidden_index = for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |info, i| {
+        if (info.id == hidden.id) break i;
+    } else return error.WindowNotFound;
+    try std.testing.expectEqual(platform.WindowShowMode.hidden, harness.null_platform.window_show[hidden_index]);
+    const hidden_runtime_index = for (harness.runtime.windows[0..harness.runtime.window_count], 0..) |entry, i| {
+        if (entry.info.id == hidden.id) break i;
+    } else return error.WindowNotFound;
+    try std.testing.expect(harness.runtime.windows[hidden_runtime_index].info.hidden);
+    try harness.runtime.options.platform.services.presentGpuSurfacePacket(.{
+        .window_id = hidden.id,
+        .label = "agent-canvas",
+        .surface_size = geometry.SizeF.init(720, 480),
+        .json = "{\"v\":1}",
+    });
+    try std.testing.expect(!harness.null_platform.window_visible[hidden_index]);
+    try harness.runtime.showWindow(hidden.id);
+    try std.testing.expect(harness.null_platform.window_visible[hidden_index]);
+
+    // An app-driven hide has the same strength even when it lands while
+    // an ordinary canvas window is still waiting for its first present.
+    // Neither that present nor the native fallback may undo the hide.
+    const deferred_hidden_views = [_]app_manifest.ShellView{
+        .{ .label = "deferred-canvas", .kind = .gpu_surface, .fill = true },
+    };
+    const deferred_hidden = try harness.runtime.createShellWindow(.{
+        .label = "deferred-hidden",
+        .title = "Deferred Hidden",
+        .views = &deferred_hidden_views,
+    }, null);
+    const deferred_hidden_index = for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |info, i| {
+        if (info.id == deferred_hidden.id) break i;
+    } else return error.WindowNotFound;
+    try std.testing.expectEqual(platform.WindowShowMode.on_first_present, harness.null_platform.window_show[deferred_hidden_index]);
+    try harness.runtime.hideWindow(deferred_hidden.id);
+    try harness.runtime.options.platform.services.presentGpuSurfacePacket(.{
+        .window_id = deferred_hidden.id,
+        .label = "deferred-canvas",
+        .surface_size = geometry.SizeF.init(720, 480),
+        .json = "{\"v\":1}",
+    });
+    try std.testing.expect(!harness.null_platform.window_visible[deferred_hidden_index]);
+    try std.testing.expect(harness.null_platform.windows[deferred_hidden_index].hidden);
+    try harness.runtime.showWindow(deferred_hidden.id);
+    try std.testing.expect(harness.null_platform.window_visible[deferred_hidden_index]);
 }
 
 test "overlay window presentation reaches create and passive show preserves focus" {
@@ -685,6 +742,7 @@ test "overlay window presentation reaches create and passive show preserves focu
         .always_on_top = true,
         .click_through = true,
         .activate_on_show = false,
+        .allows_fullscreen = false,
         .views = &views,
     }, platform.WebViewSource.html("<h1>Overlay</h1>"));
     const index = for (harness.null_platform.windows[0..harness.null_platform.window_count], 0..) |window, i| {
@@ -695,6 +753,7 @@ test "overlay window presentation reaches create and passive show preserves focu
     try std.testing.expect(harness.null_platform.window_always_on_top[index]);
     try std.testing.expect(harness.null_platform.window_click_through[index]);
     try std.testing.expect(!harness.null_platform.window_activate_on_show[index]);
+    try std.testing.expect(!harness.null_platform.window_allows_fullscreen[index]);
 
     const runtime_index = for (harness.runtime.windows[0..harness.runtime.window_count], 0..) |window, i| {
         if (window.info.id == info.id) break i;
@@ -709,6 +768,18 @@ test "overlay window presentation reaches create and passive show preserves focu
     // whose implicit creation/show policy is passive.
     try harness.runtime.focusWindow(info.id);
     try std.testing.expect(harness.runtime.windows[runtime_index].info.focused);
+
+    // App-driven hide retains the window and its views; show is the
+    // inverse, and a refused hide rolls the optimistic state back.
+    try harness.runtime.hideWindow(info.id);
+    try std.testing.expect(harness.runtime.windows[runtime_index].info.hidden);
+    try std.testing.expect(!harness.runtime.windows[runtime_index].info.focused);
+    try std.testing.expectEqual(@as(u32, 1), harness.null_platform.hideCountForWindow(info.id));
+    try harness.runtime.showWindow(info.id);
+    try std.testing.expect(!harness.runtime.windows[runtime_index].info.hidden);
+    harness.null_platform.fail_next_hide_window = true;
+    try std.testing.expectError(error.HideFailed, harness.runtime.hideWindow(info.id));
+    try std.testing.expect(!harness.runtime.windows[runtime_index].info.hidden);
 }
 
 test "runtime lays out created shell windows with native returned bounds" {
@@ -942,6 +1013,55 @@ test "startup scene adoption preserves manifest passive show policy" {
     try runtime.showWindow(1);
     try std.testing.expectEqual(@as(u32, 1), null_platform.window_show_count[0]);
     try std.testing.expect(!null_platform.windows[0].focused);
+    try std.testing.expect(!runtime.windows[0].info.focused);
+}
+
+test "startup hidden policy is visible to the start hook" {
+    const TestApp = struct {
+        saw_startup_window: bool = false,
+        saw_hidden: bool = false,
+
+        fn start(context: *anyopaque, runtime: *Runtime) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var windows_buffer: [1]platform.WindowInfo = undefined;
+            const windows = runtime.listWindows(&windows_buffer);
+            self.saw_startup_window = windows.len == 1;
+            self.saw_hidden = windows.len == 1 and windows[0].hidden;
+        }
+
+        fn scene(context: *anyopaque) anyerror!app_manifest.ShellConfig {
+            _ = context;
+            return .{};
+        }
+
+        fn app(self: *@This()) App {
+            return .{
+                .context = self,
+                .name = "hidden-startup-state",
+                .start_fn = start,
+                .scene_fn = scene,
+            };
+        }
+    };
+
+    var null_platform = platform.NullPlatform.initWithOptions(.{}, .system, .{
+        .app_name = "Hidden Startup",
+        .main_window = .{
+            .label = "main",
+            .show = .hidden,
+        },
+    });
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    Runtime.initAt(runtime, .{ .platform = null_platform.platform() });
+    defer runtime.deinit();
+    var app_state: TestApp = .{};
+
+    try runtime.dispatchPlatformEvent(app_state.app(), .app_start);
+
+    try std.testing.expect(app_state.saw_startup_window);
+    try std.testing.expect(app_state.saw_hidden);
+    try std.testing.expect(runtime.windows[0].info.hidden);
     try std.testing.expect(!runtime.windows[0].info.focused);
 }
 

@@ -2634,9 +2634,17 @@ const FacadeEmitter = struct {
             \\      nscfWShortText(sink, cmd.label);
             \\      return;
             \\    case "webview_navigate":
-            \\      nscfWU8(sink, 0x21);
+            \\      nscfWU8(sink, 0x23);
             \\      nscfWShortText(sink, cmd.label);
             \\      nscfWBytes(sink, cmd.url);
+            \\      return;
+            \\    case "window_hide":
+            \\      nscfWU8(sink, 0x21);
+            \\      nscfWShortText(sink, cmd.label);
+            \\      return;
+            \\    case "dock_presence":
+            \\      nscfWU8(sink, 0x22);
+            \\      nscfWU8(sink, cmd.visible ? 1 : 0);
             \\      return;
             \\    case "quit_app":
             \\      nscfWU8(sink, 0x11);
