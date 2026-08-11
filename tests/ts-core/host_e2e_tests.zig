@@ -66,6 +66,8 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.save")) return .save;
     if (std.mem.eql(u8, name, "core.load")) return .load;
     if (std.mem.eql(u8, name, "core.get")) return .get;
+    if (std.mem.eql(u8, name, "core.stream")) return .stream;
+    if (std.mem.eql(u8, name, "core.cancelstream")) return .cancel_stream;
     if (std.mem.eql(u8, name, "core.share")) return .share;
     if (std.mem.eql(u8, name, "core.paste")) return .paste;
     if (std.mem.eql(u8, name, "core.later")) return .later;
@@ -574,6 +576,47 @@ test "fetch parks on the engine and routes the { status, body } record and err r
     try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
     try std.testing.expectEqualStrings("timed_out", Bridge.model().lastErr);
     try std.testing.expectEqual(@as(f64, 404), Bridge.model().code);
+}
+
+test "streaming fetch routes response lines and one terminal status through the compiled TypeScript core" {
+    HostStub.reset();
+    const h = try Harness.createFake();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try fx.feedHostResult(status_request_key, true, "prompt");
+    try h.wake();
+    try h.menu("core.stream");
+
+    const request = fx.pendingFetchAt(0).?;
+    try std.testing.expectEqual(job_spawn_key, request.key);
+    try std.testing.expectEqual(runtime_ns.FetchResponseMode.stream, request.response);
+    try std.testing.expectEqual(@as(usize, 65_536), request.max_line_bytes);
+    try std.testing.expectEqual(std.http.Method.POST, request.method);
+    try std.testing.expectEqualStrings("https://status.test/events", request.url);
+    try std.testing.expectEqualStrings("prompt", request.body);
+    try std.testing.expectEqualStrings("text/event-stream", request.headers[0].value);
+
+    try fx.feedLine(job_spawn_key, "data: first");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lines), 1), Bridge.model().lines);
+    try std.testing.expectEqualStrings("data: first", Bridge.model().lastLine);
+
+    try fx.feedLine(job_spawn_key, "data: second");
+    try fx.feedResponse(job_spawn_key, 206, "ignored");
+    try h.wake();
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().lines), 2), Bridge.model().lines);
+    try std.testing.expectEqualStrings("data: second", Bridge.model().lastLine);
+    try std.testing.expectEqual(@as(@TypeOf(Bridge.model().code), 206), Bridge.model().code);
+    try std.testing.expectEqual(@as(i64, 0), Bridge.model().failures);
+
+    // A second stream can reuse the key after the terminal; cancellation is
+    // loud for streams and routes the ordinary err arm.
+    try h.menu("core.stream");
+    try h.menu("core.cancelstream");
+    try h.wake();
+    try std.testing.expectEqual(@as(i64, 1), Bridge.model().failures);
+    try std.testing.expectEqualStrings("cancelled", Bridge.model().lastErr);
 }
 
 test "a delay arms a real platform timer, fires once, re-arms on re-issue, and cancels" {

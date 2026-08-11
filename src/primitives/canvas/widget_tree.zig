@@ -128,7 +128,7 @@ pub fn widgetScrollsAxis(widget: Widget, axis: token_model.ScrollAxis) bool {
     return switch (axis) {
         .vertical => widget.kind != .scroll_view or widget.scroll_axes.scrollsVertically() or widget.layout.virtualized,
         .horizontal => (widget.kind == .scroll_view and widget.scroll_axes.scrollsHorizontally() and !widget.layout.virtualized) or
-            (widget.kind == .textarea and widget.code_editor and widget.text_no_wrap),
+            (widget.kind == .textarea and widget.runtime_flags.code_editor and widget.text_no_wrap),
     };
 }
 

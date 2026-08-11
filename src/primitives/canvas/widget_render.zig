@@ -206,6 +206,9 @@ fn emitWidgetLayoutDragPreview(builder: *Builder, layout: anytype, tokens: Desig
 
     var preview_state = WidgetRenderState{
         .rendering_drag_preview = true,
+        .drag_preview_id = source_id,
+        .drag_preview_origin = state.drag_preview_origin,
+        .drag_preview_offset = state.drag_preview_offset,
     };
     // Keep disclosure content in the preview in the same visible phase as
     // the standing tree, while dropping focus/hover/press chrome from the
@@ -215,18 +218,31 @@ fn emitWidgetLayoutDragPreview(builder: *Builder, layout: anytype, tokens: Desig
     const ancestor_transform = widgetLayoutNodeAncestorEmissionTransform(layout, source_index) orelse return error.InvalidTransform;
     const wrap_ancestor_transform = !affinesEqual(ancestor_transform, Affine.identity());
     const inverse_ancestor_transform = if (wrap_ancestor_transform) ancestor_transform.inverse() orelse return error.InvalidTransform else Affine.identity();
-    const current_frame = layout.nodes[source_index].frame.normalized();
-    const current_origin = ancestor_transform.transformPoint(geometry.PointF.init(current_frame.x, current_frame.y));
-    const source_layout_origin = state.drag_preview_origin orelse geometry.PointF.init(current_frame.x, current_frame.y);
-    const source_origin = ancestor_transform.transformPoint(source_layout_origin);
-    const translate_x = source_origin.x + state.drag_preview_offset.dx - current_origin.x;
-    const translate_y = source_origin.y + state.drag_preview_offset.dy - current_origin.y;
-    const translation = Affine.translate(translate_x, translate_y);
+    const translation = widgetLayoutDragPreviewTranslation(layout, source_index, state, ancestor_transform);
     try builder.transform(translation);
     if (wrap_ancestor_transform) try builder.transform(ancestor_transform);
     try emitWidgetLayoutNode(builder, layout, source_index, tokens, preview_state, .none);
     if (wrap_ancestor_transform) try builder.transform(inverse_ancestor_transform);
-    try builder.transform(Affine.translate(-translate_x, -translate_y));
+    try builder.transform(Affine.translate(-translation.tx, -translation.ty));
+}
+
+/// The window-space translation around a floating drag preview. The same
+/// value drives both the builder stack and span visibility below, so a rich
+/// text child is culled at its lifted pose rather than its standing slot.
+fn widgetLayoutDragPreviewTranslation(
+    layout: anytype,
+    source_index: usize,
+    state: WidgetRenderState,
+    ancestor_transform: Affine,
+) Affine {
+    const current_frame = layout.nodes[source_index].frame.normalized();
+    const current_origin = ancestor_transform.transformPoint(geometry.PointF.init(current_frame.x, current_frame.y));
+    const source_layout_origin = state.drag_preview_origin orelse geometry.PointF.init(current_frame.x, current_frame.y);
+    const source_origin = ancestor_transform.transformPoint(source_layout_origin);
+    return Affine.translate(
+        source_origin.x + state.drag_preview_offset.dx - current_origin.x,
+        source_origin.y + state.drag_preview_offset.dy - current_origin.y,
+    );
 }
 
 /// The union of the layout's root-node frames: the whole laid-out
@@ -265,6 +281,46 @@ fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine
     return transform;
 }
 
+/// The transform active while `node_index` paints in this frame. Unlike the
+/// standing emission transform above, this includes presentation-only layout
+/// motion and the window-level translation around a floating drag preview.
+fn widgetLayoutNodePresentationTransform(
+    layout: anytype,
+    node_index: usize,
+    state: WidgetRenderState,
+    outer_transform: Affine,
+) ?Affine {
+    // Static/ordinary frames are overwhelmingly common. Keep their culling
+    // path byte-for-byte with the standing transform walk; only late passes
+    // and active layout motion pay for presentation-state lookups.
+    if (!state.rendering_drag_preview and state.layout_motions.len == 0) {
+        return widgetLayoutNodeEmissionTransform(layout, node_index);
+    }
+    if (node_index >= layout.nodes.len) return null;
+    var indices: [widget_layout.max_widget_depth]usize = undefined;
+    var len: usize = 0;
+    var current: ?usize = node_index;
+    while (current) |index| {
+        if (index >= layout.nodes.len or len >= indices.len) return null;
+        indices[len] = index;
+        len += 1;
+        if (widget_tree.widgetIsAnchored(layout.nodes[index].widget)) break;
+        current = layout.nodes[index].parent_index;
+    }
+
+    var transform = outer_transform;
+    while (len > 0) {
+        len -= 1;
+        const widget = layout.nodes[indices[len]].widget;
+        const motion = state.layoutMotionOffset(widget.id);
+        if (motion.dx != 0 or motion.dy != 0) {
+            transform = transform.multiply(Affine.translate(motion.dx, motion.dy));
+        }
+        transform = transform.multiply(widgetTransform(widget));
+    }
+    return transform;
+}
+
 /// The transform stack a node inherits at its ordinary paint position. A
 /// drag preview is hoisted to the window-level late pass to escape clipping,
 /// so it must explicitly restore this stack before painting the source.
@@ -279,24 +335,45 @@ fn widgetLayoutNodeAncestorEmissionTransform(layout: anytype, node_index: usize)
 
 /// The rectangular part of one layout node that can reach the surface,
 /// returned in the node's untransformed layout coordinate space. Window
-/// and ancestor clip bounds are intersected in device space, then mapped
-/// back through the exact transform stack active at node emission. Code
-/// paragraphs use this so transformed sources neither disappear nor lose
-/// later pages while still charging only visible runs to display budgets.
-fn widgetLayoutNodeVisibleBounds(layout: anytype, node_index: usize, bounds: geometry.RectF) ?geometry.RectF {
+/// and active ancestor clip bounds are intersected in device space, then
+/// mapped back through the exact PRESENTATION transform stack. Floating
+/// drag previews and clip-escaping landing motions stop at their lifted
+/// subtree root, so the culling policy matches the late unclipped paint pass.
+fn widgetLayoutNodeVisibleBounds(
+    layout: anytype,
+    node_index: usize,
+    bounds: geometry.RectF,
+    state: WidgetRenderState,
+) ?geometry.RectF {
     if (node_index >= layout.nodes.len) return null;
     var device_visible = (widgetLayoutRootBounds(layout) orelse return null).normalized();
+    const has_layout_motion = state.layout_motions.len > 0;
+    const outer_transform = if (state.rendering_drag_preview) blk: {
+        const preview_id = state.drag_preview_id orelse return null;
+        const preview_index = widget_tree.widgetIndexById(layout, preview_id) orelse return null;
+        const ancestor_transform = widgetLayoutNodeAncestorEmissionTransform(layout, preview_index) orelse return null;
+        break :blk widgetLayoutDragPreviewTranslation(layout, preview_index, state, ancestor_transform);
+    } else Affine.identity();
 
     var current = node_index;
     while (true) {
-        // Hoisted anchored surfaces escape their original ancestor clips,
-        // but the window intersection still bounds display-list demand.
-        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) break;
+        const current_widget = layout.nodes[current].widget;
+        const is_drag_preview_root = state.rendering_drag_preview and
+            state.drag_preview_id != null and
+            state.drag_preview_id.? == current_widget.id;
+        // Every late window-level pass escapes clips ABOVE its lifted root,
+        // but nested clips inside that subtree still constrain descendants.
+        if (widget_tree.widgetIsAnchored(current_widget) or
+            is_drag_preview_root or
+            has_layout_motion and state.layoutMotionEscapesAncestorClips(current_widget.id))
+        {
+            break;
+        }
         const parent_index = layout.nodes[current].parent_index orelse break;
         if (parent_index >= layout.nodes.len) return null;
         const parent = layout.nodes[parent_index];
         if (widgetClipsContent(parent.widget)) {
-            const parent_transform = widgetLayoutNodeEmissionTransform(layout, parent_index) orelse return null;
+            const parent_transform = widgetLayoutNodePresentationTransform(layout, parent_index, state, outer_transform) orelse return null;
             const device_clip = parent_transform.transformRect(parent.frame.normalized());
             device_visible = geometry.RectF.intersection(device_visible, device_clip);
             if (device_visible.isEmpty()) return null;
@@ -304,7 +381,7 @@ fn widgetLayoutNodeVisibleBounds(layout: anytype, node_index: usize, bounds: geo
         current = parent_index;
     }
 
-    const transform = widgetLayoutNodeEmissionTransform(layout, node_index) orelse return null;
+    const transform = widgetLayoutNodePresentationTransform(layout, node_index, state, outer_transform) orelse return null;
     const inverse = transform.inverse() orelse return null;
     const local_visible = inverse.transformRect(device_visible);
     const clipped = geometry.RectF.intersection(bounds.normalized(), local_visible.normalized());
@@ -397,6 +474,16 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
                         try emitVisibleCodeTextSpansWidget(builder, paint_widget, tokens, clipped, .{});
                     }
                 }
+            } else if (paint_widget.spans.len > 0) {
+                if (tree_visible_bounds) |visible_bounds| {
+                    const clipped = geometry.RectF.intersection(
+                        paint_widget.frame.normalized(),
+                        visible_bounds.normalized(),
+                    );
+                    if (!clipped.isEmpty()) {
+                        try emitVisibleTextSpansWidget(builder, paint_widget, tokens, clipped);
+                    }
+                }
             } else {
                 try emitTextWidget(builder, paint_widget, tokens);
             }
@@ -411,7 +498,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
         .icon_button => try widget_render_controls.emitIconButtonWidget(builder, paint_widget, tokens),
         .select => try widget_render_controls.emitSelectWidget(builder, paint_widget, tokens),
         .input, .text_field => try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
-        .textarea => if (paint_widget.code_editor)
+        .textarea => if (paint_widget.runtime_flags.code_editor)
             try emitCodeEditorWidget(builder, paint_widget, tokens)
         else
             try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
@@ -714,7 +801,7 @@ fn emitWidgetLayoutNodeContent(
             try emitWidgetLayoutChildren(builder, layout, node_index, tokens, state);
             try builder.popClip();
             // Native scroll drivers own the (OS overlay) scrollbar.
-            if (!paint_widget.native_scroll) {
+            if (!paint_widget.runtime_flags.native_scroll) {
                 try widget_render_scroll.emitScrollViewScrollbars(
                     builder,
                     paint_widget.frame,
@@ -780,8 +867,12 @@ fn emitWidgetLayoutNodeContent(
         .menu_surface, .dropdown_menu => try widget_render_surfaces.emitMenuSurfaceWidgetChrome(builder, paint_widget, tokens),
         .text => {
             if (isSyntaxCodeParagraph(paint_widget)) {
-                if (widgetLayoutNodeVisibleBounds(layout, node_index, paint_widget.frame)) |visible_bounds| {
+                if (widgetLayoutNodeVisibleBounds(layout, node_index, paint_widget.frame, state)) |visible_bounds| {
                     try emitVisibleCodeTextSpansWidget(builder, paint_widget, tokens, visible_bounds, .{});
+                }
+            } else if (paint_widget.spans.len > 0) {
+                if (widgetLayoutNodeVisibleBounds(layout, node_index, paint_widget.frame, state)) |visible_bounds| {
+                    try emitVisibleTextSpansWidget(builder, paint_widget, tokens, visible_bounds);
                 }
             } else {
                 try emitTextWidget(builder, paint_widget, tokens);
@@ -797,7 +888,7 @@ fn emitWidgetLayoutNodeContent(
         .icon_button => try widget_render_controls.emitIconButtonWidget(builder, paint_widget, tokens),
         .select => try widget_render_controls.emitSelectWidget(builder, paint_widget, tokens),
         .input, .text_field => try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
-        .textarea => if (paint_widget.code_editor)
+        .textarea => if (paint_widget.runtime_flags.code_editor)
             try emitCodeEditorWidget(builder, paint_widget, tokens)
         else
             try widget_render_controls.emitTextFieldWidget(builder, paint_widget, tokens),
@@ -871,7 +962,7 @@ fn emitWidgetLayoutScrollableChildren(
     // Native scroll drivers own the (OS overlay) scrollbar. These are
     // the virtualized containers — vertical machinery, so only the
     // vertical bar can exist.
-    if (!widget.native_scroll) {
+    if (!widget.runtime_flags.native_scroll) {
         try widget_render_scroll.emitScrollViewScrollbars(
             builder,
             widget.frame,
@@ -1114,7 +1205,7 @@ fn emitScrollViewWidget(builder: *Builder, widget: Widget, tokens: DesignTokens,
     try emitWidgetChildren(builder, widget.children, tokens, depth);
     try builder.popClip();
     // Native scroll drivers own the (OS overlay) scrollbar.
-    if (!widget.native_scroll) {
+    if (!widget.runtime_flags.native_scroll) {
         try widget_render_scroll.emitScrollViewScrollbars(
             builder,
             widget.frame,
@@ -1389,112 +1480,194 @@ fn emitStaticTextSelectionBounded(
     }
 }
 
-/// Draw a span paragraph: one single-line text command per laid-out run
-/// plus thin fill rects for underline/strikethrough decorations. Runs and
-/// decorations get stable hashed command ids derived from the widget id
-/// and their ordinal, so retained diffing works across frames.
+/// Full-frame compatibility path for span-bearing composite leaves such
+/// as table cells. Ordinary `.text` nodes pass their real viewport below.
 fn emitTextSpansWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    return emitVisibleTextSpansWidget(builder, widget, tokens, widget.frame);
+}
+
+/// Draw the visible pages of an ordinary span paragraph: one single-line
+/// text command per laid-out run plus backgrounds and thin decoration
+/// rects. Layout keeps the full paragraph height, while painting pages the
+/// bounded run store through the current viewport. Without this split, a
+/// transcript longer than `max_text_span_lines_per_paragraph` reserved its
+/// real height but painted only its first page, leaving a blank tail after
+/// the scroll moved beyond line 128.
+fn emitVisibleTextSpansWidget(
+    builder: *Builder,
+    widget: Widget,
+    tokens: DesignTokens,
+    visible_bounds: geometry.RectF,
+) Error!void {
     const content = widget_metrics.widgetTextSpanContentFrame(widget, tokens);
     const layout_options = widget_metrics.widgetTextSpanLayoutOptions(
         widget,
         tokens,
         textWrapMaxWidth(tokens, content.width),
     );
-    var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
-    const layout = text_spans_model.layoutTextSpans(
-        widget.spans,
-        layout_options,
-        &runs,
-    );
+    const line_height = text_spans_model.textSpanLineHeight(widget.spans, layout_options);
+    if (line_height <= 0 or !std.math.isFinite(line_height)) return;
 
-    try emitCodeLineDecorations(builder, widget, widget.spans, tokens, content, widget.frame, layout_options, null, true);
-    // Span background highlights (intra-line diff emphasis): one
-    // full-line-height rect per run, the same geometry selection rects
-    // use, painted before selection and glyphs. Edge-snapped rects of
-    // adjacent runs share their boundary, so equal backgrounds abut
-    // without seams.
-    for (layout.runs, 0..) |run, ordinal| {
-        if (run.text.len == 0) continue;
-        const background = widget.spans[run.span_index].background orelse continue;
-        const bounds = text_spans_model.textSpanRunBounds(layout, run);
-        try builder.fillRect(.{
-            .id = textSpanBackgroundCommandId(widget.id, ordinal),
-            .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+    const first_visible_line: usize = if (std.math.isFinite(visible_bounds.y - content.y) and
+        visible_bounds.y > content.y)
+        @intFromFloat(@floor((visible_bounds.y - content.y) / line_height))
+    else
+        0;
+    const last_visible_line: usize = if (std.math.isFinite(visible_bounds.maxY() - content.y) and
+        visible_bounds.maxY() > content.y)
+        @intFromFloat(@floor((visible_bounds.maxY() - content.y) / line_height))
+    else
+        first_visible_line;
+    const lines_per_page = text_spans_model.max_text_span_lines_per_paragraph;
+    const first_page_line = (first_visible_line / lines_per_page) * lines_per_page;
+
+    var runs: [text_spans_model.max_text_span_runs_per_paragraph]text_spans_model.TextSpanRun = undefined;
+
+    // Backgrounds from every visible page stay behind the paragraph's
+    // selection layer and glyphs, preserving the original paint order.
+    var page_first_line = first_page_line;
+    while (true) {
+        const layout = text_spans_model.layoutTextSpansFromLine(
+            widget.spans,
+            layout_options,
+            page_first_line,
+            &runs,
+        );
+        const page_index = page_first_line / lines_per_page;
+        const ordinal_base = page_index *| text_spans_model.max_text_span_runs_per_paragraph;
+        for (layout.runs, 0..) |run, ordinal| {
+            if (run.text.len == 0) continue;
+            const background = widget.spans[run.span_index].background orelse continue;
+            const bounds = text_spans_model.textSpanRunBounds(layout, run);
+            const frame = geometry.RectF.init(
                 content.x + bounds.x,
                 content.y + bounds.y,
                 bounds.width,
                 bounds.height,
-            )),
-            .fill = colorFill(text_spans_model.textSpanColorValue(tokens.colors, background)),
-        });
+            );
+            if (!frame.intersects(visible_bounds)) continue;
+            try builder.fillRect(.{
+                // Page zero keeps the historical ids byte-for-byte; later
+                // pages occupy disjoint ordinal bands.
+                .id = textSpanBackgroundCommandId(widget.id, ordinal_base +| ordinal),
+                .rect = pixelSnapGeometryRect(tokens, frame),
+                .fill = colorFill(text_spans_model.textSpanColorValue(tokens.colors, background)),
+            });
+        }
+        const next_first_line = page_first_line +| lines_per_page;
+        if (next_first_line <= page_first_line or
+            next_first_line > last_visible_line or
+            next_first_line >= layout.line_count)
+        {
+            break;
+        }
+        page_first_line = next_first_line;
     }
 
     try emitStaticTextSelection(builder, widget, tokens);
 
-    var decoration_ordinal: usize = 0;
-    for (layout.runs, 0..) |run, ordinal| {
-        if (run.text.len == 0) continue;
-        const span = widget.spans[run.span_index];
-        const is_link = span.link.len > 0;
-        const color = if (span.color) |ref|
-            text_spans_model.textSpanColorValue(tokens.colors, ref)
-        else if (is_link)
-            widgetForegroundColor(widget, tokens, tokens.colors.accent)
-        else
-            widgetForegroundColor(widget, tokens, tokens.colors.text);
-        const origin = pixelSnapTextPoint(tokens, geometry.PointF.init(content.x + run.x, content.y + run.baseline));
-        try builder.drawText(.{
-            .id = textSpanRunCommandId(widget.id, ordinal),
-            .font_id = run.font_id,
-            .size = run.size,
-            .origin = origin,
-            .color = color,
-            .text = run.text,
-            // Wrapping already happened at the span level (each run is one
-            // line segment), so the options carry no wrap work — they carry
-            // the measurement seam. Renderers that walk per-cluster
-            // advances (the reference renderer behind every automation
-            // screenshot) then advance with the same provider layout
-            // positioned the runs with; without it a provider-kerned prose
-            // run repainted at estimator advances overran the next span's
-            // x and visually swallowed the inter-span space
-            // ("remaining`experimental_`" -> "remainingexperimental_").
-            .text_layout = .{
-                .max_width = 0,
-                .line_height = layout.line_height,
-                .wrap = .none,
-                .alignment = .start,
-                .measure = tokens.text_measure,
-            },
-        });
+    page_first_line = first_page_line;
+    while (true) {
+        const layout = text_spans_model.layoutTextSpansFromLine(
+            widget.spans,
+            layout_options,
+            page_first_line,
+            &runs,
+        );
+        const page_index = page_first_line / lines_per_page;
+        const ordinal_base = page_index *| text_spans_model.max_text_span_runs_per_paragraph;
+        const decoration_base = page_index *| (text_spans_model.max_text_span_runs_per_paragraph * 2);
+        var decoration_ordinal: usize = 0;
+        for (layout.runs, 0..) |run, ordinal| {
+            if (run.text.len == 0) continue;
+            const span = widget.spans[run.span_index];
+            const is_link = span.link.len > 0;
+            const underline_ordinal: ?usize = if (span.underline or is_link) blk: {
+                const value = decoration_base +| decoration_ordinal;
+                decoration_ordinal += 1;
+                break :blk value;
+            } else null;
+            const strikethrough_ordinal: ?usize = if (span.strikethrough) blk: {
+                const value = decoration_base +| decoration_ordinal;
+                decoration_ordinal += 1;
+                break :blk value;
+            } else null;
+            const bounds = text_spans_model.textSpanRunBounds(layout, run);
+            const run_frame = geometry.RectF.init(
+                content.x + bounds.x,
+                content.y + bounds.y,
+                bounds.width,
+                bounds.height,
+            );
+            if (!run_frame.intersects(visible_bounds)) continue;
 
-        const thickness = @max(1, tokens.stroke.hairline);
-        if (span.underline or is_link) {
-            try builder.fillRect(.{
-                .id = textSpanDecorationCommandId(widget.id, decoration_ordinal),
-                .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-                    content.x + run.x,
-                    content.y + run.baseline + @max(1, run.size * 0.1),
-                    run.width,
-                    thickness,
-                )),
-                .fill = colorFill(color),
+            const color = if (span.color) |ref|
+                text_spans_model.textSpanColorValue(tokens.colors, ref)
+            else if (is_link)
+                widgetForegroundColor(widget, tokens, tokens.colors.accent)
+            else
+                widgetForegroundColor(widget, tokens, tokens.colors.text);
+            const origin = pixelSnapTextPoint(tokens, geometry.PointF.init(content.x + run.x, content.y + run.baseline));
+            try builder.drawText(.{
+                .id = textSpanRunCommandId(widget.id, ordinal_base +| ordinal),
+                .font_id = run.font_id,
+                .size = run.size,
+                .origin = origin,
+                .color = color,
+                .text = run.text,
+                // Wrapping already happened at the span level (each run is one
+                // line segment), so the options carry no wrap work — they carry
+                // the measurement seam. Renderers that walk per-cluster
+                // advances (the reference renderer behind every automation
+                // screenshot) then advance with the same provider layout
+                // positioned the runs with; without it a provider-kerned prose
+                // run repainted at estimator advances overran the next span's
+                // x and visually swallowed the inter-span space
+                // ("remaining`experimental_`" -> "remainingexperimental_").
+                .text_layout = .{
+                    .max_width = 0,
+                    .line_height = layout.line_height,
+                    .wrap = .none,
+                    .alignment = .start,
+                    .measure = tokens.text_measure,
+                },
             });
-            decoration_ordinal += 1;
+
+            const thickness = @max(1, tokens.stroke.hairline);
+            if (underline_ordinal) |decoration_id_ordinal| {
+                try builder.fillRect(.{
+                    .id = textSpanDecorationCommandId(widget.id, decoration_id_ordinal),
+                    .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+                        content.x + run.x,
+                        content.y + run.baseline + @max(1, run.size * 0.1),
+                        run.width,
+                        thickness,
+                    )),
+                    .fill = colorFill(color),
+                });
+            }
+            if (strikethrough_ordinal) |decoration_id_ordinal| {
+                try builder.fillRect(.{
+                    .id = textSpanDecorationCommandId(widget.id, decoration_id_ordinal),
+                    .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
+                        content.x + run.x,
+                        content.y + run.baseline - run.size * 0.3,
+                        run.width,
+                        thickness,
+                    )),
+                    .fill = colorFill(color),
+                });
+            }
         }
-        if (span.strikethrough) {
-            try builder.fillRect(.{
-                .id = textSpanDecorationCommandId(widget.id, decoration_ordinal),
-                .rect = pixelSnapGeometryRect(tokens, geometry.RectF.init(
-                    content.x + run.x,
-                    content.y + run.baseline - run.size * 0.3,
-                    run.width,
-                    thickness,
-                )),
-                .fill = colorFill(color),
-            });
-            decoration_ordinal += 1;
+
+        const next_first_line = page_first_line +| lines_per_page;
+        if (next_first_line <= page_first_line or
+            next_first_line > last_visible_line or
+            next_first_line >= layout.line_count)
+        {
+            break;
         }
+        page_first_line = next_first_line;
     }
 }
 
@@ -1603,10 +1776,10 @@ fn emitVisibleCodeTextSpansWidget(
     visible_bounds: geometry.RectF,
     paint: CodeTextPaint,
 ) Error!void {
-    if (widget.code_editor and widget.text_no_wrap) {
+    if (widget.runtime_flags.code_editor and widget.text_no_wrap) {
         return emitVisibleEditableCodeLines(builder, widget, tokens, visible_bounds, paint);
     }
-    if (widget.code_editor) {
+    if (widget.runtime_flags.code_editor) {
         return emitVisibleWrappedEditableCodeLines(builder, widget, tokens, visible_bounds, paint);
     }
     const spans = widget.spans;
@@ -2226,7 +2399,7 @@ fn emitCodeLineDecorations(
     while (line_start <= widget.text.len) : (logical_line += 1) {
         // A terminal newline closes the preceding painted line; the span
         // breaker intentionally does not reserve another empty visual line.
-        if (line_start == widget.text.len and widget.text.len > 0 and !widget.code_editor) break;
+        if (line_start == widget.text.len and widget.text.len > 0 and !widget.runtime_flags.code_editor) break;
         const newline = std.mem.indexOfScalarPos(u8, widget.text, line_start, '\n');
         const line_end = newline orelse widget.text.len;
         const line = widget.text[line_start..line_end];
@@ -4114,8 +4287,17 @@ fn widgetWithFrame(widget: Widget, frame: geometry.RectF) Widget {
 fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
     var copy = widget;
     if (state.focused_id != null or state.focus_visible_id != null) {
-        copy.state.focused = if (state.focus_visible_id) |focus_visible_id|
-            copy.id != 0 and copy.id == focus_visible_id
+        // A menu's active row is logical focus, regardless of whether
+        // the menu was opened with the pointer or keyboard. Menu items
+        // render that state as a quiet full-row wash and never as a
+        // focus-ring outline. Every other widget keeps the modality-
+        // aware focus-visible projection used for keyboard-only rings.
+        const painted_focus_id = if (copy.kind == .menu_item)
+            state.focused_id
+        else
+            state.focus_visible_id;
+        copy.state.focused = if (painted_focus_id) |focused_id|
+            copy.id != 0 and copy.id == focused_id
         else
             false;
     }

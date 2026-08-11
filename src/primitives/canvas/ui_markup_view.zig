@@ -364,6 +364,15 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
                     }
                 }
             }
+            // Only textarea has a configurable Enter-vs-newline policy.
+            // Mirrors validation and the compiled engine.
+            if (kind != .textarea) {
+                for (node.attrs) |attribute| {
+                    if (std.mem.eql(u8, attribute.name, "submit-on-enter")) {
+                        return self.failNode(node, markup.submit_on_enter_element_message);
+                    }
+                }
+            }
             // The overflow policy's closed literal vocabulary. Mirrors
             // the validator and the compiled engine's compile error;
             // bindings resolve below like any enum option.

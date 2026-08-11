@@ -375,15 +375,17 @@ test "tree keyboard navigation can select without dispatching pointer activation
     }).?);
 }
 
-test "textarea keyboard: enter edits a newline, submit rides the primary chord" {
+test "textarea keyboard: the default and chat-composer Enter policies stay distinct" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
 
     var ui = InboxUi.init(arena_state.allocator());
     const tree = try ui.finalize(ui.column(.{ .gap = 8 }, .{
         ui.el(.textarea, .{ .on_input = InboxUi.inputMsg(.draft), .on_submit = .add }, .{}),
+        ui.el(.textarea, .{ .submit_on_enter = true, .on_input = InboxUi.inputMsg(.draft), .on_submit = .add }, .{}),
     }));
-    const textarea = findByKind(tree.root, .textarea).?;
+    const textarea = tree.root.children[0];
+    const prompt = tree.root.children[1];
 
     // Plain Enter is an EDIT: the model's on_input hears the newline the
     // runtime applied to the retained text — never a submit.
@@ -406,6 +408,13 @@ test "textarea keyboard: enter edits a newline, submit rides the primary chord" 
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(textarea.id, cmd_shift_enter));
     const alt_enter = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "enter", .modifiers = .{ .alt = true } };
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(textarea.id, alt_enter));
+
+    // A chat composer opts into plain Enter submission, but Shift+Enter
+    // remains the explicit multiline gesture. The primary chord remains
+    // accepted too, preserving the standard textarea shortcut.
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(prompt.id, enter).?);
+    try testing.expectEqualStrings("\n", tree.msgForKeyboard(prompt.id, shift_enter).?.draft.insert_text);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(prompt.id, cmd_enter).?);
 }
 
 test "single-line keyboard fallback derivation sanitizes line breaks like the runtime seam" {
@@ -758,13 +767,14 @@ test "wrapped text reserves its wrapped height in a definite-width pane" {
     try testing.expect(below_frame.?.y >= wrapped_frame.?.y + wrapped_frame.?.height);
 }
 
-test "explicit sizes are definite except on resizable" {
+test "explicit sizes are definite, max width is a ceiling, and resizable keeps its exception" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
 
     var ui = InboxUi.init(arena_state.allocator());
     const tree = try ui.finalize(ui.column(.{}, .{
         ui.el(.panel, .{ .width = 240, .height = 40 }, .{}),
+        ui.el(.panel, .{ .max_width = 720 }, .{}),
         // Resizable keeps width as the initial/min width only: the engine's
         // drag handle writes larger frames past it.
         ui.el(.resizable, .{ .width = 240 }, .{}),
@@ -776,7 +786,11 @@ test "explicit sizes are definite except on resizable" {
     try testing.expectEqual(@as(f32, 40), panel.layout.min_size.height);
     try testing.expectEqual(@as(f32, 40), panel.layout.max_size.height);
 
-    const resizable = tree.root.children[1];
+    const capped = tree.root.children[1];
+    try testing.expectEqual(@as(f32, 0), capped.layout.min_size.width);
+    try testing.expectEqual(@as(f32, 720), capped.layout.max_size.width);
+
+    const resizable = tree.root.children[2];
     try testing.expectEqual(@as(f32, 240), resizable.layout.min_size.width);
     try testing.expectEqual(@as(f32, 0), resizable.layout.max_size.width);
 }

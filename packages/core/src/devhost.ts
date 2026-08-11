@@ -33,8 +33,8 @@
 //   - timer/now/delay arms carry exactly one number payload field (pinned
 //     by tsc), so the harness constructs them shape-directed without
 //     needing the field's name.
-// Every other effect (files, fetch, clipboard, notifications, spawn, audio,
-// host commands)
+// Every other effect (files, buffered/streaming fetch, clipboard,
+// notifications, spawn, audio, host commands)
 // is printed as `cmd ...` and NOT performed — feed its result back yourself
 // as an ordinary Msg line. That is the point: results are plain messages,
 // and the loop stays deterministic.
@@ -161,7 +161,7 @@ function performCmd(cmd: Cmdish): void {
       if (delays.delete(key)) {
         say(`cmd cancel ${key} (delay dropped)`);
       } else {
-        say(`cmd cancel ${key} (not performed here - a live request or named op drops silently; a live spawn ends loudly, err arm "cancelled")`);
+        say(`cmd cancel ${key} (not performed here - a live request or buffered named op drops silently; a live spawn or streaming fetch ends loudly, err arm "cancelled")`);
       }
       return;
     }

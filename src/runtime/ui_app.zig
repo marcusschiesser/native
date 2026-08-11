@@ -418,6 +418,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// The scaffold wires this to app.zon's `theme` field
             /// through `app_runner.manifestThemePack()`.
             theme: canvas.ThemePack = .house,
+            /// Model-derived built-in theme pack. When set, this is
+            /// consulted on every rebuild instead of the static `theme`
+            /// field, while the runtime continues to own the live system
+            /// appearance axes (scheme, contrast, reduced motion), the
+            /// surface scale, and `theme_accent`. Explicit `tokens` or
+            /// `tokens_fn` still take precedence because those paths own
+            /// the complete token register.
+            theme_fn: ?*const fn (model: *const ModelT) canvas.ThemePack = null,
             /// The app's ONE-accent brand statement over the stock
             /// tokens: when set (and the app claims neither `tokens`
             /// nor `tokens_fn` — apps that own their tokens own their
@@ -1428,13 +1436,20 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             switch (control) {
                 .arm => self.effects.armReplay(),
                 .feed => |record| switch (record.kind) {
-                    .line => try self.effects.feedLine(record.key, record.payload),
+                    .line => try self.effects.feedLineWithMetadata(record.key, record.payload, record.truncated, record.dropped),
                     .exit => {
                         if (record.payload.len > 0) try self.effects.feedOutput(record.key, record.payload);
                         if (record.stderr_tail.len > 0) try self.effects.feedStderr(record.key, record.stderr_tail);
                         try self.effects.feedExitReason(record.key, record.code, record.exit_reason);
                     },
-                    .response => try self.effects.feedResponseOutcome(record.key, record.fetch_outcome, record.status, record.payload),
+                    .response => try self.effects.feedResponseOutcomeWithMetadata(
+                        record.key,
+                        record.fetch_outcome,
+                        record.status,
+                        record.payload,
+                        record.truncated,
+                        record.dropped,
+                    ),
                     .file => try self.effects.feedFileResult(record.key, record.file_outcome, record.payload),
                     .clipboard => try self.effects.feedClipboardResult(record.key, record.clipboard_outcome, record.payload),
                     .credential => try self.effects.feedCredentialResult(record.key, record.credential_outcome, ""),
@@ -1733,7 +1748,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 },
                 .contrast = if (self.system_appearance.high_contrast) .high else .standard,
                 .reduce_motion = self.system_appearance.reduce_motion,
-                .pack = self.options.theme,
+                .pack = if (self.options.theme_fn) |theme_fn| theme_fn(&self.model) else self.options.theme,
             });
             if (self.options.theme_accent) |accent| {
                 // The manifest accent layers over the resolved pack —

@@ -253,6 +253,68 @@ pub fn restoreCanvasWidgetLayoutScrollOffsets(
     }
 }
 
+/// Clamp a fresh or genuinely PROGRAMMATIC source offset before a native
+/// scroll driver adopts the layout. Native drivers otherwise keep their raw
+/// runtime offset so an Elm-style rebuild cannot interrupt rubber-band
+/// overscroll. A source value that exactly echoes the retained runtime value
+/// is the same user-driven state, not a programmatic move, and stays exempt.
+///
+/// This pass is what makes an intentionally out-of-range source value useful
+/// as "scroll to the end": descendants are first laid out at that source
+/// value, then translated back to the content-range clamp before either the
+/// retained tree or the native driver sees them.
+fn clampCanvasWidgetLayoutProgrammaticScrollOffsets(
+    nodes: []canvas.WidgetLayoutNode,
+    source: canvas.WidgetLayoutTree,
+    previous_runtime_offsets: []const CanvasWidgetSourceScrollEntry,
+    previous_source_offsets: []const CanvasWidgetSourceScrollEntry,
+) void {
+    for (nodes, 0..) |node, index| {
+        if (node.widget.kind != .scroll_view or node.widget.id == 0) continue;
+        if (node.widget.layout.virtualized and !canvas.widgetVirtualRuntimeScrolled(node.widget)) continue;
+
+        const source_node = source.findById(node.widget.id) orelse continue;
+        const previous_runtime = canvasWidgetSourceScrollEntryById(previous_runtime_offsets, node.widget.id);
+        const previous_source = canvasWidgetSourceScrollEntryById(previous_source_offsets, node.widget.id);
+        const fresh = previous_source == null;
+        const source_moved_y = fresh or source_node.widget.value != previous_source.?.value;
+        const source_moved_x = fresh or source_node.widget.value_x != previous_source.?.value_x;
+        const runtime_echo_y = previous_runtime != null and source_node.widget.value == previous_runtime.?.value;
+        const runtime_echo_x = previous_runtime != null and source_node.widget.value_x == previous_runtime.?.value_x;
+        const clamp_y = source_moved_y and !runtime_echo_y;
+        const clamp_x = source_moved_x and !runtime_echo_x;
+        if (!clamp_y and !clamp_x) continue;
+
+        const viewport = node.frame.inset(node.widget.layout.padding).normalized();
+        if (viewport.isEmpty()) continue;
+
+        const current_y = node.widget.value;
+        const current_x = node.widget.value_x;
+        const next_y = if (clamp_y)
+            if (canvas.widgetScrollsAxis(node.widget, .vertical))
+                std.math.clamp(@max(0, current_y), 0, @max(0, canvasWidgetLayoutScrollContentExtent(nodes, index, viewport) - viewport.height))
+            else
+                0
+        else
+            current_y;
+        const next_x = if (clamp_x)
+            if (canvas.widgetScrollsAxis(node.widget, .horizontal))
+                std.math.clamp(@max(0, current_x), 0, @max(0, canvasWidgetLayoutScrollContentExtentX(nodes, index, viewport) - viewport.width))
+            else
+                0
+        else
+            current_x;
+        if (next_y == current_y and next_x == current_x) continue;
+
+        nodes[index].widget.value = next_y;
+        nodes[index].widget.value_x = next_x;
+        translateCanvasWidgetLayoutScrollDescendants(nodes, index, .{
+            .dx = if (canvas.widgetScrollsAxis(node.widget, .horizontal)) -(next_x - current_x) else 0,
+            .dy = if (canvas.widgetScrollsAxis(node.widget, .vertical)) -(next_y - current_y) else 0,
+        });
+    }
+}
+
 fn previousLayoutHasSelectedTab(previous: canvas.WidgetLayoutTree, id: canvas.ObjectId) bool {
     for (previous.nodes) |node| {
         if (node.widget.id == id) return node.widget.semantics.role == .tab and node.widget.state.selected;
@@ -878,7 +940,7 @@ pub fn canvasWidgetLayoutNodeWithTextReconcileState(
         // right after, so a resized or re-texted field never keeps a
         // stale offset).
         if (canvasWidgetEditableTextKind(copy.widget.kind)) copy.widget.value = entry.value;
-        if (copy.widget.code_editor) {
+        if (copy.widget.runtime_flags.code_editor) {
             copy.widget.value_x = entry.value_x;
             if (!copy.widget.hasCodeDiff()) {
                 copy.widget.code_content_width = entry.code_content_width;
@@ -1036,6 +1098,12 @@ pub fn canvasWidgetLayoutTreeWithRuntimeReconcileState(
     // the caller AFTER native scroll drivers are stamped — a rebuild
     // mid-rubber-band must not clamp an offset the OS scroller owns.
     restoreCanvasWidgetLayoutScrollOffsets(staged_nodes, previous_runtime_offsets, previous_source_scroll_entries);
+    clampCanvasWidgetLayoutProgrammaticScrollOffsets(
+        staged_nodes,
+        next,
+        previous_runtime_offsets,
+        previous_source_scroll_entries,
+    );
     revealNewlySelectedTabs(previous, staged_nodes);
 
     const index_scratch = canvas_widget_reconcile_index_scratch.get();
@@ -1101,7 +1169,7 @@ pub fn clampCanvasWidgetLayoutScrollOffsets(nodes: []canvas.WidgetLayoutNode, st
         // must behave the same on every host, or a source still
         // echoing the old offset would resurrect it on re-grant only
         // where drivers run.
-        if (node.widget.native_scroll) {
+        if (node.widget.runtime_flags.native_scroll) {
             const pin_y = !canvas.widgetScrollsAxis(node.widget, .vertical) and node.widget.value != 0;
             const pin_x = !canvas.widgetScrollsAxis(node.widget, .horizontal) and node.widget.value_x != 0;
             if (pin_y) nodes[index].widget.value = 0;
@@ -1173,7 +1241,7 @@ pub fn clampCanvasWidgetLayoutTextOffsets(nodes: []canvas.WidgetLayoutNode, toke
         if (node.widget.kind == .textarea) {
             canvas.cacheTextInputContentWidthForWidget(&node.widget, tokens);
             node.widget.value = canvas.clampedTextInputScrollOffsetForWidget(node.widget, tokens, node.widget.value);
-            node.widget.value_x = if (node.widget.code_editor)
+            node.widget.value_x = if (node.widget.runtime_flags.code_editor)
                 canvas.clampedTextInputHorizontalScrollOffsetForWidget(node.widget, tokens, node.widget.value_x)
             else
                 0;
@@ -1521,11 +1589,17 @@ pub fn canvasWidgetAdjacentGroupFocusTarget(
     focused: canvas.WidgetFocusTarget,
     direction: CanvasWidgetGroupDirection,
 ) ?canvas.WidgetFocusTarget {
+    const logical_scroll_list = parent_index < layout.nodes.len and
+        layout.nodes[parent_index].widget.kind == .list and
+        focused.kind == .list_item;
     var previous: ?canvas.WidgetFocusTarget = null;
     var saw_focused = false;
-    for (layout.nodes) |node| {
+    for (layout.nodes, 0..) |node, node_index| {
         if (node.parent_index != parent_index or node.widget.kind != focused.kind) continue;
-        const target = layout.focusTargetById(node.widget.id) orelse continue;
+        const target = if (logical_scroll_list)
+            canvasWidgetLogicalFocusTarget(layout, node_index) orelse continue
+        else
+            layout.focusTargetById(node.widget.id) orelse continue;
         if (saw_focused) return target;
         if (target.id == focused.id) {
             if (direction == .previous) return previous;
@@ -1565,7 +1639,28 @@ pub fn canvasWidgetTreeScopeIndex(layout: canvas.WidgetLayoutTree, node_index: u
 
 fn canvasWidgetTreeRowFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
     if (layout.nodes[node_index].widget.semantics.role != .treeitem) return null;
-    return layout.focusTargetById(layout.nodes[node_index].widget.id);
+    return canvasWidgetLogicalFocusTarget(layout, node_index);
+}
+
+/// A roving group must be able to name its next LOGICAL row even when a
+/// scroll ancestor clips that row out of the current viewport. Keep every
+/// other focus gate (identity, disabled/hidden state, hidden ancestors,
+/// concealed disclosure content), but deliberately omit only the geometry
+/// clip check performed by `WidgetLayoutTree.focusTargetById`. The runtime
+/// scrolls this target into view before it commits focus.
+fn canvasWidgetLogicalFocusTarget(layout: canvas.WidgetLayoutTree, node_index: usize) ?canvas.WidgetFocusTarget {
+    if (node_index >= layout.nodes.len) return null;
+    if (canvas.isWidgetHiddenInAncestors(layout, node_index)) return null;
+    if (canvas.isWidgetConcealedByDisclosure(layout, node_index)) return null;
+    const node = layout.nodes[node_index];
+    if (!canvas.widgetIsFocusable(node.widget)) return null;
+    return .{
+        .id = node.widget.id,
+        .kind = node.widget.kind,
+        .bounds = node.frame,
+        .index = node_index,
+        .state = node.widget.state,
+    };
 }
 
 /// The tree keymap's focus moves. Up/Down walk the scope's rows in node

@@ -283,6 +283,10 @@ The runtime interprets the command after the model commits and dispatches any re
       <td>A buffered HTTP(S) exchange; <code>ok</code> carries <code>&#123; status, body &#125;</code> (a 404 is still <code>ok</code> — a delivered response), <code>err</code> the transport reason</td>
     </tr>
     <tr>
+      <td><code>Cmd.fetch(spec, &#123; key?, line, ok, err &#125;)</code></td>
+      <td>A line-streamed HTTP(S) exchange for SSE/NDJSON; each <code>line</code> carries bytes as it arrives, then <code>ok</code> carries the terminal HTTP status or <code>err</code> the transport reason</td>
+    </tr>
+    <tr>
       <td><code>Cmd.clipboardWrite(bytes)</code> / <code>Cmd.clipboardRead(&#123; key?, ok, err &#125;)</code></td>
       <td>System clipboard: write is fire-and-forget, read routes the text bytes back</td>
     </tr>
@@ -325,7 +329,7 @@ The runtime interprets the command after the model commits and dispatches any re
   </tbody>
 </table>
 
-Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for host results and errors, one number field for timer fires, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for `fetch`'s — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed effect — `Cmd.request`, the named engine ops, `Cmd.delay` — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it silently. The one exception is a live `Cmd.spawn` key, which rejects the duplicate (`err` gets `rejected`) — a running subprocess is never killed implicitly; cancel it first, and that cancel is loud (`err` gets `cancelled`) because killing a process is an observable event. Every `err` arm receives a machine-readable reason, so failure is never silence. Persistence today is `Cmd.writeFile` + a boot-time `Cmd.readFile` — the pattern every real app uses.
+Result arms are ordinary Msg arms with the shape the effect produces — one `Uint8Array` field for host results and errors, one number field for timer fires and a streaming fetch's terminal status, no fields for `writeFile`'s ok, one number plus one `Uint8Array` field for a buffered fetch's result — and tsc checks the shapes for you. Keys carry ONE in-flight discipline: a keyed effect — `Cmd.request`, buffered named engine ops, `Cmd.delay` — whose key is already in flight replaces the old one (the superseded result is dropped, no message; the debounce shape), and `Cmd.cancel` drops it silently. Live `Cmd.spawn` and streaming-fetch keys reject a duplicate (`err` gets `rejected`) so two sources can never splice into one stream; cancel either first, and that cancel is loud (`err` gets `cancelled`). A streaming fetch whose line is cut or dropped also ends loudly with `err: truncated`, never a misleading successful status. Every `err` arm receives a machine-readable reason, so failure is never silence. Persistence today is `Cmd.writeFile` + a boot-time `Cmd.readFile` — the pattern every real app uses.
 
 For durable packaged-app paths, request the framework-provided app data directory through `envMsgs` and join filenames below it. The runner synthesizes `NATIVE_SDK_APP_DATA_DIR` from the platform convention (`~/Library/Application Support/<app>` on macOS and `%LOCALAPPDATA%\<app>\Data` on Windows), then dispatches it as the same journaled one-`Uint8Array`-field message as an ambient value. This keeps a Finder- or Explorer-launched app independent of its process working directory.
 
@@ -480,7 +484,7 @@ export function subscriptions(model: Model): Sub<Msg> {
 }
 ```
 
-Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.spawn`'s lines, `Cmd.audioPlay`'s events, `Cmd.channelOpen`'s posts, and audio capture chunks) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
+Keep the Sub-vs-stream line straight: a Sub is declarative — derived from the model, started and stopped by reconciliation, never opened or closed by the app. The multi-result streams (`Cmd.fetch`'s response lines, `Cmd.spawn`'s stdout lines, `Cmd.audioPlay`'s events, `Cmd.channelOpen`'s posts, and audio capture chunks) are Cmd-initiated — imperative opens with a keyed lifecycle the app drives. If the effect should exist exactly while some model state holds, it wants a Sub; if the app decides when it starts and ends, it is a stream.
 
 ## Text input from markup
 

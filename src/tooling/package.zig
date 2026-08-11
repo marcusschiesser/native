@@ -62,6 +62,9 @@ pub const PackageOptions = struct {
     target: PackageTarget = .macos,
     optimize: []const u8 = "Debug",
     output_path: []const u8,
+    /// Project root used to resolve app.zon-relative packaging inputs such
+    /// as a custom DMG background. The CLI derives it from --manifest.
+    project_dir: []const u8 = ".",
     binary_path: ?[]const u8 = null,
     assets_dir: []const u8 = "assets",
     frontend: ?manifest_tool.FrontendMetadata = null,
@@ -162,6 +165,16 @@ pub fn createPackage(allocator: std.mem.Allocator, io: std.Io, options: PackageO
         return err;
     };
     try validateWebEngineTarget(options.target, options.web_engine);
+    if (options.target == .macos and options.archive) {
+        manifest_tool.validateDmgPackageSettings(options.metadata) catch |err| {
+            std.debug.print("error: app.zon dmg settings are invalid ({s})\n", .{@errorName(err)});
+            return err;
+        };
+        if (try manifest_tool.checkDmgSources(allocator, io, options.project_dir, options.metadata.dmg)) |message| {
+            std.debug.print("error: {s}\n", .{message});
+            return error.InvalidDmgSource;
+        }
+    }
     var stats = switch (options.target) {
         .macos => try createMacosApp(allocator, io, options),
         .windows, .linux => try createDesktopArtifact(allocator, io, options),
@@ -2002,18 +2015,490 @@ fn createArchive(allocator: std.mem.Allocator, io: std.Io, options: PackageOptio
     defer allocator.free(archive_command_path);
 
     const ok = switch (options.target) {
-        .macos => runArchiveCommand(io, &.{ "hdiutil", "create", "-volname", options.metadata.displayName(), "-srcfolder", options.output_path, "-ov", "-format", "UDZO", archive_command_path }, null),
+        .macos => try createMacosDmg(allocator, io, options, archive_command_path),
         .windows => runArchiveCommand(io, &.{ "zip", "-r", archive_command_path, "." }, options.output_path),
         .linux => runArchiveCommand(io, &.{ "tar", "czf", archive_command_path, "-C", options.output_path, "." }, null),
         .ios, .android => unreachable,
     };
 
     if (!ok) {
-        std.debug.print("warning: archive creation failed for {s}\n", .{archive_path});
-        allocator.free(archive_path);
-        return null;
+        std.debug.print("error: archive creation failed for {s}\n", .{archive_path});
+        return error.ArchiveCreationFailed;
     }
     return archive_path;
+}
+
+/// Build the familiar macOS drag-to-Applications image without introducing a
+/// package-time dependency. A writable image is populated first so Finder can
+/// persist its icon-view presentation, then converted to the compressed UDZO
+/// artifact users download. If Finder automation is unavailable (for example
+/// in a headless build worker), the Applications link and background still
+/// ship and only the saved window arrangement is omitted.
+fn createMacosDmg(allocator: std.mem.Allocator, io: std.Io, options: PackageOptions, archive_path: []const u8) !bool {
+    const dmg = options.metadata.dmg;
+    const volume_name = dmg.volume_name orelse options.metadata.displayName();
+    var nonce_bytes: [8]u8 = undefined;
+    std.Io.random(io, &nonce_bytes);
+    const nonce = std.mem.readInt(u64, &nonce_bytes, .little);
+    const work_path = try std.fmt.allocPrint(allocator, "{s}.native-work-{x}", .{ archive_path, nonce });
+    defer allocator.free(work_path);
+    const work_absolute = try absolutePathAlloc(allocator, io, work_path);
+    defer allocator.free(work_absolute);
+    const rw_image_path = try std.fs.path.join(allocator, &.{ work_absolute, "staging.dmg" });
+    defer allocator.free(rw_image_path);
+    const source_path = try std.fs.path.join(allocator, &.{ work_absolute, "source" });
+    defer allocator.free(source_path);
+    const mount_path = try std.fs.path.join(allocator, &.{ work_absolute, "mount" });
+    defer allocator.free(mount_path);
+    const app_path = try absolutePathAlloc(allocator, io, options.output_path);
+    defer allocator.free(app_path);
+
+    var cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, work_path);
+    var work_dir = try cwd.openDir(io, work_path, .{});
+    defer work_dir.close(io);
+    try work_dir.createDirPath(io, "source");
+    try work_dir.createDirPath(io, "mount");
+
+    var attached = false;
+    defer {
+        if (attached) {
+            if (runArchiveCommand(io, &.{ "hdiutil", "detach", "-quiet", mount_path }, null) or
+                runArchiveCommand(io, &.{ "hdiutil", "detach", "-quiet", "-force", mount_path }, null))
+            {
+                attached = false;
+            } else {
+                std.debug.print("warning: could not detach temporary DMG at {s}; leaving {s} for manual cleanup\n", .{ mount_path, work_path });
+            }
+        }
+        if (!attached) cwd.deleteTree(io, work_path) catch {};
+    }
+
+    const app_name = try dmgAppBundleNameAlloc(allocator, options.metadata);
+    defer allocator.free(app_name);
+    var source_dir = try cwd.openDir(io, source_path, .{});
+    defer source_dir.close(io);
+    try stageDmgItems(allocator, io, options, source_dir, source_path, app_path, app_name);
+
+    const retina_background_source = try dmgRetinaBackgroundSourceAlloc(allocator, io, options.project_dir, dmg.background);
+    defer if (retina_background_source) |path| allocator.free(path);
+    const background_name = try dmgBackgroundNameAlloc(allocator, dmg.background, retina_background_source != null);
+    defer allocator.free(background_name);
+    try stageDmgBackground(allocator, io, options, source_dir, source_path, background_name, retina_background_source);
+
+    // Finder persists portable window presentation in the volume's
+    // `.DS_Store` on HFS+. With hdiutil's current APFS default, the same
+    // successful AppleScript can leave no metadata in the image at all.
+    if (!runArchiveCommand(io, &.{ "hdiutil", "create", "-quiet", "-volname", volume_name, "-srcfolder", source_path, "-ov", "-format", "UDRW", "-fs", "HFS+", rw_image_path }, null)) return false;
+    if (!runArchiveCommand(io, &.{ "hdiutil", "attach", "-quiet", rw_image_path, "-mountpoint", mount_path, "-nobrowse", "-noverify", "-noautoopen" }, null)) return false;
+    attached = true;
+
+    const finder_script = try dmgFinderScriptAlloc(allocator, dmg, mount_path, app_name, background_name);
+    defer allocator.free(finder_script);
+    if (!runArchiveCommand(io, &.{ "osascript", "-e", finder_script }, null)) {
+        std.debug.print("warning: Finder could not save the DMG window layout; the image still includes its configured items and background\n", .{});
+    } else if (!try waitForDmgFinderMetadata(allocator, io, mount_path)) {
+        std.debug.print("warning: Finder returned success but did not persist the DMG window layout; the image still includes its configured items and background\n", .{});
+    }
+
+    if (!runArchiveCommand(io, &.{ "hdiutil", "detach", "-quiet", mount_path }, null)) {
+        if (!runArchiveCommand(io, &.{ "hdiutil", "detach", "-quiet", "-force", mount_path }, null)) return false;
+    }
+    attached = false;
+    return runArchiveCommand(io, &.{ "hdiutil", "convert", "-quiet", rw_image_path, "-ov", "-format", "UDZO", "-imagekey", "zlib-level=9", "-o", archive_path }, null);
+}
+
+fn dmgAppBundleNameAlloc(allocator: std.mem.Allocator, metadata: manifest_tool.Metadata) ![]u8 {
+    var buffer: [255]u8 = undefined;
+    return allocator.dupe(u8, try manifest_tool.dmgAppBundleName(&buffer, metadata));
+}
+
+fn stageDmgItems(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    options: PackageOptions,
+    source_dir: std.Io.Dir,
+    source_path: []const u8,
+    app_path: []const u8,
+    app_name: []const u8,
+) !void {
+    const app_destination = try std.fs.path.join(allocator, &.{ source_path, app_name });
+    defer allocator.free(app_destination);
+    if (!runArchiveCommand(io, &.{ "ditto", app_path, app_destination }, null)) {
+        std.debug.print("error: packaged app could not be staged in the DMG\n", .{});
+        return error.DmgItemCopyFailed;
+    }
+
+    const dmg = options.metadata.dmg;
+    if (dmg.items.len == 0) {
+        if (dmg.applications_link) try source_dir.symLink(io, "/Applications", "Applications", .{ .is_directory = true });
+        return;
+    }
+
+    for (dmg.items) |item| switch (item.kind) {
+        .app => {},
+        .applications => try source_dir.symLink(io, "/Applications", "Applications", .{ .is_directory = true }),
+        .file => {
+            const item_path = item.path orelse return error.InvalidDmgItem;
+            const item_name = manifest_tool.dmgItemDestinationName(item) orelse return error.InvalidDmgItem;
+            if (std.ascii.eqlIgnoreCase(item_name, app_name)) {
+                std.debug.print("error: DMG item {s} conflicts with the packaged app name\n", .{item_name});
+                return error.DuplicateDmgItem;
+            }
+            const item_source = try std.fs.path.join(allocator, &.{ options.project_dir, item_path });
+            defer allocator.free(item_source);
+            const item_destination = try std.fs.path.join(allocator, &.{ source_path, item_name });
+            defer allocator.free(item_destination);
+            if (!runArchiveCommand(io, &.{ "ditto", item_source, item_destination }, null)) {
+                std.debug.print("error: DMG item {s} could not be copied from {s}\n", .{ item_name, item_source });
+                return error.DmgItemCopyFailed;
+            }
+        },
+        .link => {
+            const target = item.path orelse return error.InvalidDmgItem;
+            const item_name = manifest_tool.dmgItemDestinationName(item) orelse return error.InvalidDmgItem;
+            if (std.ascii.eqlIgnoreCase(item_name, app_name)) {
+                std.debug.print("error: DMG item {s} conflicts with the packaged app name\n", .{item_name});
+                return error.DuplicateDmgItem;
+            }
+            try source_dir.symLink(io, target, item_name, .{ .is_directory = true });
+        },
+    };
+}
+
+fn dmgRetinaBackgroundSourceAlloc(allocator: std.mem.Allocator, io: std.Io, project_dir: []const u8, background: ?[]const u8) !?[]const u8 {
+    const path = background orelse return null;
+    const retina_relative = (try manifest_tool.dmgRetinaRelativePathAlloc(allocator, path)) orelse return null;
+    defer allocator.free(retina_relative);
+    const retina_source = try std.fs.path.join(allocator, &.{ project_dir, retina_relative });
+    errdefer allocator.free(retina_source);
+    var file = std.Io.Dir.cwd().openFile(io, retina_source, .{}) catch {
+        allocator.free(retina_source);
+        return null;
+    };
+    file.close(io);
+    return retina_source;
+}
+
+fn stageDmgBackground(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    options: PackageOptions,
+    source_dir: std.Io.Dir,
+    source_path: []const u8,
+    background_name: []const u8,
+    retina_background_source: ?[]const u8,
+) !void {
+    const dmg = options.metadata.dmg;
+    try source_dir.createDirPath(io, ".background");
+    const output_path = try std.fs.path.join(allocator, &.{ source_path, ".background", background_name });
+    defer allocator.free(output_path);
+
+    if (dmg.background) |background| {
+        const background_source = try std.fs.path.join(allocator, &.{ options.project_dir, background });
+        defer allocator.free(background_source);
+        if (retina_background_source) |retina_source| {
+            const extension = std.fs.path.extension(background);
+            const one_x_name = try std.fmt.allocPrint(allocator, "background{s}", .{extension});
+            defer allocator.free(one_x_name);
+            const two_x_name = try std.fmt.allocPrint(allocator, "background@2x{s}", .{extension});
+            defer allocator.free(two_x_name);
+            const one_x_subpath = try std.fs.path.join(allocator, &.{ ".background", one_x_name });
+            defer allocator.free(one_x_subpath);
+            const two_x_subpath = try std.fs.path.join(allocator, &.{ ".background", two_x_name });
+            defer allocator.free(two_x_subpath);
+            try std.Io.Dir.copyFile(std.Io.Dir.cwd(), background_source, source_dir, one_x_subpath, io, .{ .make_path = true, .replace = true });
+            try std.Io.Dir.copyFile(std.Io.Dir.cwd(), retina_source, source_dir, two_x_subpath, io, .{ .make_path = true, .replace = true });
+            const one_x_path = try std.fs.path.join(allocator, &.{ source_path, one_x_subpath });
+            defer allocator.free(one_x_path);
+            const two_x_path = try std.fs.path.join(allocator, &.{ source_path, two_x_subpath });
+            defer allocator.free(two_x_path);
+            try assembleRetinaDmgBackground(io, one_x_path, two_x_path, output_path, "custom");
+            try source_dir.deleteFile(io, one_x_subpath);
+            try source_dir.deleteFile(io, two_x_subpath);
+        } else {
+            const output_subpath = try std.fs.path.join(allocator, &.{ ".background", background_name });
+            defer allocator.free(output_subpath);
+            try std.Io.Dir.copyFile(std.Io.Dir.cwd(), background_source, source_dir, output_subpath, io, .{ .make_path = true, .replace = true });
+        }
+        return;
+    }
+
+    const generated_1x = try defaultDmgBackgroundAtScale(allocator, dmg, 1);
+    defer allocator.free(generated_1x);
+    const generated_2x = try defaultDmgBackgroundAtScale(allocator, dmg, 2);
+    defer allocator.free(generated_2x);
+    try source_dir.writeFile(io, .{ .sub_path = ".background/background.png", .data = generated_1x });
+    try source_dir.writeFile(io, .{ .sub_path = ".background/background@2x.png", .data = generated_2x });
+    const one_x_path = try std.fs.path.join(allocator, &.{ source_path, ".background", "background.png" });
+    defer allocator.free(one_x_path);
+    const two_x_path = try std.fs.path.join(allocator, &.{ source_path, ".background", "background@2x.png" });
+    defer allocator.free(two_x_path);
+    try assembleRetinaDmgBackground(io, one_x_path, two_x_path, output_path, "generated");
+    try source_dir.deleteFile(io, ".background/background.png");
+    try source_dir.deleteFile(io, ".background/background@2x.png");
+}
+
+fn assembleRetinaDmgBackground(io: std.Io, one_x_path: []const u8, two_x_path: []const u8, output_path: []const u8, kind: []const u8) !void {
+    if (!runArchiveCommandQuiet(io, &.{ "tiffutil", "-cathidpicheck", one_x_path, two_x_path, "-out", output_path }, null)) {
+        std.debug.print("error: could not assemble the {s} 1x/2x DMG background with tiffutil; the @2x image must be exactly twice the base image's dimensions\n", .{kind});
+        return error.DmgBackgroundAssemblyFailed;
+    }
+}
+
+fn dmgBackgroundNameAlloc(allocator: std.mem.Allocator, background: ?[]const u8, has_retina_sibling: bool) ![]const u8 {
+    const extension = if (background) |path| if (has_retina_sibling) ".tiff" else std.fs.path.extension(path) else ".tiff";
+    return std.fmt.allocPrint(allocator, "background{s}", .{extension});
+}
+
+fn defaultDmgBackground(allocator: std.mem.Allocator, dmg: manifest_tool.DmgMetadata) ![]u8 {
+    return defaultDmgBackgroundAtScale(allocator, dmg, 1);
+}
+
+fn defaultDmgBackgroundAtScale(allocator: std.mem.Allocator, dmg: manifest_tool.DmgMetadata, scale: usize) ![]u8 {
+    std.debug.assert(scale > 0);
+    const width: usize = @as(usize, dmg.window_width) * scale;
+    const height: usize = @as(usize, dmg.window_height) * scale;
+    const pixels = try allocator.alloc(u8, width * height * 4);
+    defer allocator.free(pixels);
+
+    for (0..height) |y| {
+        const t = if (height > 1) @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(height - 1)) else 0;
+        const shade = [3]u8{
+            @intFromFloat(@round(249.0 - 11.0 * t)),
+            @intFromFloat(@round(250.0 - 11.0 * t)),
+            @intFromFloat(@round(252.0 - 10.0 * t)),
+        };
+        for (0..width) |x| {
+            const offset = (y * width + x) * 4;
+            pixels[offset + 0] = shade[0];
+            pixels[offset + 1] = shade[1];
+            pixels[offset + 2] = shade[2];
+            pixels[offset + 3] = 255;
+        }
+    }
+
+    if (dmgInstallPositions(dmg) != null) drawDmgArrow(pixels, width, height, dmg, scale);
+    return app_icon_tool.encodePng(allocator, pixels, width, height);
+}
+
+fn drawDmgArrow(pixels: []u8, width: usize, height: usize, dmg: manifest_tool.DmgMetadata, scale: usize) void {
+    const install_positions = dmgInstallPositions(dmg) orelse return;
+    const pixel_scale: f32 = @floatFromInt(scale);
+    const app_x = @as(f32, @floatFromInt(install_positions.app.x)) * pixel_scale;
+    const app_y = @as(f32, @floatFromInt(install_positions.app.y)) * pixel_scale;
+    const applications_x = @as(f32, @floatFromInt(install_positions.applications.x)) * pixel_scale;
+    const applications_y = @as(f32, @floatFromInt(install_positions.applications.y)) * pixel_scale;
+    const dx = applications_x - app_x;
+    const dy = applications_y - app_y;
+    const distance = @sqrt(dx * dx + dy * dy);
+    const app_margin = @as(f32, @floatFromInt(dmg.icon_size)) * pixel_scale * 0.64;
+    // Finder's Applications folder glyph is optically wider than a typical
+    // app glyph at the same icon-size setting. Give that end a little more
+    // breathing room so the arrow reads centered between visible edges.
+    const applications_margin = @as(f32, @floatFromInt(dmg.icon_size)) * pixel_scale * 0.71;
+    if (distance <= app_margin + applications_margin + 28.0 * pixel_scale) return;
+    const ux = dx / distance;
+    const uy = dy / distance;
+    const px = -uy;
+    const py = ux;
+    const start_x = app_x + ux * app_margin;
+    const start_y = app_y + uy * app_margin;
+    const end_x = applications_x - ux * applications_margin;
+    const end_y = applications_y - uy * applications_margin;
+    const head_length: f32 = @min(28.0 * pixel_scale, distance * 0.12);
+    const head_width: f32 = head_length * 0.62;
+    const head_x = end_x - ux * head_length;
+    const head_y = end_y - uy * head_length;
+
+    const segments = [3]DmgArrowSegment{
+        .{ .ax = start_x, .ay = start_y, .bx = end_x, .by = end_y },
+        .{ .ax = end_x, .ay = end_y, .bx = head_x + px * head_width, .by = head_y + py * head_width },
+        .{ .ax = end_x, .ay = end_y, .bx = head_x - px * head_width, .by = head_y - py * head_width },
+    };
+    var shadow_segments = segments;
+    for (&shadow_segments) |*segment| {
+        segment.ay += 2 * pixel_scale;
+        segment.by += 2 * pixel_scale;
+    }
+
+    const shadow = [3]u8{ 70, 74, 82 };
+    drawDmgArrowShape(pixels, width, height, &shadow_segments, 8 * pixel_scale, shadow, 0.10);
+
+    const arrow = [3]u8{ 105, 110, 120 };
+    drawDmgArrowShape(pixels, width, height, &segments, 5 * pixel_scale, arrow, 0.58);
+}
+
+const DmgInstallPositions = struct {
+    app: manifest_tool.DmgPosition,
+    applications: manifest_tool.DmgPosition,
+};
+
+fn dmgInstallPositions(dmg: manifest_tool.DmgMetadata) ?DmgInstallPositions {
+    if (dmg.items.len == 0) {
+        if (!dmg.applications_link) return null;
+        return .{ .app = dmg.app_position, .applications = dmg.applications_position };
+    }
+    var app: ?manifest_tool.DmgPosition = null;
+    var applications: ?manifest_tool.DmgPosition = null;
+    for (dmg.items) |item| switch (item.kind) {
+        .app => app = item.position,
+        .applications => applications = item.position,
+        .file, .link => {},
+    };
+    return .{ .app = app orelse return null, .applications = applications orelse return null };
+}
+
+const DmgArrowSegment = struct {
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+};
+
+/// Rasterize the union of rounded line segments and blend it once. Taking the
+/// maximum coverage prevents translucent joins from becoming darker, while
+/// the one-pixel analytic fringe keeps diagonal and rounded edges smooth.
+fn drawDmgArrowShape(pixels: []u8, width: usize, height: usize, segments: []const DmgArrowSegment, thickness: f32, color: [3]u8, alpha: f32) void {
+    if (segments.len == 0 or thickness <= 0 or alpha <= 0) return;
+    const radius = thickness * 0.5;
+    for (0..height) |y| {
+        for (0..width) |x| {
+            const fx = @as(f32, @floatFromInt(x)) + 0.5;
+            const fy = @as(f32, @floatFromInt(y)) + 0.5;
+            var nearest_squared = std.math.inf(f32);
+            for (segments) |segment| {
+                const dx = segment.bx - segment.ax;
+                const dy = segment.by - segment.ay;
+                const length_squared = dx * dx + dy * dy;
+                if (length_squared <= 0.001) continue;
+                const projection = std.math.clamp(((fx - segment.ax) * dx + (fy - segment.ay) * dy) / length_squared, 0.0, 1.0);
+                const distance_x = fx - (segment.ax + projection * dx);
+                const distance_y = fy - (segment.ay + projection * dy);
+                nearest_squared = @min(nearest_squared, distance_x * distance_x + distance_y * distance_y);
+            }
+            if (nearest_squared > (radius + 0.5) * (radius + 0.5)) continue;
+            const coverage = std.math.clamp(radius + 0.5 - @sqrt(@max(nearest_squared, 0)), 0.0, 1.0);
+            if (coverage <= 0) continue;
+            const offset = (y * width + x) * 4;
+            const pixel_alpha = alpha * coverage;
+            const inverse = 1.0 - pixel_alpha;
+            pixels[offset + 0] = @intFromFloat(@round(@as(f32, @floatFromInt(color[0])) * pixel_alpha + @as(f32, @floatFromInt(pixels[offset + 0])) * inverse));
+            pixels[offset + 1] = @intFromFloat(@round(@as(f32, @floatFromInt(color[1])) * pixel_alpha + @as(f32, @floatFromInt(pixels[offset + 1])) * inverse));
+            pixels[offset + 2] = @intFromFloat(@round(@as(f32, @floatFromInt(color[2])) * pixel_alpha + @as(f32, @floatFromInt(pixels[offset + 2])) * inverse));
+        }
+    }
+}
+
+fn dmgFinderScriptAlloc(allocator: std.mem.Allocator, dmg: manifest_tool.DmgMetadata, mount_path: []const u8, app_name: []const u8, background_name: []const u8) ![]u8 {
+    const escaped_mount = try appleScriptStringAlloc(allocator, mount_path);
+    defer allocator.free(escaped_mount);
+    const background_path = try std.fs.path.join(allocator, &.{ mount_path, ".background", background_name });
+    defer allocator.free(background_path);
+    const escaped_background_path = try appleScriptStringAlloc(allocator, background_path);
+    defer allocator.free(escaped_background_path);
+    const position_lines = try dmgFinderPositionLinesAlloc(allocator, dmg, app_name);
+    defer allocator.free(position_lines);
+    const right = 100 + @as(u32, dmg.window_width);
+    // `bounds` includes Finder's title bar; the manifest dimensions describe
+    // the usable icon/background canvas so artwork stays exactly W×H.
+    const bottom = 100 + @as(u32, dmg.window_height) + 36;
+    const inset_right = right - 10;
+    const inset_bottom = bottom - 10;
+    // Capture the window opened from our mount path immediately. Asking
+    // Finder for the container window by disk name can select an older,
+    // read-only copy of the same app DMG that the developer still has mounted.
+    return std.fmt.allocPrint(allocator,
+        \\tell application "Finder"
+        \\  set dmgFolder to POSIX file "{s}" as alias
+        \\  open dmgFolder
+        \\  set dmgWindow to front window
+        \\  delay 1
+        \\  set current view of dmgWindow to icon view
+        \\  set toolbar visible of dmgWindow to false
+        \\  set statusbar visible of dmgWindow to false
+        \\  set pathbar visible of dmgWindow to false
+        \\  set the bounds of dmgWindow to {{100, 100, {d}, {d}}}
+        \\  set theViewOptions to the icon view options of dmgWindow
+        \\  set arrangement of theViewOptions to not arranged
+        \\  set icon size of theViewOptions to {d}
+        \\  set text size of theViewOptions to 13
+        \\  set label position of theViewOptions to bottom
+        \\  set background picture of theViewOptions to (POSIX file "{s}" as alias)
+        \\{s}  close dmgWindow
+        \\  open dmgFolder
+        \\  set dmgWindow to front window
+        \\  delay 1
+        \\  set statusbar visible of dmgWindow to false
+        \\  set the bounds of dmgWindow to {{100, 100, {d}, {d}}}
+        \\  delay 1
+        \\  set the bounds of dmgWindow to {{100, 100, {d}, {d}}}
+        \\  update dmgFolder without registering applications
+        \\  delay 1
+        \\  close dmgWindow
+        \\  delay 2
+        \\end tell
+    , .{ escaped_mount, right, bottom, dmg.icon_size, escaped_background_path, position_lines, inset_right, inset_bottom, right, bottom });
+}
+
+fn waitForDmgFinderMetadata(allocator: std.mem.Allocator, io: std.Io, mount_path: []const u8) !bool {
+    const ds_store_path = try std.fs.path.join(allocator, &.{ mount_path, ".DS_Store" });
+    defer allocator.free(ds_store_path);
+    const cwd = std.Io.Dir.cwd();
+    for (0..50) |_| {
+        const stat = cwd.statFile(io, ds_store_path, .{}) catch {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch return false;
+            continue;
+        };
+        if (stat.size > 0) return true;
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch return false;
+    }
+    return false;
+}
+
+fn dmgFinderPositionLinesAlloc(allocator: std.mem.Allocator, dmg: manifest_tool.DmgMetadata, app_name: []const u8) ![]u8 {
+    var lines: std.ArrayList(u8) = .empty;
+    defer lines.deinit(allocator);
+
+    if (dmg.items.len == 0) {
+        try appendDmgFinderPositionLine(allocator, &lines, app_name, dmg.app_position);
+        if (dmg.applications_link) try appendDmgFinderPositionLine(allocator, &lines, "Applications", dmg.applications_position);
+        return lines.toOwnedSlice(allocator);
+    }
+
+    for (dmg.items) |item| {
+        const name = switch (item.kind) {
+            .app => app_name,
+            .applications => "Applications",
+            .file, .link => manifest_tool.dmgItemDestinationName(item) orelse return error.InvalidDmgItem,
+        };
+        try appendDmgFinderPositionLine(allocator, &lines, name, item.position);
+    }
+    return lines.toOwnedSlice(allocator);
+}
+
+fn appendDmgFinderPositionLine(allocator: std.mem.Allocator, lines: *std.ArrayList(u8), name: []const u8, position: manifest_tool.DmgPosition) !void {
+    const escaped_name = try appleScriptStringAlloc(allocator, name);
+    defer allocator.free(escaped_name);
+    const line = try std.fmt.allocPrint(allocator, "  set position of item \"{s}\" of dmgFolder to {{{d}, {d}}}\n", .{ escaped_name, position.x, position.y });
+    defer allocator.free(line);
+    try lines.appendSlice(allocator, line);
+}
+
+fn appleScriptStringAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var escaped: std.ArrayList(u8) = .empty;
+    defer escaped.deinit(allocator);
+    for (value) |byte| {
+        switch (byte) {
+            '\\', '"' => {
+                try escaped.append(allocator, '\\');
+                try escaped.append(allocator, byte);
+            },
+            '\n', '\r' => try escaped.append(allocator, ' '),
+            else => try escaped.append(allocator, byte),
+        }
+    }
+    return escaped.toOwnedSlice(allocator);
 }
 
 fn absolutePathAlloc(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
@@ -2031,6 +2516,22 @@ fn runArchiveCommand(io: std.Io, argv: []const []const u8, cwd: ?[]const u8) boo
         .stdin = .ignore,
         .stdout = .inherit,
         .stderr = .inherit,
+    }) catch return false;
+    const term = child.wait(io) catch return false;
+    return switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+}
+
+fn runArchiveCommandQuiet(io: std.Io, argv: []const []const u8, cwd: ?[]const u8) bool {
+    const child_cwd: std.process.Child.Cwd = if (cwd) |path| .{ .path = path } else .inherit;
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .cwd = child_cwd,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
     }) catch return false;
     const term = child.wait(io) catch return false;
     return switch (term) {
@@ -2071,6 +2572,270 @@ test "archive path includes correct suffix per platform" {
     const win_path = try archivePath(std.testing.allocator, .{ .metadata = metadata, .target = .windows, .output_path = "zig-out/package/demo" });
     defer std.testing.allocator.free(win_path);
     try std.testing.expect(std.mem.endsWith(u8, win_path, ".zip"));
+}
+
+test "default DMG background follows the configured window and draws the install arrow" {
+    const gpa = std.testing.allocator;
+    const dmg: manifest_tool.DmgMetadata = .{
+        .window_width = 420,
+        .window_height = 280,
+        .icon_size = 96,
+        .app_position = .{ .x = 110, .y = 140 },
+        .applications_position = .{ .x = 310, .y = 140 },
+    };
+    const encoded = try defaultDmgBackground(gpa, dmg);
+    defer gpa.free(encoded);
+    const header = app_icon_tool.pngHeader(encoded) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 420), header.width);
+    try std.testing.expectEqual(@as(usize, 280), header.height);
+
+    const retina = try defaultDmgBackgroundAtScale(gpa, dmg, 2);
+    defer gpa.free(retina);
+    const retina_header = app_icon_tool.pngHeader(retina) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 840), retina_header.width);
+    try std.testing.expectEqual(@as(usize, 560), retina_header.height);
+
+    const decoded = try app_icon_tool.decodePng(gpa, encoded);
+    defer decoded.deinit(gpa);
+    const arrow = (140 * decoded.width + 210) * 4;
+    const clear = (140 * decoded.width + 24) * 4;
+    try std.testing.expect(decoded.pixels[arrow] < decoded.pixels[clear]);
+    try std.testing.expect(decoded.pixels[arrow + 1] < decoded.pixels[clear + 1]);
+}
+
+test "DMG arrow unions translucent joins and antialiases rounded edges" {
+    var pixels: [20 * 20 * 4]u8 = @splat(255);
+    const segments = [_]DmgArrowSegment{
+        .{ .ax = 4, .ay = 10, .bx = 12, .by = 10 },
+        .{ .ax = 12, .ay = 10, .bx = 9, .by = 7 },
+        .{ .ax = 12, .ay = 10, .bx = 9, .by = 13 },
+    };
+    drawDmgArrowShape(&pixels, 20, 20, &segments, 5, .{ 0, 0, 0 }, 0.5);
+
+    const joined = (9 * 20 + 11) * 4;
+    try std.testing.expectEqual(@as(u8, 128), pixels[joined]);
+    try std.testing.expectEqual(pixels[joined], pixels[joined + 1]);
+    try std.testing.expectEqual(pixels[joined], pixels[joined + 2]);
+
+    const antialiased_edge = (7 * 20 + 6) * 4;
+    try std.testing.expect(pixels[antialiased_edge] > pixels[joined]);
+    try std.testing.expect(pixels[antialiased_edge] < 255);
+}
+
+test "DMG Finder script carries custom layout and escapes paths and names" {
+    const script = try dmgFinderScriptAlloc(std.testing.allocator, .{
+        .window_width = 720,
+        .window_height = 440,
+        .icon_size = 144,
+        .app_position = .{ .x = 180, .y = 210 },
+        .applications_position = .{ .x = 540, .y = 210 },
+    }, "/Volumes/Demo \"Installer\"", "Demo \"App\".app", "background.jpeg");
+    defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "POSIX file \"/Volumes/Demo \\\"Installer\\\"\" as alias") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "set the bounds of dmgWindow to {100, 100, 820, 576}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "set the bounds of dmgWindow to {100, 100, 810, 566}") != null);
+    try std.testing.expect(std.mem.count(u8, script, "set the bounds of dmgWindow to {100, 100, 820, 576}") == 2);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, script, "set dmgWindow to front window"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, script, "close dmgWindow"));
+    try std.testing.expect(std.mem.indexOf(u8, script, "delay 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "set pathbar visible of dmgWindow to false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "set icon size of theViewOptions to 144") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "/Volumes/Demo \\\"Installer\\\"/.background/background.jpeg") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Demo \\\"App\\\".app\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Applications\"") != null);
+}
+
+test "DMG Finder script omits the Applications item when its link is disabled" {
+    const script = try dmgFinderScriptAlloc(std.testing.allocator, .{ .applications_link = false }, "Demo", "Demo.app", "background.png");
+    defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Applications\"") == null);
+}
+
+test "DMG Finder script positions the explicit visible item list" {
+    const items = [_]manifest_tool.DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 150, .y = 170 } },
+        .{ .kind = .applications, .position = .{ .x = 510, .y = 170 } },
+        .{ .kind = .file, .path = "docs/README.pdf", .name = "Read \"Me\".pdf", .position = .{ .x = 260, .y = 330 } },
+        .{ .kind = .link, .path = "/Library/QuickLook", .name = "QuickLook", .position = .{ .x = 400, .y = 330 } },
+    };
+    const script = try dmgFinderScriptAlloc(std.testing.allocator, .{ .items = &items }, "/Volumes/Demo", "Demo.app", "background.tiff");
+    defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Demo.app\" of dmgFolder to {150, 170}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Applications\" of dmgFolder to {510, 170}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"Read \\\"Me\\\".pdf\" of dmgFolder to {260, 330}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "item \"QuickLook\" of dmgFolder to {400, 330}") != null);
+}
+
+test "DMG background discovers an adjacent retina source" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-retina";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/art");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer@2x.png", .data = "fixture" });
+
+    const retina = (try dmgRetinaBackgroundSourceAlloc(std.testing.allocator, std.testing.io, root, "art/installer.png")).?;
+    defer std.testing.allocator.free(retina);
+    try std.testing.expectEqualStrings(root ++ "/art/installer@2x.png", retina);
+    const background_name = try dmgBackgroundNameAlloc(std.testing.allocator, "art/installer.png", true);
+    defer std.testing.allocator.free(background_name);
+    try std.testing.expectEqualStrings("background.tiff", background_name);
+}
+
+test "assembled DMG background does not retain source images" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-background-cleanup";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/source");
+
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .version = "1.0.0",
+        .dmg = .{
+            .window_width = 320,
+            .window_height = 240,
+            .applications_link = false,
+        },
+    };
+    var source_dir = try cwd.openDir(std.testing.io, root ++ "/source", .{});
+    defer source_dir.close(std.testing.io);
+    try stageDmgBackground(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Demo.app",
+    }, source_dir, root ++ "/source", "background.tiff", null);
+
+    var background = try cwd.openFile(std.testing.io, root ++ "/source/.background/background.tiff", .{});
+    background.close(std.testing.io);
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(std.testing.io, root ++ "/source/.background/background.png", .{}));
+    try std.testing.expectError(error.FileNotFound, cwd.openFile(std.testing.io, root ++ "/source/.background/background@2x.png", .{}));
+}
+
+test "macOS archive rejects an invalid DMG background before staging the app" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-invalid-background";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/art");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/art/installer.png", .data = "not a png" });
+
+    try std.testing.expectError(error.InvalidDmgSource, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = .{
+            .id = "dev.example.demo",
+            .name = "demo",
+            .display_name = "Demo",
+            .version = "1.0.0",
+            .dmg = .{ .background = "art/installer.png" },
+        },
+        .target = .macos,
+        .output_path = root ++ "/Demo.app",
+        .project_dir = root,
+        .archive = true,
+    }));
+    try std.testing.expectError(error.FileNotFound, cwd.openDir(std.testing.io, root ++ "/Demo.app", .{}));
+}
+
+test "macOS archive rejects an app-name collision before staging the app" {
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-app-name-collision";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+
+    const items = [_]manifest_tool.DmgItemMetadata{
+        .{ .kind = .app, .position = .{ .x = 170, .y = 182 } },
+        .{ .kind = .link, .path = "/Applications", .name = "Demo.app", .position = .{ .x = 490, .y = 182 } },
+    };
+    try std.testing.expectError(error.DuplicateDmgItem, createPackage(std.testing.allocator, std.testing.io, .{
+        .metadata = .{
+            .id = "dev.example.demo",
+            .name = "demo",
+            .display_name = "Demo",
+            .version = "1.0.0",
+            .dmg = .{ .items = &items },
+        },
+        .target = .macos,
+        .output_path = root ++ "/Demo.app",
+        .archive = true,
+    }));
+    try std.testing.expectError(error.FileNotFound, cwd.openDir(std.testing.io, root ++ "/Demo.app", .{}));
+}
+
+test "DMG app bundle uses the display name or explicit item override" {
+    const default_name = try dmgAppBundleNameAlloc(std.testing.allocator, .{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = "Demo/Studio",
+        .version = "1.0.0",
+    });
+    defer std.testing.allocator.free(default_name);
+    try std.testing.expectEqualStrings("Demo-Studio.app", default_name);
+
+    const items = [_]manifest_tool.DmgItemMetadata{
+        .{ .kind = .app, .name = "Branded Installer.app", .position = .{ .x = 170, .y = 182 } },
+    };
+    const overridden = try dmgAppBundleNameAlloc(std.testing.allocator, .{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = "Demo Studio",
+        .version = "1.0.0",
+        .dmg = .{ .items = &items },
+    });
+    defer std.testing.allocator.free(overridden);
+    try std.testing.expectEqualStrings("Branded Installer.app", overridden);
+}
+
+test "DMG explicit items stage the branded app, project contents, and links" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/test-package-dmg-items";
+    try cwd.deleteTree(std.testing.io, root);
+    defer cwd.deleteTree(std.testing.io, root) catch {};
+    try cwd.createDirPath(std.testing.io, root ++ "/Demo.app/Contents");
+    try cwd.createDirPath(std.testing.io, root ++ "/project/Extras");
+    try cwd.createDirPath(std.testing.io, root ++ "/source");
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/Demo.app/Contents/marker", .data = "app" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/project/README.pdf", .data = "readme" });
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/project/Extras/note.txt", .data = "bonus" });
+
+    const items = [_]manifest_tool.DmgItemMetadata{
+        .{ .kind = .app, .name = "Branded Demo", .position = .{ .x = 150, .y = 170 } },
+        .{ .kind = .applications, .position = .{ .x = 510, .y = 170 } },
+        .{ .kind = .file, .path = "README.pdf", .name = "Read Me.pdf", .position = .{ .x = 220, .y = 330 } },
+        .{ .kind = .file, .path = "Extras", .name = "Bonus", .position = .{ .x = 330, .y = 330 } },
+        .{ .kind = .link, .path = "/Applications", .name = "System Applications", .position = .{ .x = 440, .y = 330 } },
+    };
+    const metadata: manifest_tool.Metadata = .{
+        .id = "dev.example.demo",
+        .name = "demo",
+        .display_name = "Demo",
+        .version = "1.0.0",
+        .dmg = .{ .items = &items },
+    };
+    try manifest_tool.validateDmgSettings(metadata.dmg);
+    const app_name = try dmgAppBundleNameAlloc(std.testing.allocator, metadata);
+    defer std.testing.allocator.free(app_name);
+    try std.testing.expectEqualStrings("Branded Demo.app", app_name);
+
+    var source_dir = try cwd.openDir(std.testing.io, root ++ "/source", .{});
+    defer source_dir.close(std.testing.io);
+    try stageDmgItems(std.testing.allocator, std.testing.io, .{
+        .metadata = metadata,
+        .output_path = root ++ "/Demo.app",
+        .project_dir = root ++ "/project",
+    }, source_dir, root ++ "/source", root ++ "/Demo.app", app_name);
+
+    var app_marker = try cwd.openFile(std.testing.io, root ++ "/source/Branded Demo.app/Contents/marker", .{});
+    app_marker.close(std.testing.io);
+    var readme = try cwd.openFile(std.testing.io, root ++ "/source/Read Me.pdf", .{});
+    readme.close(std.testing.io);
+    var bonus = try cwd.openFile(std.testing.io, root ++ "/source/Bonus/note.txt", .{});
+    bonus.close(std.testing.io);
+    var applications = try cwd.openDir(std.testing.io, root ++ "/source/Applications", .{});
+    applications.close(std.testing.io);
+    var system_applications = try cwd.openDir(std.testing.io, root ++ "/source/System Applications", .{});
+    system_applications.close(std.testing.io);
 }
 
 test "archive command reports nonzero exit" {

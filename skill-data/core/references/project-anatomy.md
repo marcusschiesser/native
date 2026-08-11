@@ -79,6 +79,7 @@ Important manifest fields:
 - `web_engine`: `system` or `chromium`.
 - `cef`: CEF layout config for Chromium.
 - `windows`: initial window definitions.
+- `dmg`: optional macOS disk-image art direction; use the zero-config drag-to-Applications layout, override its background/geometry, or declare a positioned `items` list for arbitrary files and links.
 
 ## Build steps to know
 
@@ -89,7 +90,7 @@ native check
 native dev
 native test
 native build
-native package --target macos
+native package --target macos --archive
 ```
 
 Equivalent/common owned-build steps:

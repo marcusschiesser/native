@@ -147,7 +147,7 @@ fn allTextSpansHaveColor(widget: canvas.Widget, color: canvas.TextSpanColor) boo
 fn expectCodeTabInsertion(source: []const u8, expected: []const u8) !void {
     const edit = canvas.widgetCodeTabTextEditEvent(.{
         .kind = .textarea,
-        .code_editor = true,
+        .runtime_flags = .{ .code_editor = true },
         .text = source,
     }, .{
         .phase = .key_down,
@@ -958,7 +958,7 @@ test "line number gutter reserves at least three marker columns" {
     const tokens = canvas.DesignTokens{};
     var numbered = canvas.Widget{
         .kind = .textarea,
-        .code_editor = true,
+        .runtime_flags = .{ .code_editor = true },
         .code_line_number_digits = 1,
     };
     const one_digit_width = widget_metrics.widgetCodeLineNumberGutterWidth(numbered, tokens);
@@ -1259,7 +1259,7 @@ test "numbered editable code does not invent trailing horizontal overflow" {
     const tokens = canvas.DesignTokens{};
     var editor = canvas.Widget{
         .kind = .textarea,
-        .code_editor = true,
+        .runtime_flags = .{ .code_editor = true },
         .code_line_number_digits = 2,
         .text_no_wrap = true,
         .text = source,
@@ -1301,7 +1301,7 @@ test "editable code caches one batched longest-line measurement across geometry 
     const tokens = canvas.DesignTokens{ .text_measure = &provider };
     var editor = canvas.Widget{
         .kind = .textarea,
-        .code_editor = true,
+        .runtime_flags = .{ .code_editor = true },
         .text_no_wrap = true,
         .text = source.items,
         .frame = geometry.RectF.init(0, 0, 240, 80),
@@ -1445,7 +1445,7 @@ test "editable code Tab infers the file indentation and falls back to two spaces
     }) == null);
     try testing.expect(canvas.widgetCodeTabTextEditEvent(.{
         .kind = .textarea,
-        .code_editor = true,
+        .runtime_flags = .{ .code_editor = true },
         .text = "code",
     }, .{
         .phase = .key_down,
@@ -1454,7 +1454,7 @@ test "editable code Tab infers the file indentation and falls back to two spaces
     }) == null);
     try testing.expect(canvas.widgetCodeTabTextEditEvent(.{
         .kind = .textarea,
-        .code_editor = true,
+        .runtime_flags = .{ .code_editor = true },
         .text = "code",
     }, .{
         .phase = .key_down,
@@ -1642,7 +1642,7 @@ test "direct tree code emission honors scroll viewports and later layout pages" 
         .id = 1,
         .kind = .scroll_view,
         .frame = geometry.RectF.init(0, 0, 320, 80),
-        .native_scroll = true,
+        .runtime_flags = .{ .native_scroll = true },
         .children = &horizontal_children,
     };
     var horizontal_commands: [64]canvas.CanvasCommand = undefined;
@@ -1669,7 +1669,7 @@ test "direct tree code emission honors scroll viewports and later layout pages" 
         .id = 3,
         .kind = .scroll_view,
         .frame = geometry.RectF.init(0, 0, 100, 100),
-        .native_scroll = true,
+        .runtime_flags = .{ .native_scroll = true },
         .children = &vertical_children,
     };
     var vertical_commands: [64]canvas.CanvasCommand = undefined;
@@ -1709,7 +1709,7 @@ test "editable code highlights the visible tail of a ten-thousand-line source" {
         .height = 100,
     }, source.items));
     var editor = findByText(view.root, source.items).?;
-    try testing.expect(editor.code_editor);
+    try testing.expect(editor.runtime_flags.code_editor);
     try testing.expectEqual(code_model.Language.css, editor.code_language);
     try testing.expectEqual(@as(usize, 1), editor.spans.len);
     try testing.expectEqual(@as(u8, 5), editor.code_line_number_digits);

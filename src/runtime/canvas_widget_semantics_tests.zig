@@ -701,6 +701,8 @@ test "runtime applies source-driven autofocus on the edge, never on the level" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 7), harness.runtime.views[0].canvas_widget_focused_id);
     try std.testing.expectEqual(@as(canvas.ObjectId, 7), harness.runtime.views[0].canvas_widget_focus_visible_id);
     try std.testing.expect(harness.runtime.views[0].focused);
+    const focused_layout = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), focused_layout.findById(7).?.widget.text_selection.?);
 
     // The user moves focus; re-applying the SAME layout (flag held true)
     // must not steal it back — edge-triggered, level-ignored.

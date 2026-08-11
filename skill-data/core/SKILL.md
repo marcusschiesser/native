@@ -177,8 +177,10 @@ Zero-config apps package WITHOUT ejecting — `native package` works directly on
 
 ```bash
 native build
-native package --target macos
+native package --target macos --archive
 ```
+
+On macOS, `--archive` adds a zero-config drag-to-Applications DMG with a generated 1×/2× Retina background. The optional `app.zon` `.dmg` block controls its volume name, PNG/JPEG/TIFF background, usable Finder canvas/icon geometry, and Applications link. An adjacent `name@2x.png`/`.jpg` is discovered automatically. Use `.dmg.items` only for a fully art-directed list: exactly one `app`, plus optional `applications`, project-relative `file`, and absolute `link` entries, each with its own icon-center position.
 
 Apps that own their build (ejected or scaffolded `--full`) wire the same step into the build graph: keep package metadata in `app.zon`, build the frontend assets, build the native binary, then package:
 
@@ -265,7 +267,7 @@ When changing app behavior, keep tests in the app's existing authoring tier. Typ
 
 ## Examples to inspect
 
-- `examples/ai-chat-ts`: a substantial app authored entirely in TypeScript + Native markup, with fetch effects and modules.
+- `examples/chatbot`: a substantial app authored entirely in TypeScript + Native markup, with streaming fetch effects and modules.
 - `examples/soundboard-ts`: TypeScript + Native markup port of the full music-player showcase.
 - `examples/system-monitor-ts`: TypeScript + Native markup app using spawn effects, timers, and tables.
 - `examples/hello`: smallest lower-level inline HTML/WebView app.

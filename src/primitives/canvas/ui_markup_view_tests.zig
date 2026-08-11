@@ -2025,7 +2025,7 @@ test "code markup builds the reusable component with opt-in numbers and horizont
     var editable_ui = CodeUi.init(arena);
     const editable_tree = try editable_ui.finalize(try view.build(&editable_ui, &editable_model));
     try testing.expectEqual(canvas.WidgetKind.textarea, editable_tree.root.kind);
-    try testing.expect(editable_tree.root.code_editor);
+    try testing.expect(editable_tree.root.runtime_flags.code_editor);
     try testing.expectEqual(@as(usize, 1), editable_tree.root.spans.len);
     try testing.expectEqual(code_model.Language.tsx, editable_tree.root.code_language);
     try testing.expect(editable_tree.root.text_no_wrap);
@@ -3356,7 +3356,7 @@ pub const pane_markup_source =
     \\      </panel>
     \\    </for>
     \\  </tree>
-    \\  <column min-width="120">
+    \\  <column min-width="120" max-width="720">
     \\    <text>Editor</text>
     \\  </column>
     \\</split>
@@ -3365,7 +3365,7 @@ pub const pane_markup_source =
 pub fn handPaneView(ui: *PaneUi, model: *const PaneModel) PaneUi.Node {
     return ui.split(.{ .value = model.sidebar_fraction, .on_resize = PaneUi.valueMsg(.sidebar_resized) }, .{
         ui.tree(.{ .semantics = .{ .label = "Folders" } }, ui.each(PaneModel.folders[0..], Folder.key, folderRow)),
-        ui.column(.{ .min_width = 120 }, .{
+        ui.column(.{ .min_width = 120, .max_width = 720 }, .{
             ui.text(.{}, "Editor"),
         }),
     });
@@ -3427,10 +3427,11 @@ test "markup split and tree build the hand-written view with the divider synthes
     }).?.select_folder);
     try testing.expectEqual(@as(u32, 1), markup_tree.msgFor(row.id, .toggle).?.toggle_folder);
 
-    // min-width lands as a floor only (no definite max).
+    // The independent responsive bounds land without becoming a
+    // definite width.
     const editor = markup_tree.root.children[2];
     try testing.expectEqual(@as(f32, 120), editor.layout.min_size.width);
-    try testing.expectEqual(@as(f32, 0), editor.layout.max_size.width);
+    try testing.expectEqual(@as(f32, 720), editor.layout.max_size.width);
 }
 
 test "split and tree misuse is validated with teaching messages" {
@@ -4017,7 +4018,7 @@ pub const ComposerUi = canvas.Ui(ComposerMsg);
 pub const composer_markup_source =
     \\<column gap="8">
     \\  <input-group label="Message composer" height="120">
-    \\    <textarea text="{draft}" placeholder="Type a message" on-input="edit" label="Message" />
+    \\    <textarea text="{draft}" placeholder="Type a message" submit-on-enter="true" on-input="edit" label="Message" />
     \\    <input-group-actions>
     \\      <button icon="plus" variant="ghost" size="icon" on-press="attach" label="Attach"></button>
     \\      <spacer grow="1" />
@@ -4035,6 +4036,7 @@ pub fn handComposerView(ui: *ComposerUi, model: *const ComposerModel) ComposerUi
     const entry = ui.el(.textarea, .{
         .text = model.draft(),
         .placeholder = "Type a message",
+        .submit_on_enter = true,
         .on_input = ComposerUi.inputMsg(.edit),
         .semantics = .{ .label = "Message" },
     }, .{});
@@ -4089,6 +4091,7 @@ test "the input-group element builds the hand-written Ui.inputGroup tree" {
     try testing.expectEqual(canvas.WidgetKind.textarea, entry.kind);
     try testing.expectEqualStrings("hello", entry.text);
     try testing.expectEqualStrings("Type a message", entry.placeholder);
+    try testing.expect(entry.submit_on_enter);
     try testing.expectEqual(@as(f32, 1), entry.layout.grow);
     try testing.expectEqual(@as(u8, 0), entry.style.background.?.a);
     try testing.expectEqual(@as(u8, 0), entry.style.border.?.a);
