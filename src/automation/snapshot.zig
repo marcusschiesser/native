@@ -223,6 +223,10 @@ pub const TrayItem = struct {
     command: []const u8 = "",
     separator: bool = false,
     enabled: bool = true,
+    detail: []const u8 = "",
+    role: platform.TrayItemRole = .command,
+    key: []const u8 = "",
+    modifiers: platform.ShortcutModifiers = .{},
 };
 
 /// The live status item (tray): current button title + dropdown items.
@@ -594,11 +598,19 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 try writer.writeAll("  tray-item separator\n");
                 continue;
             }
-            try writer.print("  tray-item #{d} label=\"{s}\" command=\"{s}\" enabled={any}\n", .{
+            try writer.print("  tray-item #{d} label=\"{s}\" command=\"{s}\" enabled={any} detail=\"{s}\" role={s} key=\"{s}\" modifiers=(primary={any},command={any},control={any},option={any},shift={any})\n", .{
                 item.id,
                 item.label,
                 item.command,
                 item.enabled,
+                item.detail,
+                @tagName(item.role),
+                item.key,
+                item.modifiers.primary,
+                item.modifiers.command,
+                item.modifiers.control,
+                item.modifiers.option,
+                item.modifiers.shift,
             });
         }
     }
@@ -907,7 +919,7 @@ test "snapshot emits tray title and dropdown items" {
     const items = [_]TrayItem{
         .{ .id = 1, .label = "Refresh", .command = "app.refresh" },
         .{ .separator = true },
-        .{ .id = 10, .label = "Fix crash on resize", .command = "issue.select.0", .enabled = false },
+        .{ .id = 10, .label = "Fix crash on resize", .command = "issue.select.0", .enabled = false, .detail = "warning ⚠", .role = .agent, .key = "q", .modifiers = .{ .command = true } },
     };
     try writeText(.{
         .windows = &windows,
@@ -915,9 +927,9 @@ test "snapshot emits tray title and dropdown items" {
     }, &writer);
     const text = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, text, "\ntray title=\"ZN 3\" items=3\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #1 label=\"Refresh\" command=\"app.refresh\" enabled=true\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #1 label=\"Refresh\" command=\"app.refresh\" enabled=true detail=\"\" role=command key=\"\" modifiers=(primary=false,command=false,control=false,option=false,shift=false)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item separator\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #10 label=\"Fix crash on resize\" command=\"issue.select.0\" enabled=false\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "  tray-item #10 label=\"Fix crash on resize\" command=\"issue.select.0\" enabled=false detail=\"warning ⚠\" role=agent key=\"q\" modifiers=(primary=false,command=true,control=false,option=false,shift=false)\n") != null);
 
     // No tray -> no tray lines.
     var empty_buffer: [512]u8 = undefined;
