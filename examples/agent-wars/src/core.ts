@@ -1,4 +1,4 @@
-import { Cmd, asciiBytes } from "@native-sdk/core";
+import { Cmd, asciiBytes, utf8Bytes } from "@native-sdk/core";
 import {
   applyTextInputEvent,
   clampedInsertEvent,
@@ -188,8 +188,8 @@ export function initialModel(): [Model, Cmd<Msg>] {
       runId: 0,
       runActive: false,
       stopRequested: false,
-      slotA: { phase: "running", message: asciiBytes("Starting coordinator…") },
-      slotB: { phase: "running", message: asciiBytes("Starting coordinator…") },
+      slotA: { phase: "running", message: utf8Bytes("Starting coordinator…") },
+      slotB: { phase: "running", message: utf8Bytes("Starting coordinator…") },
     },
     Cmd.spawn(
       [
@@ -508,8 +508,8 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
           runId: nextRunId,
           runActive: true,
           stopRequested: false,
-          slotA: { phase: "running", message: asciiBytes("Starting…") },
-          slotB: { phase: "running", message: asciiBytes("Starting…") },
+          slotA: { phase: "running", message: utf8Bytes("Starting…") },
+          slotB: { phase: "running", message: utf8Bytes("Starting…") },
         },
         Cmd.fetch(
           {
