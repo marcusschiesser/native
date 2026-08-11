@@ -149,6 +149,10 @@ A fuller manifest for an app that also [embeds web content](/docs/frontend) and 
       <td>Target platforms: <code>macos</code>, <code>linux</code>, <code>windows</code></td>
     </tr>
     <tr>
+      <td><code>dmg</code></td>
+      <td>Optional macOS DMG presentation: volume name, PNG/JPEG/TIFF background (with automatic adjacent <code>@2x</code> discovery), usable Finder canvas and icon sizes, simple app/Applications positions, or an explicit positioned <code>items</code> list of the app, Applications alias, project files/directories, and absolute links. The zero-config defaults produce a complete drag-to-Applications layout.</td>
+    </tr>
+    <tr>
       <td><code>permissions</code></td>
       <td>Runtime permissions (see <a href="/docs/security">Security</a>). Audio capture uses <code>microphone</code> and <code>system_audio</code>; macOS packaging emits the matching microphone, audio-capture, and screen-capture usage descriptions only when declared</td>
     </tr>

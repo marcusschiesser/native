@@ -118,19 +118,20 @@ pub const WidgetKeyboardEvent = struct {
     }
 };
 
-/// Enter in a multi-line editor EDITS instead of submitting: a textarea
-/// maps a plain Enter keydown to a newline insert, and Shift+Enter stays
-/// a newline too so single-line muscle memory never destroys text. The
-/// primary-modifier chord (cmd/ctrl+Enter) is deliberately excluded —
-/// that is the textarea's submit chord — as is alt+Enter, left free for
-/// app shortcuts. Single-line kinds return null here and keep
-/// enter-to-submit. Shared by the runtime edit path and the app `on_input`
-/// dispatch so the retained text and the model always hear the same edit.
-pub fn widgetKeyboardNewlineTextEditEvent(kind: WidgetKind, event: WidgetKeyboardEvent) ?TextInputEvent {
-    if (kind != .textarea) return null;
+/// Enter in a multi-line editor normally EDITS instead of submitting.
+/// A textarea with `submit_on_enter` reverses only the plain gesture:
+/// Enter is left for its submit handler while Shift+Enter stays a
+/// newline. The primary-modifier chord (cmd/ctrl+Enter) is deliberately
+/// excluded — it is always a textarea submit chord — as is alt+Enter,
+/// left free for app shortcuts. Single-line kinds return null here and
+/// keep enter-to-submit. Shared by the runtime edit path and the app
+/// `on_input` dispatch so retained text and the model hear the same edit.
+pub fn widgetKeyboardNewlineTextEditEvent(widget: Widget, event: WidgetKeyboardEvent) ?TextInputEvent {
+    if (widget.kind != .textarea) return null;
     if (event.phase != .key_down or event.text.len != 0) return null;
     if (event.modifiers.control or event.modifiers.alt or event.modifiers.super) return null;
     if (!std.ascii.eqlIgnoreCase(event.key, "enter") and !std.ascii.eqlIgnoreCase(event.key, "return")) return null;
+    if (widget.submit_on_enter and !event.modifiers.shift) return null;
     return .{ .insert_text = "\n" };
 }
 
@@ -140,7 +141,7 @@ pub fn widgetKeyboardNewlineTextEditEvent(kind: WidgetKind, event: WidgetKeyboar
 /// wider width winning exact ties (4-space files also divide by 2).
 /// Ambiguous or unindented source falls back to two spaces.
 pub fn widgetCodeTabTextEditEvent(widget: Widget, event: WidgetKeyboardEvent) ?TextInputEvent {
-    if (widget.kind != .textarea or !widget.code_editor or widget.state.disabled) return null;
+    if (widget.kind != .textarea or !widget.runtime_flags.code_editor or widget.state.disabled) return null;
     if (event.phase != .key_down or event.focus_moved or event.text.len != 0) return null;
     if (event.modifiers.shift or event.modifiers.hasNavigationModifier()) return null;
     if (!std.ascii.eqlIgnoreCase(event.key, "tab")) return null;

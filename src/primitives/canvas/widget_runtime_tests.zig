@@ -611,6 +611,62 @@ test "widget render state dirty bounds tracks changed runtime states" {
     );
 }
 
+test "quiet logical menu focus paints and dirties the active row without an outline" {
+    const children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .menu_item,
+            .frame = geometry.RectF.init(10, 12, 120, 32),
+            .text = "Duplicate",
+        },
+        .{
+            .id = 3,
+            .kind = .menu_item,
+            .frame = geometry.RectF.init(10, 52, 120, 32),
+            .text = "Rename",
+        },
+    };
+    var nodes: [3]WidgetLayoutNode = undefined;
+    const layout = try layoutWidgetTree(.{ .kind = .stack, .children = &children }, geometry.RectF.init(0, 0, 160, 100), &nodes);
+
+    // A pointer-opened menu keeps focus-visible quiet, but ArrowDown
+    // still establishes a logical active row. That row needs the menu
+    // wash so the movement is perceptible, without acquiring the focus
+    // outline reserved for keyboard traversal between controls.
+    var commands: [16]CanvasCommand = undefined;
+    var builder = Builder.init(&commands);
+    try layout.emitDisplayListWithState(&builder, .{}, .{ .focused_id = 2 });
+    var duplicate_wash = false;
+    var rename_wash = false;
+    var duplicate_outline = false;
+    for (builder.displayList().commands) |command| switch (command) {
+        .fill_rounded_rect => |fill| {
+            if (fill.id == widgetPartId(2, 1)) duplicate_wash = true;
+            if (fill.id == widgetPartId(3, 1)) rename_wash = true;
+        },
+        .stroke_rect => |stroke| {
+            if (stroke.id == widgetPartId(2, 2)) duplicate_outline = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(duplicate_wash);
+    try std.testing.expect(!rename_wash);
+    try std.testing.expect(!duplicate_outline);
+
+    // Moving to the next row changes pixels on both the old and new
+    // rows; retained rendering must invalidate the complete union.
+    const duplicate_frame = layout.findById(2).?.frame;
+    const rename_frame = layout.findById(3).?.frame;
+    const dirty = layout.renderStateDirtyBounds(
+        .{ .focused_id = 2 },
+        .{ .focused_id = 3 },
+    ).?;
+    try std.testing.expect(dirty.x <= @min(duplicate_frame.x, rename_frame.x));
+    try std.testing.expect(dirty.y <= @min(duplicate_frame.y, rename_frame.y));
+    try std.testing.expect(dirty.maxX() >= @max(duplicate_frame.maxX(), rename_frame.maxX()));
+    try std.testing.expect(dirty.maxY() >= @max(duplicate_frame.maxY(), rename_frame.maxY()));
+}
+
 test "widget render state dirty bounds tracks terminal logical focus" {
     const rows = [_]canvas.TerminalRow{.{ .cells = &.{} }};
     var grid = canvas.TerminalGrid{
@@ -2794,6 +2850,83 @@ test "drag landing layout motion escapes its scroll lane clip" {
         else => {},
     };
     try std.testing.expect(saw_landing_motion);
+}
+
+test "rich text remains visible in floating drag and landing passes" {
+    const source = "Lifted rich text";
+    const spans = [_]canvas.TextSpan{.{ .text = source }};
+    const root_frame = geometry.RectF.init(0, 0, 320, 140);
+    const scroll_frame = geometry.RectF.init(10, 10, 140, 60);
+    const card_frame = geometry.RectF.init(12, 80, 120, 36);
+    const text_frame = geometry.RectF.init(18, 86, 108, 24);
+    const nodes = [_]WidgetLayoutNode{
+        .{
+            .widget = .{ .id = 1, .kind = .panel, .frame = root_frame },
+            .frame = root_frame,
+            .depth = 0,
+        },
+        .{
+            .widget = .{ .id = 2, .kind = .scroll_view, .frame = scroll_frame },
+            .frame = scroll_frame,
+            .depth = 1,
+            .parent_index = 0,
+        },
+        .{
+            .widget = .{
+                .id = 3,
+                .kind = .row,
+                .frame = card_frame,
+                .style = .{ .background = Color.rgb8(240, 240, 240), .radius = 6 },
+            },
+            .frame = card_frame,
+            .depth = 2,
+            .parent_index = 1,
+        },
+        .{
+            .widget = .{
+                .id = 4,
+                .kind = .text,
+                .frame = text_frame,
+                .text = source,
+                .spans = &spans,
+            },
+            .frame = text_frame,
+            .depth = 3,
+            .parent_index = 2,
+        },
+    };
+    const layout = WidgetLayoutTree{ .nodes = &nodes };
+
+    var preview_commands: [64]CanvasCommand = undefined;
+    var preview_builder = Builder.init(&preview_commands);
+    try layout.emitDisplayListWithState(&preview_builder, .{}, .{
+        .drag_preview_id = 3,
+        .drag_preview_origin = geometry.PointF.init(card_frame.x, card_frame.y),
+        .drag_preview_offset = geometry.OffsetF.init(0, -60),
+    });
+
+    var preview_has_text = false;
+    for (preview_builder.displayList().commands) |command| switch (command) {
+        .draw_text => |draw| preview_has_text = preview_has_text or std.mem.eql(u8, source, draw.text),
+        else => {},
+    };
+    try std.testing.expect(preview_has_text);
+
+    const layout_motions = [_]WidgetLayoutMotion{.{
+        .id = 3,
+        .offset = geometry.OffsetF.init(0, -60),
+        .escape_ancestor_clips = true,
+    }};
+    var landing_commands: [64]CanvasCommand = undefined;
+    var landing_builder = Builder.init(&landing_commands);
+    try layout.emitDisplayListWithState(&landing_builder, .{}, .{ .layout_motions = &layout_motions });
+
+    var landing_has_text = false;
+    for (landing_builder.displayList().commands) |command| switch (command) {
+        .draw_text => |draw| landing_has_text = landing_has_text or std.mem.eql(u8, source, draw.text),
+        else => {},
+    };
+    try std.testing.expect(landing_has_text);
 }
 
 test "input-group wears the focus ring for its focused descendant" {

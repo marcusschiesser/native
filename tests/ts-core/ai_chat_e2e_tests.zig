@@ -1,30 +1,29 @@
-//! End-to-end proof battery for examples/ai-chat-ts — the "can I call an
-//! AI API?" answer as a real app: a chat client for an OpenAI-compatible
-//! chat-completions endpoint authored in TypeScript + Native markup with
+//! End-to-end proof battery for examples/chatbot — the "can I call an
+//! AI API?" answer as a real app: a streaming Vercel AI Gateway chat
+//! client authored in TypeScript + Native markup with
 //! ZERO hand-written Zig. The build compiles the example's REAL core through the external core compiler
-//! (examples/ai-chat-ts/src/core.ts + src/api.ts) and this suite drives
+//! (examples/chatbot/src/core.ts + src/api.ts) and this suite drives
 //! it through `TsUiApp` with the example's SHIPPING markup (app.native,
 //! staged beside this file), so every pin here is the product path:
 //!
-//!   - the launch configuration rides the envMsgs channel, and the
-//!     teaching state holds (with ZERO fetches) until the endpoint, the
-//!     model name, AND the API key are all present;
+//!   - the API key and optional initial model override ride the envMsgs
+//!     channel, the prompt-group picker lists Luna, Terra, then Sol,
+//!     while the teaching state holds (with ZERO fetches) until the API
+//!     key is present;
 //!   - a scripted two-turn conversation drives the whole loop through
 //!     the fake fetch feed: the composer's byte-splice text engine, the
-//!     Send press, the EXACT request bytes (method, the bare endpoint
-//!     url, the runtime-built `authorization: Bearer <key>` header plus
-//!     the content-type header, the JSON body — system prompt first,
-//!     history growing turn by turn), and the response parse into the
-//!     committed model;
+//!     Send press, the EXACT streaming request (the fixed Gateway URL,
+//!     runtime-built `authorization: Bearer <key>`, SSE accept header,
+//!     and JSON body — system prompt first, history growing turn by
+//!     turn), then asserts each SSE delta appears before the terminal;
 //!   - the in-flight guard: a second send while one request is out
 //!     issues nothing and loses nothing (the draft survives);
 //!   - every failure shape lands in the failed state with a reason and
-//!     KEEPS the history: a 500 with an error body (the endpoint's own
-//!     error.message surfaces), a 200 whose body does not parse, a bare
-//!     non-200, a transport failure — and Retry re-sends the same
-//!     conversation;
+//!     KEEPS the history: a 500 with an error line (the Gateway's own
+//!     error.message surfaces), a stream missing [DONE], a bare non-200,
+//!     a transport failure — and Retry re-sends the same conversation;
 //!   - a recorded conversation REPLAYS BYTE-IDENTICALLY with zero host
-//!     calls — no endpoint, no network in the room (the journaled fetch
+//!     calls — no network in the room (the journaled fetch
 //!     results feed the replayed requests), and with ZERO env reads:
 //!     the launch configuration is journaled (`.env` records) at record
 //!     time, so the replay launches with the variables UNSET and again
@@ -54,11 +53,16 @@ const CompiledAppView = canvas.CompiledMarkupView(core.Model, core.Msg, app_mark
 const canvas_label = "chat-canvas";
 
 /// The one fetch key's engine slot: the "chat" request is the first (and
-/// only) named engine op the core issues, so it takes bridge op slot 0,
+/// only) stream the core issues, so it takes stream-table slot 0,
 /// deterministically in issue order.
-const chat_fetch_key: u64 = runtime_ns.ts_core_effect_key_base + 0;
+const chat_fetch_key: u64 = runtime_ns.ts_core_spawn_key_base + 0;
 
-const test_endpoint = "http://chat.test/v1/chat/completions";
+const test_endpoint = "https://ai-gateway.vercel.sh/v1/chat/completions";
+const sol_model_name = "openai/gpt-5.6-sol";
+const default_model_name = "openai/gpt-5.6-luna";
+const default_model_label = "GPT-5.6 Luna";
+const terra_model_label = "GPT-5.6 Terra";
+const sol_model_label = "GPT-5.6 Sol";
 const test_model_name = "test-model";
 const test_api_key = "test-key";
 
@@ -67,12 +71,17 @@ const app_views = [_]native_sdk.ShellView{
 };
 const app_windows = [_]native_sdk.ShellWindow{.{
     .label = "main",
-    .title = "AI Chat TS",
+    .title = "Chatbot",
     .width = 760,
     .height = 640,
+    .titlebar = .hidden_inset_tall,
     .views = &app_views,
 }};
 const app_scene: native_sdk.ShellConfig = .{ .windows = &app_windows };
+const test_window_chrome: native_sdk.WindowChrome = .{
+    .insets = .{ .top = 52, .left = 78 },
+    .buttons = geometry.RectF.init(12, 18, 54, 16),
+};
 
 /// TEST-ONLY command mapper: the journaled menu-command path for the
 /// void arms (record/replay needs every input in the journal; the app
@@ -93,7 +102,7 @@ fn testCommand(name: []const u8) ?core.Msg {
 
 fn appOptions() App.Options {
     return .{
-        .name = "ai-chat-ts-e2e",
+        .name = "chatbot-e2e",
         .scene = app_scene,
         .canvas_label = canvas_label,
         // The comptime-compiled engine over the example's shipping markup
@@ -105,7 +114,6 @@ fn appOptions() App.Options {
 
 /// The full launch configuration — every variable present.
 const configured_env = [_]Adapter.EnvValue{
-    .{ .msg = "endpoint_set", .value = test_endpoint },
     .{ .msg = "model_set", .value = test_model_name },
     .{ .msg = "key_set", .value = test_api_key },
 };
@@ -117,8 +125,8 @@ const Harness = struct {
     clock: native_sdk.TestClock,
 
     /// A configured app on the FAKE effects executor: fetch requests
-    /// park in fake slots for `feedResponse` answers instead of
-    /// reaching a network.
+    /// park in fake slots for scripted SSE lines and terminals instead
+    /// of reaching a network.
     fn create() !*Harness {
         return createConfigured(null, &configured_env);
     }
@@ -133,6 +141,10 @@ const Harness = struct {
         });
         errdefer self.harness.destroy(std.testing.allocator);
         self.harness.null_platform.gpu_surfaces = true;
+        self.harness.null_platform.window_chrome = test_window_chrome;
+        // Match the shipping desktop path: conversation scroll regions
+        // are backed by native scroll drivers, not the engine fallback.
+        self.harness.null_platform.gpu_surface_scroll_drivers = true;
         self.harness.runtime.options.session_recorder = recorder;
         self.app_state = try std.testing.allocator.create(App);
         errdefer std.testing.allocator.destroy(self.app_state);
@@ -179,6 +191,13 @@ const Harness = struct {
         return findByLabel(self.app_state.tree.?.root, label);
     }
 
+    fn focusedWidgetId(self: *Harness) canvas.ObjectId {
+        for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |view| {
+            if (std.mem.eql(u8, view.label, canvas_label)) return view.canvas_widget_focused_id;
+        }
+        return 0;
+    }
+
     /// Click a rendered widget through the automation verb — the same
     /// headless path `native automate` drives.
     fn click(self: *Harness, id: canvas.ObjectId) !void {
@@ -205,6 +224,16 @@ const Harness = struct {
         } });
     }
 
+    fn keyDownShift(self: *Harness, key: []const u8) !void {
+        try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = canvas_label,
+            .kind = .key_down,
+            .key = key,
+            .modifiers = .{ .shift = true },
+        } });
+    }
+
     /// Focus the composer, type the message, and press Send — the whole
     /// user gesture through the real input path.
     fn say(self: *Harness, text: []const u8) !void {
@@ -213,11 +242,26 @@ const Harness = struct {
         try self.click(self.findLabel("Send message").?);
     }
 
-    /// Answer the parked chat request with a scripted HTTP response and
-    /// drain the result into the core.
-    fn respond(self: *Harness, status: u16, body: []const u8) !void {
-        try self.app_state.effects.feedResponse(chat_fetch_key, status, body);
+    /// Deliver one complete response line and rebuild immediately —
+    /// this is the observable token-by-token path under test.
+    fn line(self: *Harness, bytes: []const u8) !void {
+        try self.app_state.effects.feedLine(chat_fetch_key, bytes);
         try self.wake();
+    }
+
+    /// Deliver the stream's terminal status (stream terminals have no
+    /// body) and rebuild.
+    fn finish(self: *Harness, status: u16) !void {
+        try self.app_state.effects.feedResponse(chat_fetch_key, status, "");
+        try self.wake();
+    }
+
+    /// Complete a normal one-delta Gateway response. Tests that assert
+    /// incremental rendering feed their own lines instead.
+    fn complete(self: *Harness, delta_line: []const u8) !void {
+        try self.line(delta_line);
+        try self.line("data: [DONE]");
+        try self.finish(200);
     }
 };
 
@@ -225,6 +269,14 @@ fn findKindText(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8
     if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget.id;
     for (widget.children) |child| {
         if (findKindText(child, kind, text)) |id| return id;
+    }
+    return null;
+}
+
+fn findWidgetKindText(widget: canvas.Widget, kind: canvas.WidgetKind, text: []const u8) ?canvas.Widget {
+    if (widget.kind == kind and std.mem.eql(u8, widget.text, text)) return widget;
+    for (widget.children) |child| {
+        if (findWidgetKindText(child, kind, text)) |found| return found;
     }
     return null;
 }
@@ -259,26 +311,34 @@ fn findWidgetByLabel(widget: canvas.Widget, label: []const u8) ?canvas.Widget {
 const first_request_body =
     "{\"model\":\"test-model\",\"messages\":[" ++
     "{\"role\":\"system\",\"content\":\"You are a helpful assistant inside a native desktop app. Answer concisely, in plain text.\"}," ++
-    "{\"role\":\"user\",\"content\":\"Say hi in two words\"}]}";
+    "{\"role\":\"user\",\"content\":\"Say hi in two words\"}],\"stream\":true}";
 const second_request_body =
     "{\"model\":\"test-model\",\"messages\":[" ++
     "{\"role\":\"system\",\"content\":\"You are a helpful assistant inside a native desktop app. Answer concisely, in plain text.\"}," ++
     "{\"role\":\"user\",\"content\":\"Say hi in two words\"}," ++
     "{\"role\":\"assistant\",\"content\":\"Hi there!\"}," ++
-    "{\"role\":\"user\",\"content\":\"Now say it in Zig \\\"strings\\\"\"}]}";
+    "{\"role\":\"user\",\"content\":\"Now say it in Zig \\\"strings\\\"\"}],\"stream\":true}";
+const default_request_body =
+    "{\"model\":\"openai/gpt-5.6-luna\",\"messages\":[" ++
+    "{\"role\":\"system\",\"content\":\"You are a helpful assistant inside a native desktop app. Answer concisely, in plain text.\"}," ++
+    "{\"role\":\"user\",\"content\":\"Use the default\"}],\"stream\":true}";
+const sol_request_body =
+    "{\"model\":\"openai/gpt-5.6-sol\",\"messages\":[" ++
+    "{\"role\":\"system\",\"content\":\"You are a helpful assistant inside a native desktop app. Answer concisely, in plain text.\"}," ++
+    "{\"role\":\"user\",\"content\":\"Use Sol\"}],\"stream\":true}";
 
 // ---------------------------------------------------- the teaching state
 
-test "the teaching state holds until every launch variable arrives - and issues zero fetches" {
-    // No variables at all: the setup panel teaches all three names.
+test "the teaching state only requires the Gateway key and the model has a working default" {
+    // No variables at all: the setup panel teaches the required key and
+    // names the built-in model plus its optional override.
     {
         const h = try Harness.createConfigured(null, &.{});
         defer h.destroy();
         try std.testing.expect(h.hasText("Connect a model"));
-        try std.testing.expect(h.hasText("NATIVE_SDK_CHAT_ENDPOINT"));
         try std.testing.expect(h.hasText("NATIVE_SDK_CHAT_MODEL"));
-        try std.testing.expect(h.hasText("NATIVE_SDK_CHAT_API_KEY"));
-        try std.testing.expect(h.hasText("no model configured"));
+        try std.testing.expect(h.hasText("AI_GATEWAY_API_KEY"));
+        try std.testing.expect(h.hasText(default_model_name));
         // The composer does not exist in the teaching state, and even a
         // journaled send dispatch issues nothing.
         try std.testing.expect(h.findLabel("Message") == null);
@@ -286,26 +346,86 @@ test "the teaching state holds until every launch variable arrives - and issues 
         try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.pendingFetchCount());
     }
 
-    // Endpoint and model present, the key EMPTY (the variable exists but
-    // holds nothing): still the teaching state, still zero fetches — an
-    // unkeyed app never dials the endpoint.
+    // Model present, the key EMPTY (the variable exists but holds
+    // nothing): still the teaching state, still zero fetches — an
+    // unkeyed app never dials the Gateway.
     {
         const partial_env = [_]Adapter.EnvValue{
-            .{ .msg = "endpoint_set", .value = test_endpoint },
             .{ .msg = "model_set", .value = test_model_name },
             .{ .msg = "key_set", .value = "" },
         };
         const h = try Harness.createConfigured(null, &partial_env);
         defer h.destroy();
         try std.testing.expect(h.hasText("Connect a model"));
-        // The two configured rows read "set"; the key row still teaches.
-        try std.testing.expect(h.hasText("set"));
+        // The optional override landed in the model; the prompt group is
+        // absent until configured, and the key row still teaches.
         try std.testing.expect(h.hasText("missing"));
-        try std.testing.expect(h.hasText(test_model_name));
+        try std.testing.expectEqualStrings(test_model_name, Bridge.model().modelName);
+        try std.testing.expect(!h.hasText(test_model_name));
         try h.menu("chat.send");
         try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.pendingFetchCount());
         try std.testing.expect(Bridge.model().unconfigured());
     }
+
+    // With only the required key, the teaching state clears and the
+    // first request uses the built-in model byte-for-byte.
+    {
+        const key_only_env = [_]Adapter.EnvValue{
+            .{ .msg = "key_set", .value = test_api_key },
+        };
+        const h = try Harness.createConfigured(null, &key_only_env);
+        defer h.destroy();
+        try std.testing.expect(!h.hasText("Connect a model"));
+        try std.testing.expectEqualStrings(default_model_name, Bridge.model().modelName);
+        try std.testing.expect(h.hasText(default_model_label));
+        try std.testing.expect(!Bridge.model().unconfigured());
+        try h.say("Use the default");
+        try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingFetchCount());
+        try std.testing.expectEqualStrings(default_request_body, h.app_state.effects.pendingFetchAt(0).?.body);
+    }
+}
+
+test "the prompt-group model selector changes the model used by the next request" {
+    const key_only_env = [_]Adapter.EnvValue{
+        .{ .msg = "key_set", .value = test_api_key },
+    };
+    const h = try Harness.createConfigured(null, &key_only_env);
+    defer h.destroy();
+
+    const prompt = findWidgetByLabel(h.app_state.tree.?.root, "Prompt composer").?;
+    const selector = findWidgetByLabel(prompt, "Model selector").?;
+    try std.testing.expectEqual(canvas.WidgetKind.select, selector.kind);
+    try std.testing.expect(!selector.state.disabled);
+    try std.testing.expectEqualStrings(default_model_label, selector.text);
+    try h.click(selector.id);
+    try std.testing.expect(Bridge.model().modelPickerOpen);
+
+    const models = findWidgetByLabel(h.app_state.tree.?.root, "Models").?;
+    try std.testing.expectEqual(@as(usize, 3), models.children.len);
+    try std.testing.expectEqualStrings(default_model_label, models.children[0].text);
+    try std.testing.expectEqualStrings(terra_model_label, models.children[1].text);
+    try std.testing.expectEqualStrings(sol_model_label, models.children[2].text);
+    const luna = findWidgetKindText(models, .menu_item, default_model_label).?;
+    const terra = findWidgetKindText(models, .menu_item, terra_model_label).?;
+    const sol = findWidgetKindText(models, .menu_item, sol_model_label).?;
+    try std.testing.expect(!sol.state.selected);
+    try std.testing.expect(luna.state.selected);
+    try std.testing.expect(!terra.state.selected);
+    const picker_layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const selector_frame = picker_layout.findById(selector.id).?.frame.normalized();
+    const models_frame = picker_layout.findById(models.id).?.frame.normalized();
+    try std.testing.expectEqual(@as(f32, 148), selector_frame.width);
+    try std.testing.expectEqual(@as(f32, 148), models_frame.width);
+
+    try h.click(sol.id);
+    try std.testing.expect(!Bridge.model().modelPickerOpen);
+    try std.testing.expectEqualStrings(sol_model_name, Bridge.model().modelName);
+    try std.testing.expect(h.findId(.menu_item, sol_model_label) == null);
+    try std.testing.expectEqual(h.findLabel("Message").?, h.focusedWidgetId());
+
+    try h.say("Use Sol");
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingFetchCount());
+    try std.testing.expectEqualStrings(sol_request_body, h.app_state.effects.pendingFetchAt(0).?.body);
 }
 
 test "the runtime markup interpreter builds the emitted model exactly like the compiled engine" {
@@ -335,7 +455,7 @@ test "the runtime markup interpreter builds the emitted model exactly like the c
     try collectTexts(interpreted.root, &interpreted_texts, std.testing.allocator);
     try collectTexts(compiled.root, &compiled_texts, std.testing.allocator);
     try std.testing.expectEqualStrings(interpreted_texts.items, compiled_texts.items);
-    try std.testing.expect(std.mem.indexOf(u8, compiled_texts.items, "Ask anything") != null);
+    try std.testing.expect(std.mem.indexOf(u8, compiled_texts.items, "What can I help with?") != null);
 }
 
 fn collectTexts(widget: canvas.Widget, out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator) !void {
@@ -348,32 +468,95 @@ fn collectTexts(widget: canvas.Widget, out: *std.ArrayListUnmanaged(u8), allocat
 
 // ------------------------------------------------------ the conversation
 
-test "a scripted conversation pins the exact request bytes, the parse, and the history growth" {
+test "chat content fills narrow windows and caps centered below the full-width titlebar" {
+    const h = try Harness.create();
+    defer h.destroy();
+
+    const narrow = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const narrow_header = narrow.findById(h.findLabel("Chat header").?).?.frame.normalized();
+    const narrow_content = narrow.findById(h.findLabel("Chat content").?).?.frame.normalized();
+    try std.testing.expectEqual(@as(f32, 760), narrow_header.width);
+    try std.testing.expectEqual(@as(f32, 760), narrow_content.width);
+    try std.testing.expectEqual(@as(f32, 0), narrow_content.x);
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(1600, 640),
+        .scale_factor = 1,
+        .frame_index = 2,
+        .timestamp_ns = 2_000_000,
+    } });
+    const wide = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const wide_header = wide.findById(h.findLabel("Chat header").?).?.frame.normalized();
+    const wide_content = wide.findById(h.findLabel("Chat content").?).?.frame.normalized();
+    try std.testing.expectEqual(@as(f32, 1600), wide_header.width);
+    try std.testing.expectEqual(@as(f32, 960), wide_content.width);
+    try std.testing.expectEqual(@as(f32, 320), wide_content.x);
+}
+
+test "a scripted conversation pins the Gateway request and renders each SSE delta before completion" {
     const h = try Harness.create();
     defer h.destroy();
     const fx = &h.app_state.effects;
 
-    // The configured idle state: the model badge and the empty hint.
+    // The configured idle state: a text-free custom titlebar and the
+    // empty-conversation hint. The New chat button is nested inside the
+    // draggable row but remains its own interactive exclusion.
+    const header = findWidgetByLabel(h.app_state.tree.?.root, "Chat header").?;
+    try std.testing.expect(header.window_drag);
+    try std.testing.expectEqual(@as(f64, 78), Bridge.model().chromeLeading);
+    try std.testing.expectEqual(@as(f64, 52), Bridge.model().headerHeight);
+    const new_chat = findWidgetByLabel(h.app_state.tree.?.root, "New chat").?;
+    try std.testing.expect(!new_chat.state.disabled);
+    try std.testing.expect(!h.hasText("Chatbot"));
     try std.testing.expect(h.hasText(test_model_name));
-    try std.testing.expect(h.hasText("Ask anything"));
+    try std.testing.expect(h.hasText("What can I help with?"));
+    try std.testing.expect(h.hasText("Ask a question, write code, or explore ideas."));
+    const empty_state = findWidgetByLabel(h.app_state.tree.?.root, "Empty conversation").?;
+    try std.testing.expectEqual(canvas.WidgetMainAlignment.center, empty_state.layout.main_alignment);
+    try std.testing.expectEqual(canvas.WidgetCrossAlignment.center, empty_state.layout.cross_alignment);
 
-    // Type into the composer through the real text-input path (the
-    // core's byte-splice engine) and send. The engine channel holds the
-    // request whole: POST, the bare configured endpoint, the
-    // runtime-built `authorization: Bearer <key>` header (header VALUES
-    // may be runtime bytes; the key never rides the URL) plus the JSON
-    // content-type header in name-sort order, and the byte-exact body.
-    try h.say("Say hi in two words");
+    // The prompt is one grouped field: a multiline entry first, then the
+    // model selector and icon-only arrow submit action inside its border.
+    const prompt = findWidgetByLabel(h.app_state.tree.?.root, "Prompt composer").?;
+    try std.testing.expectEqual(canvas.WidgetKind.input_group, prompt.kind);
+    try std.testing.expectEqual(@as(usize, 2), prompt.children.len);
+    try std.testing.expect(findWidgetByLabel(prompt, "Model selector") != null);
+    const message_entry = findWidgetByLabel(prompt, "Message").?;
+    try std.testing.expectEqual(canvas.WidgetKind.textarea, message_entry.kind);
+    try std.testing.expect(message_entry.submit_on_enter);
+    const send_button = findWidgetByLabel(prompt, "Send message").?;
+    try std.testing.expectEqual(canvas.WidgetKind.button, send_button.kind);
+    try std.testing.expectEqualStrings("arrow-up", send_button.icon);
+    try std.testing.expectEqualStrings("", send_button.text);
+
+    // The composer takes focus when the configured app mounts, so text
+    // input lands there without a click. Type through that real input
+    // path (the core's byte-splice engine) and press plain Enter. The
+    // engine channel holds the request whole: POST, the fixed Vercel AI
+    // Gateway endpoint, and the runtime-built
+    // `authorization: Bearer <key>` header (header VALUES
+    // may be runtime bytes; the key never rides the URL), the SSE accept
+    // header and JSON content type in name-sort order, and the byte-exact
+    // body with `stream: true`.
+    const composer_id = h.findLabel("Message").?;
+    try std.testing.expectEqual(composer_id, h.focusedWidgetId());
+    try h.textInput("Say hi in two words");
+    try h.keyDown("enter");
     try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     const request = fx.pendingFetchAt(0).?;
     try std.testing.expectEqual(chat_fetch_key, request.key);
     try std.testing.expectEqual(std.http.Method.POST, request.method);
+    try std.testing.expectEqual(runtime_ns.FetchResponseMode.stream, request.response);
+    try std.testing.expectEqual(@as(usize, 65_536), request.max_line_bytes);
     try std.testing.expectEqualStrings(test_endpoint, request.url);
-    try std.testing.expectEqual(@as(usize, 2), request.headers.len);
-    try std.testing.expectEqualStrings("authorization", request.headers[0].name);
-    try std.testing.expectEqualStrings("Bearer " ++ test_api_key, request.headers[0].value);
-    try std.testing.expectEqualStrings("content-type", request.headers[1].name);
-    try std.testing.expectEqualStrings("application/json", request.headers[1].value);
+    try std.testing.expectEqual(@as(usize, 3), request.headers.len);
+    try std.testing.expectEqualStrings("accept", request.headers[0].name);
+    try std.testing.expectEqualStrings("text/event-stream", request.headers[0].value);
+    try std.testing.expectEqualStrings("authorization", request.headers[1].name);
+    try std.testing.expectEqualStrings("Bearer " ++ test_api_key, request.headers[1].value);
+    try std.testing.expectEqualStrings("content-type", request.headers[2].name);
+    try std.testing.expectEqualStrings("application/json", request.headers[2].value);
     try std.testing.expectEqualStrings(first_request_body, request.body);
 
     // The optimistic model: the user turn committed, the draft cleared,
@@ -387,11 +570,43 @@ test "a scripted conversation pins the exact request bytes, the parse, and the h
         defer draft_arena.deinit();
         try std.testing.expectEqual(@as(usize, 0), Bridge.model().draftText(draft_arena.allocator()).len);
     }
-    try std.testing.expect(h.hasText("waiting for the model"));
+    try std.testing.expectEqual(composer_id, h.focusedWidgetId());
+    const submitted_layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), submitted_layout.findById(composer_id).?.widget.text_selection.?);
+    try std.testing.expect(h.hasText("…"));
+    {
+        const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+        const conversation = layout.findById(h.findLabel("Conversation").?).?;
+        const history = findWidgetByLabel(h.app_state.tree.?.root, "Conversation history").?;
+        const prompt_frame = layout.findById(h.findLabel("Prompt composer").?).?.frame.normalized();
+        const user_turn = layout.findById(h.findLabel("You said").?).?;
+        try std.testing.expectEqual(@as(f32, 24), history.layout.padding.bottom);
+        try std.testing.expectApproxEqAbs(conversation.frame.normalized().maxY(), prompt_frame.y, 0.01);
+        try std.testing.expect(conversation.frame.intersects(user_turn.frame));
+    }
 
-    // The endpoint answers; the reply parses out of choices[0] (escapes
-    // decoded) and joins the history as the assistant turn.
-    try h.respond(200, "{ \"id\": \"c-1\", \"object\": \"chat.completion\", \"choices\": [ { \"index\": 0, \"message\": { \"role\": \"assistant\", \"content\": \"Hi there!\" }, \"finish_reason\": \"stop\" } ], \"usage\": { \"total_tokens\": 7 } }");
+    // A role-only chunk is a valid no-op. Then each content delta lands
+    // in committed pendingReply and is visible BEFORE [DONE] or the HTTP
+    // terminal — this is the behavior an AI chat UI needs.
+    try h.line("data: {\"id\":\"c-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}");
+    try std.testing.expectEqualStrings("", Bridge.model().pendingReply);
+    try h.line("data: {\"id\":\"c-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi \"}}]}");
+    try std.testing.expect(Bridge.model().phase == .sending);
+    try std.testing.expectEqualStrings("Hi ", Bridge.model().pendingReply);
+    try std.testing.expect(h.hasText("Hi "));
+    {
+        const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+        const conversation = layout.findById(h.findLabel("Conversation").?).?;
+        const pending_reply = layout.findById(h.findLabel("Reply pending").?).?;
+        try std.testing.expect(conversation.frame.intersects(pending_reply.frame));
+    }
+    try h.line("data:{\"choices\":[{\"delta\":{\"content\":\"there!\"},\"finish_reason\":\"stop\"}]}\r");
+    try std.testing.expectEqualStrings("Hi there!", Bridge.model().pendingReply);
+    try std.testing.expect(h.hasText("Hi there!"));
+    try h.line("data: [DONE]");
+    try std.testing.expect(Bridge.model().phase == .sending);
+    try std.testing.expect(Bridge.model().streamDone);
+    try h.finish(200);
     try std.testing.expect(Bridge.model().phase == .idle);
     try std.testing.expectEqual(@as(usize, 2), Bridge.model().turns.len);
     try std.testing.expect(Bridge.model().turns[1].role == .assistant);
@@ -404,11 +619,115 @@ test "a scripted conversation pins the exact request bytes, the parse, and the h
     try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     try std.testing.expectEqualStrings(second_request_body, fx.pendingFetchAt(0).?.body);
 
-    // A reply whose content carries JSON escapes decodes into real
-    // bytes: the \n and the \" land in the committed turn.
-    try h.respond(200, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"const hi =\\n    \\\"hi\\\";\"}}]}");
+    // Deltas whose content carries JSON escapes decode into real bytes:
+    // the \n and the \" land in the committed turn after [DONE].
+    try h.complete("data: {\"choices\":[{\"delta\":{\"content\":\"const hi =\\n    \\\"hi\\\";\"}}]}");
     try std.testing.expectEqual(@as(usize, 4), Bridge.model().turns.len);
     try std.testing.expectEqualStrings("const hi =\n    \"hi\";", Bridge.model().turns[3].text);
+}
+
+test "long streamed replies wrap inside the conversation instead of overflowing on x" {
+    const h = try Harness.create();
+    defer h.destroy();
+
+    const long_reply =
+        "Every night, Lina left a cup of tea on her windowsill for the moon, " ++
+        "because her grandmother had once said that kindness travels farther " ++
+        "than footsteps and always finds its way home before morning.";
+    const long_reply_event =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"" ++ long_reply ++ "\"}}]}";
+
+    try h.say("tell me a story");
+    try h.line(long_reply_event);
+    try std.testing.expectEqualStrings(long_reply, Bridge.model().pendingReply);
+
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const conversation = layout.findById(h.findLabel("Conversation").?).?.frame.normalized();
+    const reply_text = layout.findById(h.findId(.text, long_reply).?).?.frame.normalized();
+    try std.testing.expect(reply_text.x >= conversation.x);
+    try std.testing.expect(reply_text.maxX() <= conversation.maxX());
+    try std.testing.expect(reply_text.width < conversation.width);
+    try std.testing.expect(reply_text.height > 20);
+
+    try h.complete("data: {\"choices\":[{\"delta\":{\"content\":\" done\"}}]}");
+}
+
+test "a streamed reply paints its visible tail beyond the paragraph page cap" {
+    const h = try Harness.create();
+    defer h.destroy();
+
+    const long_reply =
+        ("The lantern kept watch through the night.\n" ** 150) ++
+        "TAIL_SENTINEL";
+    const long_reply_event =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"" ++
+        ("The lantern kept watch through the night.\\n" ** 150) ++
+        "TAIL_SENTINEL\"}}]}";
+
+    try h.say("tell me a long story");
+    try h.line(long_reply_event);
+    try std.testing.expectEqualStrings(long_reply, Bridge.model().pendingReply);
+
+    // The chat's controlled scroll follows each streamed delta to the
+    // bottom. The visible display list must therefore contain the final
+    // response page, not just reserve its height beneath the first 128
+    // painted visual lines.
+    const layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    var commands: [512]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetLayout(&builder, layout, .{});
+    var saw_tail = false;
+    for (builder.displayList().commands) |command| {
+        if (command == .draw_text and std.mem.indexOf(u8, command.draw_text.text, "TAIL_SENTINEL") != null) {
+            saw_tail = true;
+        }
+    }
+    try std.testing.expect(saw_tail);
+
+    try h.line("data: [DONE]");
+    try h.finish(200);
+
+    const finished_layout = try h.harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const finished_reply = finished_layout.findById(h.findLabel("The model said").?).?.frame.normalized();
+    const tail_padding = finished_layout.findById(h.findLabel("Conversation tail padding").?).?.frame.normalized();
+    const prompt = finished_layout.findById(h.findLabel("Prompt composer").?).?.frame.normalized();
+    try std.testing.expectEqual(@as(f32, 24), tail_padding.height);
+    try std.testing.expect(finished_reply.maxY() <= tail_padding.y);
+    try std.testing.expectApproxEqAbs(prompt.y, tail_padding.maxY(), 0.01);
+}
+
+test "long visible history sends a recent suffix within the fetch body bound" {
+    const h = try Harness.create();
+    defer h.destroy();
+
+    // Each wire pair decodes to one quote. Two individually valid SSE
+    // lines build a 40 KiB visible assistant turn which needs more than
+    // 80 KiB when JSON escaping puts it into the next request.
+    const escaped_quotes = "\\\"" ** (20 * 1024);
+    const quote_event =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"" ++
+        escaped_quotes ++
+        "\"}}]}";
+
+    try h.say("quote something");
+    try h.line(quote_event);
+    try h.line(quote_event);
+    try h.line("data: [DONE]");
+    try h.finish(200);
+    try std.testing.expectEqual(@as(usize, 2), Bridge.model().turns.len);
+    try std.testing.expectEqual(@as(usize, 40 * 1024), Bridge.model().turns[1].text.len);
+
+    // Full history remains committed and visible, while only the newest
+    // user-led suffix rides the bounded provider request.
+    try h.say("follow up");
+    try std.testing.expectEqual(@as(usize, 3), Bridge.model().turns.len);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingFetchCount());
+    const request = h.app_state.effects.pendingFetchAt(0).?;
+    try std.testing.expect(request.body.len <= 64 * 1024);
+    try std.testing.expect(std.mem.indexOf(u8, request.body, "follow up") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request.body, "quote something") == null);
+
+    try h.complete("data: {\"choices\":[{\"delta\":{\"content\":\"still here\"}}]}");
 }
 
 test "the in-flight guard: a second send issues nothing and loses nothing" {
@@ -420,14 +739,30 @@ test "the in-flight guard: a second send issues nothing and loses nothing" {
     try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     try std.testing.expectEqual(@as(usize, 1), Bridge.model().turns.len);
 
-    // Type a follow-up while the request is out: the Send button is
-    // DISABLED (the markup binds the same guard update enforces — a
-    // click is impossible), and even the journaled command path issues
-    // nothing — no second fetch, no phantom turn, and the draft
-    // SURVIVES (a blocked send loses nothing).
+    // Model choice stays live while this request streams. The already
+    // issued request keeps its captured model; the new choice is state
+    // for the next prompt only.
+    const selector = findWidgetByLabel(h.app_state.tree.?.root, "Model selector").?;
+    try std.testing.expect(!selector.state.disabled);
+    try h.click(selector.id);
+    const models = findWidgetByLabel(h.app_state.tree.?.root, "Models").?;
+    const sol = findWidgetKindText(models, .menu_item, sol_model_label).?;
+    try h.click(sol.id);
+    try std.testing.expectEqualStrings(sol_model_name, Bridge.model().modelName);
+    const in_flight = fx.pendingFetchAt(0).?;
+    try std.testing.expect(std.mem.indexOf(u8, in_flight.body, "\"model\":\"test-model\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, in_flight.body, sol_model_name) == null);
+
+    // Type a follow-up while the request is out: the Send action has
+    // become an enabled Stop action, while the update guard still makes
+    // even a journaled send a no-op — no second fetch, no phantom turn,
+    // and the draft SURVIVES (a blocked send loses nothing).
     try h.click(h.findLabel("Message").?);
     try h.textInput("eager follow-up");
-    try std.testing.expect(findWidgetByLabel(h.app_state.tree.?.root, "Send message").?.state.disabled);
+    try std.testing.expect(findWidgetByLabel(h.app_state.tree.?.root, "Send message") == null);
+    const stop_button = findWidgetByLabel(h.app_state.tree.?.root, "Stop generating").?;
+    try std.testing.expect(!stop_button.state.disabled);
+    try std.testing.expectEqualStrings("x", stop_button.icon);
     try h.menu("chat.send");
     try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     try std.testing.expectEqual(@as(usize, 1), Bridge.model().turns.len);
@@ -439,17 +774,71 @@ test "the in-flight guard: a second send issues nothing and loses nothing" {
 
     // The reply lands and the guard lifts: the surviving draft sends
     // through the journaled command path.
-    try h.respond(200, "{\"choices\":[{\"message\":{\"content\":\"answer\"}}]}");
+    try h.complete("data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}");
     try std.testing.expectEqual(@as(usize, 2), Bridge.model().turns.len);
     try h.menu("chat.send");
     try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
-    try h.respond(200, "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}");
+    try std.testing.expect(std.mem.indexOf(u8, fx.pendingFetchAt(0).?.body, "\"model\":\"openai/gpt-5.6-sol\"") != null);
+    try h.complete("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}");
     try std.testing.expectEqual(@as(usize, 4), Bridge.model().turns.len);
     try h.click(h.findLabel("Message").?);
     try h.textInput("   ");
     try h.click(h.findLabel("Send message").?);
     try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
     try std.testing.expectEqual(@as(usize, 4), Bridge.model().turns.len);
+
+    // Shift+Enter inserts a real LF in the textarea. General whitespace
+    // trimming must still reject the draft instead of issuing a blank turn.
+    try h.click(h.findLabel("Message").?);
+    try h.keyDownShift("enter");
+    {
+        var draft_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer draft_arena.deinit();
+        try std.testing.expectEqualStrings("   \n", Bridge.model().draftText(draft_arena.allocator()));
+    }
+    try h.click(h.findLabel("Send message").?);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    try std.testing.expectEqual(@as(usize, 4), Bridge.model().turns.len);
+
+    // New chat remains available during a live reply: it cancels the
+    // keyed stream and resets both history and the composer immediately.
+    try h.say("cancel this reply");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    try h.click(h.findLabel("New chat").?);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    try std.testing.expectEqual(@as(usize, 0), Bridge.model().turns.len);
+    try std.testing.expect(Bridge.model().phase == .idle);
+    {
+        var draft_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer draft_arena.deinit();
+        try std.testing.expectEqualStrings("", Bridge.model().draftText(draft_arena.allocator()));
+    }
+}
+
+test "Stop cancels the live stream immediately and keeps its partial response" {
+    const h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    try h.say("write a long answer");
+    try h.line("data: {\"choices\":[{\"delta\":{\"content\":\"A partial answer\"}}]}");
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    try std.testing.expectEqualStrings("A partial answer", Bridge.model().pendingReply);
+
+    const stop_button = findWidgetByLabel(h.app_state.tree.?.root, "Stop generating").?;
+    try h.click(stop_button.id);
+
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    try std.testing.expect(Bridge.model().phase == .idle);
+    try std.testing.expectEqual(@as(usize, 2), Bridge.model().turns.len);
+    try std.testing.expect(Bridge.model().turns[0].role == .user);
+    try std.testing.expect(Bridge.model().turns[1].role == .assistant);
+    try std.testing.expectEqualStrings("A partial answer", Bridge.model().turns[1].text);
+    try std.testing.expectEqual(@as(usize, 0), Bridge.model().pendingReply.len);
+    try std.testing.expect(h.hasText("A partial answer"));
+    try std.testing.expect(findWidgetByLabel(h.app_state.tree.?.root, "Stop generating") == null);
+    try std.testing.expect(!findWidgetByLabel(h.app_state.tree.?.root, "Send message").?.state.disabled);
+    try std.testing.expectEqual(h.findLabel("Message").?, h.focusedWidgetId());
 }
 
 // ---------------------------------------------------------- failure paths
@@ -459,10 +848,11 @@ test "every failure shape lands in the failed state with a reason and keeps the 
     defer h.destroy();
     const fx = &h.app_state.effects;
 
-    // A 500 with a chat-completions error body: the endpoint's own
+    // A 500 with a chat-completions error line: the Gateway's own
     // error.message surfaces, and the unanswered user turn stays.
     try h.say("hello?");
-    try h.respond(500, "{ \"error\": { \"message\": \"model overloaded\", \"type\": \"server_error\" } }");
+    try h.line("{ \"error\": { \"message\": \"model overloaded\", \"type\": \"server_error\" } }");
+    try h.finish(500);
     try std.testing.expect(Bridge.model().phase == .failed);
     try std.testing.expectEqualStrings("model overloaded", Bridge.model().failReason);
     try std.testing.expectEqual(@as(usize, 1), Bridge.model().turns.len);
@@ -476,23 +866,25 @@ test "every failure shape lands in the failed state with a reason and keeps the 
     try std.testing.expect(Bridge.model().phase == .sending);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
     try std.testing.expectEqual(@as(usize, 1), Bridge.model().turns.len);
-    try h.respond(200, "{\"choices\":[{\"message\":{\"content\":\"hi\"}}]}");
+    try h.complete("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}");
     try std.testing.expect(Bridge.model().phase == .idle);
     try std.testing.expectEqual(@as(usize, 2), Bridge.model().turns.len);
 
-    // A 200 whose body is not a chat completion is failed, never a
-    // half-parsed conversation.
+    // A 200 stream that ends without the protocol's [DONE] marker is
+    // failed, never a silently accepted partial conversation.
     try h.say("again");
-    try h.respond(200, "<html>gateway error</html>");
+    try h.line("<html>gateway error</html>");
+    try h.finish(200);
     try std.testing.expect(Bridge.model().phase == .failed);
-    try std.testing.expectEqualStrings("the response did not parse as a chat completion", Bridge.model().failReason);
+    try std.testing.expectEqualStrings("the response stream ended before [DONE]", Bridge.model().failReason);
     try std.testing.expectEqual(@as(usize, 3), Bridge.model().turns.len);
 
     // A non-200 without an error body reads as its status line.
     try h.click(h.findLabel("Retry request").?);
-    try h.respond(404, "not found");
+    try h.line("not found");
+    try h.finish(404);
     try std.testing.expect(Bridge.model().phase == .failed);
-    try std.testing.expectEqualStrings("the endpoint answered HTTP 404", Bridge.model().failReason);
+    try std.testing.expectEqualStrings("Vercel AI Gateway answered HTTP 404", Bridge.model().failReason);
 
     // A transport failure surfaces the engine's machine-readable reason.
     try h.click(h.findLabel("Retry request").?);
@@ -502,12 +894,15 @@ test "every failure shape lands in the failed state with a reason and keeps the 
     try std.testing.expectEqualStrings("timed_out", Bridge.model().failReason);
     try std.testing.expect(h.hasText("timed_out"));
 
-    // The history survived the whole gauntlet, and Clear resets it.
+    // The history survived the whole gauntlet, and the titlebar's New
+    // chat button resets it through the real markup press path.
     try std.testing.expectEqual(@as(usize, 3), Bridge.model().turns.len);
-    try h.menu("chat.clear");
+    const new_chat = findWidgetByLabel(h.app_state.tree.?.root, "New chat").?;
+    try std.testing.expect(!new_chat.state.disabled);
+    try h.click(new_chat.id);
     try std.testing.expectEqual(@as(usize, 0), Bridge.model().turns.len);
     try std.testing.expect(Bridge.model().phase == .idle);
-    try std.testing.expect(h.hasText("Ask anything"));
+    try std.testing.expect(h.hasText("What can I help with?"));
 }
 
 // -------------------------------------------------------- record / replay
@@ -567,7 +962,7 @@ fn recordSession(buffer: *JournalBuffer) !ChatSnapshot {
     const recorder = try std.heap.page_allocator.create(runtime_ns.SessionRecorder);
     defer std.heap.page_allocator.destroy(recorder);
     recorder.* = runtime_ns.SessionRecorder.init(buffer.sink());
-    recorder.begin(.{ .platform_name = "test", .app_name = "ai-chat-ts-e2e", .window_width = 760, .window_height = 640 });
+    recorder.begin(.{ .platform_name = "test", .app_name = "chatbot-e2e", .window_width = 760, .window_height = 640 });
 
     const h = try Harness.createConfigured(recorder, &configured_env);
     defer h.destroy();
@@ -575,7 +970,7 @@ fn recordSession(buffer: *JournalBuffer) !ChatSnapshot {
     try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
     try h.menu("chat.say.one");
     try h.menu("chat.send");
-    try h.respond(200, "{\"choices\":[{\"message\":{\"content\":\"Hi there!\"}}]}");
+    try h.complete("data: {\"choices\":[{\"delta\":{\"content\":\"Hi there!\"}}]}");
     try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
 
     // A transport failure and its retry are part of the recorded truth.
@@ -584,7 +979,7 @@ fn recordSession(buffer: *JournalBuffer) !ChatSnapshot {
     try h.app_state.effects.feedResponseOutcome(chat_fetch_key, .timed_out, 0, "");
     try h.wake();
     try h.menu("chat.retry");
-    try h.respond(200, "{\"choices\":[{\"message\":{\"content\":\"Certainly.\"}}]}");
+    try h.complete("data: {\"choices\":[{\"delta\":{\"content\":\"Certainly.\"}}]}");
     try h.harness.runtime.dispatchPlatformEvent(h.app, .frame_requested);
 
     recorder.finish();
@@ -601,6 +996,10 @@ fn replayWithEnv(journal_bytes: []const u8, env_values: []const Adapter.EnvValue
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
+    // Replay must expose the same shell geometry and native-scroll
+    // capabilities as recording; both affect the rendered checkpoint.
+    harness.null_platform.window_chrome = test_window_chrome;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
     const app_state = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app_state);
     app_state.* = Adapter.init(std.heap.page_allocator, .{ .env_values = env_values }, appOptions());
@@ -631,7 +1030,7 @@ test "a recorded conversation replays byte-identically with zero host calls" {
 
     // Replay into a fresh app with the variables UNSET: the journaled
     // fetch results feed the re-issued (parked) requests in recorded
-    // order — no endpoint, no network, no host calls — and the launch
+    // order — no network and no host calls — and the launch
     // configuration feeds from the journal's `.env` records, so replay
     // performs ZERO env reads. A machine with none of the variables set
     // replays the recorded conversation byte-identically.
@@ -639,29 +1038,27 @@ test "a recorded conversation replays byte-identically with zero host calls" {
         const report = try replayWithEnv(buffer.journalBytes(), &.{});
         try std.testing.expect(report.ok());
         try std.testing.expect(report.events_replayed > 0);
-        // The journaled effect results are the three fetch answers (two
-        // successes and the timeout) plus the three env deliveries.
-        try std.testing.expectEqual(@as(u64, 6), report.effects_fed);
+        // Each success is a delta line, [DONE], and terminal; add the
+        // timeout plus the two env deliveries.
+        try std.testing.expectEqual(@as(u64, 9), report.effects_fed);
         try std.testing.expectEqualDeep(recorded, ChatSnapshot.take());
     }
 
     // Replay again with the variables CHANGED at replay launch: the
-    // journaled values still win (the recorded endpoint/model/key drive
+    // journaled values still win (the recorded model/key drive
     // the replay, never the replay launch's environment) — the recorded
     // truth is immune to the machine it replays on.
     {
         const changed_env = [_]Adapter.EnvValue{
-            .{ .msg = "endpoint_set", .value = "http://other.test/v2/chat" },
             .{ .msg = "model_set", .value = "other-model" },
             .{ .msg = "key_set", .value = "other-key" },
         };
         const report = try replayWithEnv(buffer.journalBytes(), &changed_env);
         try std.testing.expect(report.ok());
-        try std.testing.expectEqual(@as(u64, 6), report.effects_fed);
+        try std.testing.expectEqual(@as(u64, 9), report.effects_fed);
         try std.testing.expectEqualDeep(recorded, ChatSnapshot.take());
         // The recorded configuration, not the changed launch's, is the
         // replayed model's.
         try std.testing.expectEqualStrings(test_model_name, Bridge.model().modelName);
-        try std.testing.expectEqualStrings(test_endpoint, Bridge.model().endpoint);
     }
 }

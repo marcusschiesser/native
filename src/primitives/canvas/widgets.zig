@@ -264,6 +264,18 @@ pub const WidgetState = struct {
     invalid: bool = false,
 };
 
+/// Engine-owned widget markers share one byte so adding runtime policy does
+/// not expand every retained `Widget`. Builder-facing behavior remains on
+/// ordinary named fields; these bits are stamped only by engine code.
+pub const WidgetRuntimeFlags = packed struct(u8) {
+    /// `Ui.code` stamped this textarea as the editor surface.
+    code_editor: bool = false,
+    /// The runtime installed an OS-native scroll driver; engine-drawn
+    /// scrollbar and kinetic physics stand down for this scroll view.
+    native_scroll: bool = false,
+    _reserved: u6 = 0,
+};
+
 /// Two 128-line masks for code-only diff presentation. `Widget` packs them
 /// into fields dormant on decorated code so ordinary widgets do not grow.
 pub const CodeDiffLines = struct {
@@ -947,7 +959,14 @@ pub const Widget = struct {
     /// selection, and accessibility paths all apply; this bit only swaps
     /// the textarea's visual/geometry policy to bare monospace highlighted
     /// code (no control fill, border, radius, focus ring, or inset).
-    code_editor: bool = false,
+    runtime_flags: WidgetRuntimeFlags = .{},
+    /// Textarea Enter policy (`ElementOptions.submit_on_enter` / markup
+    /// `submit-on-enter`): plain Enter submits instead of editing, while
+    /// Shift+Enter remains a newline. False keeps the ordinary multiline
+    /// contract. Ignored by non-textarea kinds. The engine-only booleans in
+    /// `runtime_flags` share a byte so adding this policy does not grow every
+    /// retained widget.
+    submit_on_enter: bool = false,
     /// Syntax grammar for an editable `Ui.code` surface. Editable code
     /// retains one plain source span and tokenizes only visible logical
     /// lines during paint, so large documents do not consume the view's
@@ -1033,10 +1052,6 @@ pub const Widget = struct {
     semantics: WidgetSemantics = .{},
     /// App-declared native context menu for this widget (empty = none).
     context_menu: []const WidgetContextMenuItem = &.{},
-    /// True when the runtime installed a native scroll driver for this
-    /// `.scroll_view`: the engine's drawn scrollbar and kinetic physics
-    /// stand down — the OS scroller owns feel and the overlay scroller.
-    native_scroll: bool = false,
     /// Per-region edge behavior for scroll containers (`overscroll:` in
     /// the builder, `overscroll=` in markup): `.default` follows the
     /// `ScrollPhysics.overscroll` token (off unless a theme flips it),
@@ -1617,4 +1632,13 @@ fn mergeLayoutDefaults(explicit: WidgetLayoutStyle, defaults: WidgetLayoutStyle)
     if (!explicit.clip_content) merged.clip_content = defaults.clip_content;
     if (explicit.min_size.width == 0 and explicit.min_size.height == 0) merged.min_size = defaults.min_size;
     return merged;
+}
+
+test "Widget keeps the retained hot-path footprint after textarea policy flags" {
+    // One layout tree holds thousands of Widgets by value. On the 64-bit
+    // targets that run the renderer, 776 bytes is the reviewed footprint;
+    // packing engine-only markers keeps the new textarea policy within it.
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 776), @sizeOf(Widget));
+    }
 }

@@ -34,10 +34,9 @@
 //   Cmd.cancel(key)              drop the in-flight keyed effect — request,
 //                                readFile/writeFile/fetch/clipboardRead, or
 //                                delay — SILENTLY (no terminal arm dispatch).
-//                                Aimed at a live spawn it stays LOUD: the
-//                                child dies and the err arm runs with
-//                                "cancelled" — killing a process is an
-//                                observable event
+//                                Aimed at a live spawn or streaming fetch it
+//                                stays LOUD: the err arm runs with
+//                                "cancelled" — ending a stream is observable
 //   Cmd.batch([a, b, ...])       several commands from one dispatch
 //
 // The named engine ops (each maps onto the host's effect engine directly;
@@ -61,6 +60,13 @@
 //                                the reason bytes ("connect_failed",
 //                                "tls_failed", "protocol_failed", "timed_out",
 //                                "rejected", "truncated")
+//   Cmd.fetch({ ..., maxLineBytes? }, { key?, line, ok, err })
+//                                streaming HTTP(S) exchange; each complete
+//                                response line dispatches the one-bytes-field
+//                                `line` arm, then exactly one terminal follows:
+//                                `ok` with the HTTP status as its one number
+//                                field, or `err` with the transport reason
+//                                (or "truncated" if any line was cut/dropped)
 //   Cmd.clipboardWrite(bytes)    fire-and-forget clipboard write
 //   Cmd.clipboardRead({ key?, ok, err })
 //                                clipboard read; ok arm carries the text bytes,
@@ -235,10 +241,10 @@
 // The keyed-effect discipline is ONE rule: a keyed effect REPLACES its live
 // predecessor (the superseded effect's result is dropped — no message), and
 // Cmd.cancel drops it silently. That holds for request, readFile, writeFile,
-// fetch, clipboardRead, and delay alike. The ONE exception is a live spawn
-// key: a duplicate REJECTS the new spawn (err arm "rejected") — a running
-// subprocess is never killed implicitly; cancel it first. And spawn's cancel
-// stays loud (err arm "cancelled"): killing a process is an observable event.
+// buffered fetch, clipboardRead, and delay alike. Live spawn and streaming-
+// fetch keys are the exceptions: a duplicate REJECTS the new stream (err arm
+// "rejected") so results from two sources are never spliced together. Cancel
+// either stream first; its err arm runs with "cancelled".
 //
 // `Sub` is the recurring-effects surface: an app may export
 // `subscriptions(model): Sub<Msg>` returning declarative descriptors the
@@ -636,8 +642,9 @@ export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "
 
 /// The payload shape of a pty event arm — seven fields, matched by NAME
 /// (the AudioEventArm convention). `key` is the app's own session key
-/// (the `Cmd.ptySpawn` `key`, or "" when the spawn named none) — two
-/// sessions routing one event arm are told apart by this field. `state`
+/// as byte text (the `Cmd.ptySpawn` `key`, or empty bytes when the spawn
+/// named none) — two sessions routing one event arm are told apart by
+/// this field. `state`
 /// must be a named string-literal-union alias carrying exactly the two
 /// PtyState members and `reason` one carrying exactly the five
 /// PtyExitReason members (any declaration order — the host matches
@@ -648,7 +655,7 @@ export type PtyExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "
 /// payloads refused over the session's life — zero means every write
 /// reached the child, never a silent drop.
 export type PtyEventArm = {
-  readonly key: string;
+  readonly key: Uint8Array;
   readonly state: PtyState;
   readonly bytes: Uint8Array;
   readonly code: number;
@@ -658,7 +665,7 @@ export type PtyEventArm = {
 };
 
 /// The Msg arms a pty session may target: arms whose payload is exactly
-/// the six PtyEventArm fields. The `state` and `reason` checks run BOTH
+/// the seven PtyEventArm fields. The `state` and `reason` checks run BOTH
 /// directions (the AudioEventKind convention): the `&` constraint holds
 /// the arm's unions to PtyState/PtyExitReason, and the tuple-wrapped
 /// reverse checks hold them to the arm's — a narrower union would
@@ -679,7 +686,7 @@ export type PtyEventKind<M extends Msgish> = M extends Msgish
   : never;
 
 /// `Cmd.ptySpawn` routing: every session event dispatches the `event`
-/// arm (the six-field PtyEventArm record, matched by field name).
+/// arm (the seven-field PtyEventArm record, matched by field name).
 /// `cols`/`rows` are the initial grid the child observes (80x24 when
 /// omitted); `term` is the TERM the child starts with (omitted = the
 /// engine's default). The optional `key` names the session for
@@ -723,6 +730,18 @@ export interface WriteRoute<M extends Msgish> {
 export interface FetchRoute<M extends Msgish> {
   readonly key?: string;
   readonly ok: FetchedKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// Streaming `Cmd.fetch` routing: each complete response line dispatches the
+/// `line` arm with its bytes; the one successful terminal dispatches `ok` with
+/// the HTTP status. A cut/dropped line dispatches `err` with `"truncated"` at
+/// the terminal; transport failure and cancellation dispatch `err` with their
+/// machine-readable reason bytes.
+export interface FetchStreamRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly line: BytesKind<M>;
+  readonly ok: TimestampKind<M>;
   readonly err: BytesKind<M>;
 }
 
@@ -828,6 +847,15 @@ export interface FetchSpec {
   readonly timeoutMs?: number;
 }
 
+/// A line-streamed fetch request. `maxLineBytes` overrides the engine's 4 KiB
+/// per-line default for SSE/NDJSON protocols whose individual records are
+/// larger; it is bounded by the engine's 256 KiB per-line ceiling. If a line
+/// is cut or dropped, the stream still ends through `err: "truncated"` rather
+/// than reporting a successful terminal.
+export interface FetchStreamSpec extends FetchSpec {
+  readonly maxLineBytes?: number;
+}
+
 /// A desktop notification request. Text is bytes so every field may come
 /// directly from model data; subtitle and body default to empty. Delivery is
 /// fire-and-forget because the OS may suppress an accepted request through
@@ -884,6 +912,19 @@ export type Cmd<M extends Msgish> =
       /// A string value is compile-time text; a Uint8Array value is
       /// runtime bytes (both encode as the record's length-prefixed
       /// value field).
+      readonly headers: readonly { readonly name: string; readonly value: string | Uint8Array }[];
+      readonly body: Uint8Array;
+    }
+  | {
+      readonly op: "fetch_stream";
+      readonly key: string;
+      readonly lineKind: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly method: FetchMethod;
+      readonly timeoutMs: number;
+      readonly maxLineBytes: number;
+      readonly url: Uint8Array;
       readonly headers: readonly { readonly name: string; readonly value: string | Uint8Array }[];
       readonly body: Uint8Array;
     }
@@ -1030,6 +1071,48 @@ function hostCmd(name: string, ...rest: readonly (number | Uint8Array | HostReco
   return { op: "host", name, args: rest as readonly number[] };
 }
 
+/// HTTP(S) as effect data. The two-field `{ ok, err }` route buffers the whole
+/// response. Adding `line` selects line streaming: each complete line arrives
+/// through that one-bytes-field arm, then `ok` receives the terminal HTTP
+/// status as its one number payload. A non-2xx status is still `ok` because the
+/// server delivered a response; cut/dropped stream lines, transport failures,
+/// and cancellation use `err` (`"truncated"` for stream data loss).
+function fetchCmd<M extends Msgish>(spec: FetchSpec, route: FetchRoute<M>): Cmd<M>;
+function fetchCmd<M extends Msgish>(spec: FetchStreamSpec, route: FetchStreamRoute<M>): Cmd<M>;
+function fetchCmd<M extends Msgish>(
+  spec: FetchStreamSpec,
+  route: FetchRoute<M> | FetchStreamRoute<M>,
+): Cmd<M> {
+  const names = Object.keys(spec.headers ?? {}).sort();
+  const headers = names.map((n) => ({ name: n, value: spec.headers![n] }));
+  if ("line" in route) {
+    return {
+      op: "fetch_stream",
+      key: route.key ?? "",
+      lineKind: route.line,
+      okKind: route.ok,
+      errKind: route.err,
+      method: spec.method ?? "GET",
+      timeoutMs: spec.timeoutMs ?? 0,
+      maxLineBytes: spec.maxLineBytes ?? 0,
+      url: spec.url,
+      headers,
+      body: spec.body ?? new Uint8Array(0),
+    };
+  }
+  return {
+    op: "fetch",
+    key: route.key ?? "",
+    okKind: route.ok,
+    errKind: route.err,
+    method: spec.method ?? "GET",
+    timeoutMs: spec.timeoutMs ?? 0,
+    url: spec.url,
+    headers,
+    body: spec.body ?? new Uint8Array(0),
+  };
+}
+
 export const Cmd = {
   /// No effects. `return model` is sugar for `return [model, Cmd.none]`.
   none: { op: "none" } as Cmd<never>,
@@ -1070,8 +1153,8 @@ export const Cmd = {
 
   /// Drop the in-flight keyed effect — request, named engine op, or delay —
   /// with this key, if any, SILENTLY (neither routing arm is dispatched for
-  /// it). The exception is a live spawn: cancel ends the child and its err
-  /// arm runs with "cancelled" — killing a process is an observable event.
+  /// it). Live spawn and streaming-fetch operations are the exceptions:
+  /// cancel ends the stream and its err arm runs with "cancelled".
   cancel(key: string): Cmd<never> {
     return { op: "cancel", key };
   },
@@ -1090,24 +1173,7 @@ export const Cmd = {
     return { op: "write_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
   },
 
-  /// A buffered HTTP(S) exchange. Exactly one terminal Msg: the `ok` arm
-  /// with `{ status, body }` (one number field, one bytes field — a non-2xx
-  /// status is still ok: an HTTP-level error is a delivered response), or
-  /// the `err` arm with the reason bytes.
-  fetch<M extends Msgish>(spec: FetchSpec, route: FetchRoute<M>): Cmd<M> {
-    const names = Object.keys(spec.headers ?? {}).sort();
-    return {
-      op: "fetch",
-      key: route.key ?? "",
-      okKind: route.ok,
-      errKind: route.err,
-      method: spec.method ?? "GET",
-      timeoutMs: spec.timeoutMs ?? 0,
-      url: spec.url,
-      headers: names.map((n) => ({ name: n, value: spec.headers![n] })),
-      body: spec.body ?? new Uint8Array(0),
-    };
-  },
+  fetch: fetchCmd,
 
   /// Put bytes on the system clipboard, fire-and-forget (an over-bound or
   /// refused write is dropped — there is no route to report on).

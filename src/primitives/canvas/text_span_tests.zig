@@ -247,6 +247,45 @@ test "a later visual-line page retains an over-capacity wrapped paragraph" {
     try testing.expect(!later.truncated);
 }
 
+test "ordinary span paragraphs paint a visible page after the line cap" {
+    const source = ("x\n" ** 139) ++ "TAIL_SENTINEL";
+    const spans = [_]TextSpan{.{ .text = source }};
+    const tokens = canvas.DesignTokens{};
+    const line_height = tokens.typography.body_size * 1.25;
+    const children = [_]canvas.Widget{.{
+        .id = 2,
+        .kind = .text,
+        // Put the final visual lines inside the scroll viewport while the
+        // first 128-line storage page is far above it.
+        .frame = geometry.RectF.init(0, -(139 * line_height) + 20, 100, 140 * line_height),
+        .text = source,
+        .spans = &spans,
+    }};
+    const root = canvas.Widget{
+        .id = 1,
+        .kind = .scroll_view,
+        .frame = geometry.RectF.init(0, 0, 100, 100),
+        .runtime_flags = .{ .native_scroll = true },
+        .children = &children,
+    };
+
+    var commands: [256]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, root, tokens);
+
+    var saw_tail = false;
+    var text_commands: usize = 0;
+    for (builder.displayList().commands) |command| {
+        if (command != .draw_text) continue;
+        text_commands += 1;
+        if (std.mem.indexOf(u8, command.draw_text.text, "TAIL_") != null) saw_tail = true;
+    }
+    try testing.expect(saw_tail);
+    // Viewport paging should not charge the 128 offscreen runs to the
+    // display list merely to reach the tail.
+    try testing.expect(text_commands < 16);
+}
+
 const VariableClusterMeasure = struct {
     fn advance(text: []const u8) f32 {
         return switch (text[0]) {

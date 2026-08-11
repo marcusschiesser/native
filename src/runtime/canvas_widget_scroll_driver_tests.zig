@@ -93,7 +93,7 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
     // The retained scroll node is marked natively driven and the engine
     // scrollbar (widget part slots 2 and 3) is not emitted.
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expect(retained.nodes[0].widget.native_scroll);
+    try std.testing.expect(retained.nodes[0].widget.runtime_flags.native_scroll);
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
     const display_list = try harness.runtime.canvasDisplayList(1, "canvas");
     for (display_list.commands) |command| {
@@ -111,6 +111,39 @@ test "layout install publishes native scroll drivers and suppresses engine scrol
     try std.testing.expect(snapshot.widgets[0].scroll.present);
     try std.testing.expectEqual(@as(f32, 24.0), snapshot.widgets[0].scroll.offset);
     try std.testing.expectEqual(@as(f32, 120.0), snapshot.widgets[0].scroll.content_extent);
+}
+
+test "programmatic scroll offsets clamp before native drivers adopt them" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.null_platform.gpu_surface_scroll_drivers = true;
+    var app_state: PassiveApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(10, 20, 180, 72),
+    });
+
+    // Apps deliberately use an out-of-range source value for "scroll to
+    // end". Clamp that intent against the laid-out content BEFORE the
+    // native driver or retained frames can expose the raw displacement.
+    var nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const layout = try scrollFixtureLayout(&nodes, 1_000_000);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, 48), retained.nodes[0].widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, -48, 180, 32), retained.nodes[1].frame);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 40, 180, 32), retained.nodes[3].frame);
+
+    const drivers = harness.null_platform.scrollDrivers();
+    try std.testing.expectEqual(@as(usize, 1), drivers.len);
+    try std.testing.expectEqual(@as(f32, 48), drivers[0].offset_y);
+    try std.testing.expectEqual(@as(f32, 120), drivers[0].content_size.height);
 }
 
 test "a region's rubber-band opt-in reaches its driver spec" {
@@ -200,6 +233,16 @@ test "driver offsets scroll retained scroll views and pass through overscroll" {
     try std.testing.expectEqual(@as(f32, -10), retained.nodes[0].widget.value);
     try std.testing.expectEqualDeep(geometry.RectF.init(0, 10, 180, 32), retained.nodes[1].frame);
     try std.testing.expect(!harness.runtime.views[0].canvasWidgetKineticScrollActive());
+
+    // A controlled model may immediately echo that driver offset through
+    // on-scroll. It is still the live user bounce, not a programmatic
+    // source move, so the rebuild must preserve it without clamping.
+    var echo_nodes: [5]canvas.WidgetLayoutNode = undefined;
+    const echo_layout = try scrollFixtureLayout(&echo_nodes, -10);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", echo_layout);
+    retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(f32, -10), retained.nodes[0].widget.value);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 10, 180, 32), retained.nodes[1].frame);
 
     // The OS scroller settles the bounce and reports the rested offset.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_scroll_driver = .{
@@ -409,7 +452,7 @@ test "scroll drivers stay unpublished without platform support" {
 
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.scroll_driver_set_count);
     const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expect(!retained.nodes[0].widget.native_scroll);
+    try std.testing.expect(!retained.nodes[0].widget.runtime_flags.native_scroll);
 
     // Engine scrollbar still draws for engine-owned scrolling.
     _ = try harness.runtime.emitCanvasWidgetDisplayList(1, "canvas", .{});
@@ -483,7 +526,7 @@ test "windowed virtual lists ride the native scroll driver with the full virtual
     // The retained region is natively driven: engine scrollbar and
     // engine physics stand down.
     var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expect(retained.nodes[0].widget.native_scroll);
+    try std.testing.expect(retained.nodes[0].widget.runtime_flags.native_scroll);
 
     // A driver-reported offset scrolls the window (the optimistic echo
     // translates the built rows; the app's rebuild re-windows).
@@ -505,7 +548,7 @@ test "windowed virtual lists ride the native scroll driver with the full virtual
     _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", legacy_layout);
     try std.testing.expectEqual(@as(usize, 0), harness.null_platform.scrollDrivers().len);
     retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
-    try std.testing.expect(!retained.nodes[0].widget.native_scroll);
+    try std.testing.expect(!retained.nodes[0].widget.runtime_flags.native_scroll);
 }
 
 test "a rebuild mid-overscroll keeps the driver's offset and pushes nothing" {

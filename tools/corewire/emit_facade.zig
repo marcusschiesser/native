@@ -2737,6 +2737,29 @@ const FacadeEmitter = struct {
             \\      nscfWU8(sink, 0x1f);
             \\      nscfWF64(sink, cmd.key);
             \\      return;
+            \\    case "fetch_stream": {
+            \\      nscfWU8(sink, 0x20);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.lineKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU8(sink, nscfMemberIndex(nscfFetchMethods, cmd.method, "fetch method"));
+            \\      nscfWU32(sink, cmd.timeoutMs);
+            \\      nscfWU32(sink, cmd.maxLineBytes);
+            \\      nscfWBytes(sink, cmd.url);
+            \\      if (cmd.headers.length > 255) {
+            \\        nscfTrap("a fetch carries over 255 headers — the wire's header block cannot carry it");
+            \\      }
+            \\      nscfWU8(sink, cmd.headers.length);
+            \\      for (let i = 0; i < cmd.headers.length; i++) {
+            \\        const header = cmd.headers[i]!;
+            \\        nscfWShortText(sink, header.name);
+            \\        const value = header.value;
+            \\        nscfWBytes(sink, typeof value === "string" ? nscfTextBytes(value) : value);
+            \\      }
+            \\      nscfWBytes(sink, cmd.body);
+            \\      return;
+            \\    }
             \\    case "batch":
             \\      for (let i = 0; i < cmd.cmds.length; i++) {
             \\        nscfEncodeCmd(sink, cmd.cmds[i]!);

@@ -93,11 +93,11 @@ Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/quick
 
 ## Examples
 
-The apps pictured above live in [examples/](./examples), most as zero-config projects — `app.zon` plus `src/`, no build files — run straight from their directory with `native dev`. Start with the TypeScript examples when learning the primary authoring path. Their `-ts` suffix is historical: `soundboard-ts` and `system-monitor-ts` are ports kept beside older Zig originals, while `ai-chat-ts` is TypeScript-only. New apps created by `native init` use TypeScript without a suffix.
+The apps pictured above live in [examples/](./examples), most as zero-config projects — `app.zon` plus `src/`, no build files — run straight from their directory with `native dev`. Start with the TypeScript examples when learning the primary authoring path. The `-ts` suffix on `soundboard-ts` and `system-monitor-ts` is historical because those apps are ports kept beside older Zig originals. Chatbot is TypeScript-only and follows the unsuffixed naming used by new apps created with `native init`.
 
 | Example | What it shows |
 | --- | --- |
-| [`ai-chat-ts`](./examples/ai-chat-ts) | TypeScript + Native markup end to end: modules, a text editor, fetch effects, and replay-safe configuration. |
+| [`chatbot`](./examples/chatbot) | TypeScript + Native markup end to end: modules, a text editor, streaming fetch effects, and replay-safe configuration. |
 | [`agent-wars`](./examples/agent-wars) | A two-model Pi harness comparison app: native controls and progress around side-by-side WebView results. |
 | [`soundboard-ts`](./examples/soundboard-ts) | The full music-player showcase in TypeScript + Native markup: audio, search, assets, timers, and context menus. |
 | [`system-monitor-ts`](./examples/system-monitor-ts) | A live process monitor in TypeScript + Native markup: subprocess effects, tables, charts, and timers. |

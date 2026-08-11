@@ -164,6 +164,31 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(doc.update_returns_cmd, true);
 });
 
+test("Cmd.fetch accepts a line-stream route with bytes and status arms", () => {
+  const doc = contractOf(`
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { lines: number; status: number; }
+export type Msg =
+  | { kind: "start" }
+  | { kind: "line"; bytes: Uint8Array }
+  | { kind: "finished"; status: number }
+  | { kind: "failed"; reason: Uint8Array };
+export function initialModel(): Model { return { lines: 0, status: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "start": return [model, Cmd.fetch(
+      { url: asciiBytes("https://example.test/events"), maxLineBytes: 65536 },
+      { key: "events", line: "line", ok: "finished", err: "failed" },
+    )];
+    case "line": return { ...model, lines: model.lines + 1 };
+    case "finished": return { ...model, status: msg.status };
+    case "failed": return model;
+  }
+}
+`);
+  assert.equal(doc.update_returns_cmd, true);
+});
+
 test("re-runs reproduce the identity fields exactly, and edits move them", () => {
   const a = contractOf(smallCore);
   const b = contractOf(smallCore);

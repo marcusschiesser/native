@@ -20,6 +20,7 @@ pub const Op = union(enum) {
     read_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8 },
     write_file: struct { key: []const u8, ok_tag: u8, err_tag: u8, path: []const u8, bytes: []const u8 },
     fetch: Fetch,
+    fetch_stream: FetchStream,
     clip_write: struct { bytes: []const u8 },
     clip_read: struct { key: []const u8, ok_tag: u8, err_tag: u8 },
     delay: struct { key: []const u8, after_ms: f64, msg_tag: u8 },
@@ -63,6 +64,21 @@ pub const Op = union(enum) {
         /// DELETE 3, PATCH 4, HEAD 5.
         method: u8,
         timeout_ms: u32,
+        url: []const u8,
+        header_count: u8,
+        /// Raw header block: per header [name_len u8][name][value_len u32 LE][value].
+        header_bytes: []const u8,
+        body: []const u8,
+    };
+
+    pub const FetchStream = struct {
+        key: []const u8,
+        line_tag: u8,
+        ok_tag: u8,
+        err_tag: u8,
+        method: u8,
+        timeout_ms: u32,
+        max_line_bytes: u32,
         url: []const u8,
         header_count: u8,
         /// Raw header block: per header [name_len u8][name][value_len u32 LE][value].
@@ -381,6 +397,45 @@ pub const CmdIter = struct {
                 off += 8;
                 break :blk .{ .audio_capture_stop = .{ .key = key } };
             },
+            // fetch_stream [op 0x20][key][line/ok/err tags][method]
+            // [timeout u32 LE][max line u32 LE][url][headers][body]
+            // (ts_core_host.zig, 0x20).
+            0x20 => blk: {
+                const key = shortBytes(b, &off);
+                const line_tag = b[off];
+                const ok_tag = b[off + 1];
+                const err_tag = b[off + 2];
+                const method = b[off + 3];
+                off += 4;
+                const timeout = std.mem.readInt(u32, b[off..][0..4], .little);
+                off += 4;
+                const max_line_bytes = std.mem.readInt(u32, b[off..][0..4], .little);
+                off += 4;
+                const url = longBytes(b, &off);
+                const header_count = b[off];
+                off += 1;
+                const headers_start = off;
+                var h: usize = 0;
+                while (h < header_count) : (h += 1) {
+                    _ = shortBytes(b, &off);
+                    _ = longBytes(b, &off);
+                }
+                const header_bytes = b[headers_start..off];
+                const body = longBytes(b, &off);
+                break :blk .{ .fetch_stream = .{
+                    .key = key,
+                    .line_tag = line_tag,
+                    .ok_tag = ok_tag,
+                    .err_tag = err_tag,
+                    .method = method,
+                    .timeout_ms = timeout,
+                    .max_line_bytes = max_line_bytes,
+                    .url = url,
+                    .header_count = header_count,
+                    .header_bytes = header_bytes,
+                    .body = body,
+                } };
+            },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
         self.off = off;
@@ -681,4 +736,38 @@ test "the pty records decode, alone and inside a batch" {
     const tail = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 7), tail.now.msg_tag);
     try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "streaming fetch decodes its routes and limits" {
+    const a = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(a);
+
+    try bytes.append(a, 0x20);
+    try bytes.append(a, 4);
+    try bytes.appendSlice(a, "chat");
+    try bytes.appendSlice(a, &.{ 7, 8, 9, 1 });
+    try bytes.appendSlice(a, &.{ 0x88, 0x13, 0, 0 }); // 5000 ms
+    try bytes.appendSlice(a, &.{ 0, 0x20, 0, 0 }); // 8192 bytes
+    try bytes.appendSlice(a, &.{ 15, 0, 0, 0 });
+    try bytes.appendSlice(a, "https://ai.test");
+    try bytes.append(a, 1);
+    try bytes.append(a, 6);
+    try bytes.appendSlice(a, "accept");
+    try bytes.appendSlice(a, &.{ 17, 0, 0, 0 });
+    try bytes.appendSlice(a, "text/event-stream");
+    try bytes.appendSlice(a, &.{ 2, 0, 0, 0 });
+    try bytes.appendSlice(a, "{}");
+
+    const stream = findOp(bytes.items, .fetch_stream) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("chat", stream.key);
+    try std.testing.expectEqual(@as(u8, 7), stream.line_tag);
+    try std.testing.expectEqual(@as(u8, 8), stream.ok_tag);
+    try std.testing.expectEqual(@as(u8, 9), stream.err_tag);
+    try std.testing.expectEqual(@as(u8, 1), stream.method);
+    try std.testing.expectEqual(@as(u32, 5000), stream.timeout_ms);
+    try std.testing.expectEqual(@as(u32, 8192), stream.max_line_bytes);
+    try std.testing.expectEqualStrings("https://ai.test", stream.url);
+    try std.testing.expectEqual(@as(u8, 1), stream.header_count);
+    try std.testing.expectEqualStrings("{}", stream.body);
 }
