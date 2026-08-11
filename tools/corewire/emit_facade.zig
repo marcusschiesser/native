@@ -2634,7 +2634,7 @@ const FacadeEmitter = struct {
             \\      nscfWShortText(sink, cmd.label);
             \\      return;
             \\    case "webview_navigate":
-            \\      nscfWU8(sink, 0x20);
+            \\      nscfWU8(sink, 0x21);
             \\      nscfWShortText(sink, cmd.label);
             \\      nscfWBytes(sink, cmd.url);
             \\      return;
