@@ -111,6 +111,7 @@ const TrayOptions = types.TrayOptions;
 const TrayMenuItem = types.TrayMenuItem;
 const NativeCommandEvent = types.NativeCommandEvent;
 const MenuCommandEvent = types.MenuCommandEvent;
+const TrayCommandEvent = types.TrayCommandEvent;
 const FileDropEvent = types.FileDropEvent;
 const GpuFrame = types.GpuFrame;
 const GpuSurfaceFrameEvent = types.GpuSurfaceFrameEvent;
@@ -213,6 +214,26 @@ test "null platform records bridge response window routing" {
 
     try std.testing.expectEqual(@as(WindowId, 7), null_platform.lastBridgeResponseWindowId());
     try std.testing.expectEqualStrings("{\"ok\":true}", null_platform.lastBridgeResponse());
+}
+
+test "null platform preserves the tray title when presentation styles are set" {
+    var null_platform = NullPlatform.init(.{});
+    try null_platform.platform().services.createTray(.{
+        .title = "Jobs",
+        .presentation = .{ .width = 60, .tone = .warning },
+    });
+
+    try std.testing.expectEqualStrings("Jobs", null_platform.lastTrayTitle());
+    const presentation = null_platform.lastTrayPresentation();
+    try std.testing.expectEqualStrings("Jobs", presentation.title);
+    try std.testing.expectEqual(@as(f32, 60), presentation.width);
+    try std.testing.expectEqual(types.TrayTone.warning, presentation.tone);
+
+    try null_platform.platform().services.updateTrayTitle("Builds");
+    const retitled = null_platform.lastTrayPresentation();
+    try std.testing.expectEqualStrings("Builds", retitled.title);
+    try std.testing.expectEqual(@as(f32, 60), retitled.width);
+    try std.testing.expectEqual(types.TrayTone.warning, retitled.tone);
 }
 
 test "null platform records OS actions" {
