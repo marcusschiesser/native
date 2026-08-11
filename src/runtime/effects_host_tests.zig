@@ -10,6 +10,7 @@
 const std = @import("std");
 const geometry = @import("geometry");
 const app_manifest = @import("app_manifest");
+const platform = @import("../platform/root.zig");
 const core = @import("core.zig");
 const ui_app_mod = @import("ui_app.zig");
 const effects_mod = @import("effects.zig");
@@ -64,6 +65,8 @@ const HostMsg = union(enum) {
     ask_other,
     ask_oversized,
     ask_colliding,
+    query_launch_at_login,
+    enable_launch_at_login,
     replace,
     drop,
     send,
@@ -83,6 +86,14 @@ const timer_key: u64 = 9;
 
 // Set by tests before dispatching `.ask`/`.replace`.
 var test_payload: []const u8 = "";
+
+fn failLaunchAtLoginStatus(_: ?*anyopaque) anyerror!platform.LaunchAtLoginStatus {
+    return error.LaunchAtLoginFailed;
+}
+
+fn failSetLaunchAtLogin(_: ?*anyopaque, _: bool) anyerror!platform.LaunchAtLoginStatus {
+    return error.LaunchAtLoginFailed;
+}
 
 fn hostUpdate(model: *HostModel, msg: HostMsg, fx: *HostEffects) void {
     switch (msg) {
@@ -108,6 +119,17 @@ fn hostUpdate(model: *HostModel, msg: HostMsg, fx: *HostEffects) void {
         .ask_colliding => fx.hostRequest(.{
             .key = 500,
             .name = "svc.echo",
+            .on_result = HostEffects.hostMsg(.host_result),
+        }),
+        .query_launch_at_login => fx.hostRequest(.{
+            .key = ask_key,
+            .name = "native-sdk.launch-at-login.status",
+            .on_result = HostEffects.hostMsg(.host_result),
+        }),
+        .enable_launch_at_login => fx.hostRequest(.{
+            .key = ask_key,
+            .name = "native-sdk.launch-at-login.set",
+            .payload = &.{1},
             .on_result = HostEffects.hostMsg(.host_result),
         }),
         .replace => fx.hostRequest(.{
@@ -233,6 +255,56 @@ test "fake executor parks host requests and feeds results back as msgs" {
     try std.testing.expectEqual(@as(u32, 1), h.app_state.model.err_count);
     try std.testing.expectEqualStrings("not found", h.app_state.model.bytesPrefix());
     try std.testing.expectError(error.EffectNotFound, fx.feedHostResult(ask_key, true, ""));
+}
+
+test "native launch-at-login requests use the platform service without a generic host binding" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    h.harness.null_platform.launch_at_login_status = .requires_approval;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .query_launch_at_login);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    try std.testing.expectEqualStrings("requires_approval", h.app_state.model.bytesPrefix());
+
+    try h.app_state.dispatch(&h.harness.runtime, 1, .enable_launch_at_login);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 2), h.app_state.model.ok_count);
+    try std.testing.expectEqualStrings("enabled", h.app_state.model.bytesPrefix());
+    try std.testing.expectEqual(@as(u32, 1), h.harness.null_platform.launch_at_login_set_count);
+}
+
+test "native launch-at-login set preserves an unsupported platform result" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    // Model a host without the setter after the effects channel has bound
+    // the runtime-owned services value. Unsupported is a capability result,
+    // not an attempted registration failure.
+    h.harness.runtime.options.platform.services.set_launch_at_login_fn = null;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .enable_launch_at_login);
+    try h.wake();
+
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.err_count);
+    try std.testing.expectEqualStrings("unsupported", h.app_state.model.bytesPrefix());
+    try std.testing.expectEqual(@as(u32, 0), h.harness.null_platform.launch_at_login_set_count);
+}
+
+test "native launch-at-login requests distinguish operation failures from unsupported" {
+    var h = try Harness.create();
+    defer h.destroy();
+
+    h.harness.runtime.options.platform.services.launch_at_login_status_fn = failLaunchAtLoginStatus;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .query_launch_at_login);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.err_count);
+    try std.testing.expectEqualStrings("failed", h.app_state.model.bytesPrefix());
+
+    h.harness.runtime.options.platform.services.set_launch_at_login_fn = failSetLaunchAtLogin;
+    try h.app_state.dispatch(&h.harness.runtime, 1, .enable_launch_at_login);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 2), h.app_state.model.err_count);
+    try std.testing.expectEqualStrings("failed", h.app_state.model.bytesPrefix());
 }
 
 test "re-issuing a live host key replaces the pending request and drops the undelivered result" {
