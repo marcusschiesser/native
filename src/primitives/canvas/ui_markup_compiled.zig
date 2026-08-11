@@ -373,6 +373,15 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                         }
                     }
                 }
+                // Interpreter parity: only textarea has a configurable
+                // Enter-vs-newline policy.
+                if (kind != .textarea) {
+                    for (node.attrs) |attribute| {
+                        if (std.mem.eql(u8, attribute.name, "submit-on-enter")) {
+                            fail(node, markup.submit_on_enter_element_message);
+                        }
+                    }
+                }
                 // Interpreter parity: the overflow policy's closed
                 // literal vocabulary. A compile error here; bindings
                 // resolve at runtime like any enum option.

@@ -1158,7 +1158,7 @@ test "compiled code element matches the interpreter and Ui.code" {
     try expectSameTree(fixture.CodeMsg, editable_hand, editable_interpreted);
     try expectSameTree(fixture.CodeMsg, editable_hand, editable_compiled);
     try testing.expectEqual(canvas.WidgetKind.textarea, editable_compiled.root.kind);
-    try testing.expect(editable_compiled.root.code_editor);
+    try testing.expect(editable_compiled.root.runtime_flags.code_editor);
 }
 
 // ------------------------------------------- template/use + style parity

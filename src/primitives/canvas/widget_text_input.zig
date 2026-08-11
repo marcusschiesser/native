@@ -191,14 +191,14 @@ fn widgetTextInputLineHeight(text_size: f32) f32 {
 }
 
 fn widgetTextInputWrap(widget: Widget, line_height: f32) TextWrap {
-    if (widget.code_editor) return if (widget.text_no_wrap) .none else .word;
+    if (widget.runtime_flags.code_editor) return if (widget.text_no_wrap) .none else .word;
     if (widget.kind == .textarea) return .word;
     if (widget.kind == .text_field and widget.frame.height >= line_height * 2.25) return .word;
     return .none;
 }
 
 fn widgetTextInputVerticalInset(widget: Widget, tokens: DesignTokens, text_size: f32, options: TextLayoutOptions) f32 {
-    if (widget.code_editor) return 0;
+    if (widget.runtime_flags.code_editor) return 0;
     if (options.wrap != .none) return widget_metrics.widgetControlInset(widget, tokens, tokens.spacing.sm);
     return @max(0, (widget.frame.height - widgetTextInputLineHeight(text_size)) * 0.5);
 }
@@ -220,7 +220,7 @@ const text_input_caret_reserve: f32 = 1;
 /// unscrolled field always has.
 fn widgetTextInputHorizontalScrollOffset(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) f32 {
     if (options.wrap != .none) return 0;
-    const offset = if (widget.code_editor) widget.value_x else widget.value;
+    const offset = if (widget.runtime_flags.code_editor) widget.value_x else widget.value;
     return std.math.clamp(offset, 0, widgetTextInputMaxHorizontalScrollOffset(widget, tokens, text_size, text_inset, options));
 }
 
@@ -232,7 +232,7 @@ fn widgetTextInputMaxHorizontalScrollOffset(widget: Widget, tokens: DesignTokens
     // paints — so a value holding a line break scrolls by the same
     // single-line extent it draws.
     const font_id = widgetTextInputFontId(widget, tokens);
-    const text_width = if (widget.code_editor)
+    const text_width = if (widget.runtime_flags.code_editor)
         if (codeContentWidthCacheCurrent(widget, font_id, text_size))
             widget.code_content_width
         else
@@ -243,7 +243,7 @@ fn widgetTextInputMaxHorizontalScrollOffset(widget: Widget, tokens: DesignTokens
 }
 
 pub fn widgetTextInputOrigin(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.PointF {
-    if (widget.code_editor) {
+    if (widget.runtime_flags.code_editor) {
         return geometry.PointF.init(
             widget.frame.x + inset - widgetTextInputHorizontalScrollOffset(widget, tokens, text_size, inset, options),
             widget.frame.y + text_size - widgetTextInputScrollOffset(widget, tokens, text_size, inset, options),
@@ -365,7 +365,7 @@ pub fn textInputCaretVisibleScrollOffsetForWidget(widget: Widget, tokens: Design
     // selection rects measure with — the PRESENTED bytes (byte offsets
     // are interchangeable: the presentation substitutes 1:1).
     const caret_offset = snapTextOffset(widget.text, selection.focus);
-    const caret_line_start = if (widget.code_editor)
+    const caret_line_start = if (widget.runtime_flags.code_editor)
         (std.mem.lastIndexOfScalar(u8, widget.text[0..caret_offset], '\n') orelse 0) +
             @as(usize, @intFromBool(std.mem.lastIndexOfScalar(u8, widget.text[0..caret_offset], '\n') != null))
     else
@@ -464,7 +464,7 @@ pub fn widgetTextInputDrawText(
 }
 
 pub fn widgetTextInputInset(widget: Widget, tokens: DesignTokens) f32 {
-    if (widget.code_editor) return widget_metrics.widgetCodeLineNumberGutterWidth(widget, tokens);
+    if (widget.runtime_flags.code_editor) return widget_metrics.widgetCodeLineNumberGutterWidth(widget, tokens);
     const text_size = widgetTextInputSize(widget, tokens);
     return switch (widget.kind) {
         .search_field, .combobox => widget_metrics.widgetControlInset(widget, tokens, tokens.spacing.md) + @max(widget_metrics.widgetSizedDensityValue(widget, tokens, 8), text_size - 2) + widget_metrics.widgetControlInset(widget, tokens, tokens.spacing.sm),
@@ -473,7 +473,7 @@ pub fn widgetTextInputInset(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 fn widgetTextInputFontId(widget: Widget, tokens: DesignTokens) FontId {
-    return if (widget.code_editor) tokens.typography.mono_font_id else tokens.typography.font_id;
+    return if (widget.runtime_flags.code_editor) tokens.typography.mono_font_id else tokens.typography.font_id;
 }
 
 fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32) bool {
@@ -489,7 +489,7 @@ fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32)
 /// Runtime reconciliation carries this cache across unchanged app rebuilds;
 /// edits invalidate it before caret scrolling recomputes the new document.
 pub fn cacheTextInputContentWidthForWidget(widget: *Widget, tokens: DesignTokens) void {
-    if (widget.kind != .textarea or !widget.code_editor or !widget.text_no_wrap) return;
+    if (widget.kind != .textarea or !widget.runtime_flags.code_editor or !widget.text_no_wrap) return;
     if (widget.hasCodeDiff()) return;
     const text_size = widgetTextInputSize(widget.*, tokens);
     const font_id = widgetTextInputFontId(widget.*, tokens);
@@ -578,7 +578,7 @@ fn widgetTextInputTrailingInset(widget: Widget, text_size: f32, inset: f32) f32 
     // field padding. Its source viewport runs all the way to the trailing
     // edge; mirroring the gutter here invents horizontal overflow for lines
     // that visibly fit beside the numbers.
-    if (widget.code_editor) return 0;
+    if (widget.runtime_flags.code_editor) return 0;
     if (widget.kind == .combobox) return inset + @max(8, text_size - 4);
     // A search field holding text reserves the trailing slot for the
     // built-in clear affordance so the text never runs under the x.

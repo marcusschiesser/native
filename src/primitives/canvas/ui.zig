@@ -605,6 +605,12 @@ pub fn Ui(comptime Msg: type) type {
             /// re-steals focus from the user. Only focusable widgets
             /// (interactive controls) can take it.
             autofocus: bool = false,
+            /// Textarea Enter policy (markup `submit-on-enter`): plain
+            /// Enter submits through `on_submit`, while Shift+Enter
+            /// keeps the multiline newline path. False preserves the
+            /// default textarea contract (Enter inserts; primary+Enter
+            /// submits). Meaningless on every other element.
+            submit_on_enter: bool = false,
             variant: canvas.WidgetVariant = .default,
             size: canvas.WidgetSize = .default,
             /// Definite width: the widget is exactly this wide (the value
@@ -620,6 +626,11 @@ pub fn Ui(comptime Msg: type) type {
             /// Split panes use it to constrain the divider drag (the
             /// clamp band derives from both panes' floors).
             min_width: f32 = 0,
+            /// Width ceiling WITHOUT the definite-min side of `width`:
+            /// the widget fills or hugs normally until this bound, then
+            /// stops growing. Pair with a centered flex parent for a
+            /// responsive content column.
+            max_width: f32 = 0,
             grow: f32 = 0,
             gap: f32 = 0,
             padding: ?f32 = null,
@@ -1469,7 +1480,7 @@ pub fn Ui(comptime Msg: type) type {
                         if (self.msgForTextEdit(target_id, stamped)) |msg| return msg;
                     } else {
                         const locally_derived = canvas.widgetCodeTabTextEditEvent(widget, keyboard) orelse
-                            canvas.widgetKeyboardNewlineTextEditEvent(widget.kind, keyboard) orelse
+                            canvas.widgetKeyboardNewlineTextEditEvent(widget, keyboard) orelse
                             keyboard.textEditEvent();
                         if (locally_derived) |text_edit| {
                             // Direct Tree consumers still sanitize locally:
@@ -2456,7 +2467,7 @@ pub fn Ui(comptime Msg: type) type {
                 else
                     0;
                 if (diff_lines) |lines| editor.widget.setCodeDiffLines(lines);
-                editor.widget.code_editor = true;
+                editor.widget.runtime_flags.code_editor = true;
                 editor.widget.code_language = options.language;
                 editor.widget.layout.clip_content = true;
                 return editor;
@@ -3690,6 +3701,7 @@ pub fn Ui(comptime Msg: type) type {
                 .text_alignment = options.text_alignment,
                 .text_overflow = options.overflow,
                 .autofocus = options.autofocus,
+                .submit_on_enter = options.submit_on_enter,
                 .image_id = options.image,
                 .value = options.value,
                 .value_x = options.value_x,
@@ -3728,7 +3740,10 @@ pub fn Ui(comptime Msg: type) type {
                     // is the exception: width documents the initial width
                     // and the engine's drag handle keeps writing larger
                     // frames past it.
-                    .max_size = if (kind == .resizable) .{} else .{ .width = options.width, .height = options.height },
+                    .max_size = if (kind == .resizable) .{} else .{
+                        .width = if (options.width > 0) options.width else options.max_width,
+                        .height = options.height,
+                    },
                 },
                 .style = options.style,
                 .semantics = options.semantics,
@@ -3825,7 +3840,11 @@ fn isSubmitKeyboard(widget: Widget, keyboard: canvas.WidgetKeyboardEvent) bool {
         // Multi-line entry: Enter edits (newline), so submit rides the
         // primary chord — cmd+Enter on macOS, ctrl+Enter elsewhere.
         // Shift/alt variants stay free for apps.
-        .textarea => keyboard.modifiers.hasCommandModifier() and !keyboard.modifiers.alt and !keyboard.modifiers.shift,
+        .textarea => if (widget.submit_on_enter)
+            (!keyboard.modifiers.hasNavigationModifier() and !keyboard.modifiers.shift) or
+                (keyboard.modifiers.hasCommandModifier() and !keyboard.modifiers.alt and !keyboard.modifiers.shift)
+        else
+            keyboard.modifiers.hasCommandModifier() and !keyboard.modifiers.alt and !keyboard.modifiers.shift,
         // List rows: plain Enter is the row's primary action when the
         // app binds `on_submit` (play the track, open the record); the
         // select activation keeps Space. `msgForKeyboard` resolves the

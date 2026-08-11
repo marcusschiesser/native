@@ -83,11 +83,11 @@ The framework repository includes a `zig build notarize` helper for local releas
 zig build notarize
 ```
 
-Generated apps should use `native package --target macos --signing identity ...` unless they add their own `notarize` build step. This helper does not invoke `xcrun notarytool` directly. After the signed package is created, submit it for notarization manually:
+Generated apps should use `native package --target macos --signing identity ... --archive` unless they add their own `notarize` build step. This helper does not invoke `xcrun notarytool` directly. After the signed DMG is created, submit and staple it manually (use the archive path printed by the package command):
 
 ```bash
-xcrun notarytool submit zig-out/package/your-app.zip --apple-id "you@example.com" --team-id "TEAMID" --password "@keychain:AC_PASSWORD" --wait
-xcrun stapler staple zig-out/package/your-app.app
+xcrun notarytool submit zig-out/package/your-app-1.0.0-macos-ReleaseFast.dmg --apple-id "you@example.com" --team-id "TEAMID" --password "@keychain:AC_PASSWORD" --wait
+xcrun stapler staple zig-out/package/your-app-1.0.0-macos-ReleaseFast.dmg
 ```
 
 ## Chromium apps
@@ -97,8 +97,7 @@ Chromium packages include `Chromium Embedded Framework.framework` inside the `.a
 ```bash
 native cef install --version <pinned-version>
 zig build
-native package --target macos --signing identity --identity "Developer ID Application: Your Name"
-hdiutil create -volname "Your App" -srcfolder zig-out/package/your-app.app -ov -format UDZO zig-out/package/your-app.dmg
+native package --target macos --signing identity --identity "Developer ID Application: Your Name" --archive
 ```
 
 Use `.web_engine = "chromium"` and `.cef = .{ .dir = "third_party/cef/macos", .auto_install = false }` in `app.zon` for the normal signing path. `-Dweb-engine`, `--web-engine`, `-Dcef-dir`, and `--cef-dir` remain available for temporary overrides.
@@ -110,8 +109,10 @@ If Gatekeeper rejects the app, check that the CEF framework is present in `Conte
 Create a distributable disk image:
 
 ```bash
-zig build dmg
+native package --target macos --archive
 ```
+
+This creates the conventional drag-to-Applications presentation by default: a generated background and arrow, positioned app and Applications icons, hidden Finder chrome, and a compressed final image. Customize it through the [`dmg` fields in `app.zon`](/docs/packaging#dmg-archives).
 
 ## Entitlements
 

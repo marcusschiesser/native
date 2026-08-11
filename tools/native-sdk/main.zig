@@ -6,7 +6,7 @@ const tooling = @import("tooling");
 const automation_protocol = @import("automation_protocol");
 const cli_build_info = @import("cli_build_info");
 
-const version = "0.8.3";
+const version = "0.8.4";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -220,6 +220,7 @@ pub fn main(init: std.process.Init) !void {
             .target = target,
             .optimize = optimize_value,
             .output_path = output_dir,
+            .project_dir = std.fs.path.dirname(manifest_path) orelse ".",
             .binary_path = binary_path,
             .assets_dir = try flagValue(args, "--assets") orelse if (metadata.frontend) |frontend| frontend.dist else "assets",
             .frontend = metadata.frontend,

@@ -579,6 +579,14 @@ pub const attrs = [_]AttrInfo{
     // Markdown's caller-owned source -> registered ImageId mapping. The
     // markdown rule hook scopes and type-checks the iterable binding.
     .{ .code = 96, .name = "images", .class = .binding_only, .group = .composite },
+    // Textarea Enter policy (textarea only): false preserves the
+    // multiline default (Enter inserts, primary+Enter submits); true is
+    // the chat-composer convention (Enter submits, Shift+Enter inserts).
+    .{ .code = 97, .name = "submit-on-enter", .class = .flag, .group = .option, .field = "submit_on_enter" },
+    // Responsive width ceiling: unlike definite `width`, this leaves the
+    // minimum unconstrained so a capped element still shrinks with a
+    // narrow parent.
+    .{ .code = 98, .name = "max-width", .class = .number, .group = .option, .field = "max_width" },
 };
 
 // ----------------------------------------------------------------- events

@@ -3,7 +3,7 @@ import { AttrTable } from "@/components/attr-table";
 
 # Input Group
 
-The composer shape: one bordered field wrapping a [textarea](/docs/components/textarea) plus an accessory row of controls inside the same border — attach on the bottom-left, send on the bottom-right. The group wears the focus ring whenever focus is on any control inside it, and the textarea's own chrome dissolves automatically, so the whole group reads as a single field. The textarea keeps its full behavior: `text` and `placeholder` bind from the model, `on-input` hears every edit, `on-submit` rides the primary chord, and `autofocus` lands the keyboard on mount.
+The composer shape: one bordered field wrapping a [textarea](/docs/components/textarea) plus an accessory row of controls inside the same border — attach on the bottom-left, send on the bottom-right. The group wears the focus ring whenever focus is on any control inside it, and the textarea's own chrome dissolves automatically, so the whole group reads as a single field. The textarea keeps its full behavior: `text` and `placeholder` bind from the model, `on-input` hears every edit, `on-submit` handles submission, `submit-on-enter="true"` opts a chat composer into plain-Enter submission, and `autofocus` lands the keyboard on mount.
 
 <ComponentPreview name="input-group" alt="An input group rendered by the engine" />
 
@@ -13,7 +13,7 @@ The textarea comes first (document order is focus order), then the optional `inp
 
 ```html
 <input-group label="Message composer" height="120">
-  <textarea placeholder="Type a message" text="{draft}" on-input="draft_edited" on-submit="send" />
+  <textarea placeholder="Type a message" text="{draft}" submit-on-enter="true" on-input="draft_edited" on-submit="send" />
   <input-group-actions>
     <button icon="plus" variant="ghost" size="icon" on-press="attach" label="Attach"></button>
     <spacer grow="1" />
@@ -33,6 +33,7 @@ ui.inputGroup(.{
 }, ui.el(.textarea, .{
     .placeholder = "Type a message",
     .text = model.draft,
+    .submit_on_enter = true,
     .on_input = Ui.inputMsg(.draft_edited),
     .on_submit = .send,
     .semantics = .{ .label = "Message" },

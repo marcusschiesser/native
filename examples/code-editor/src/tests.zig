@@ -1506,7 +1506,7 @@ test "the empty and loaded views expose the picker, tree, and highlighted code s
     );
 
     const editor = findByText(tree.root, .textarea, source).?;
-    try testing.expect(editor.code_editor);
+    try testing.expect(editor.runtime_flags.code_editor);
     try testing.expectEqual(@as(usize, 1), editor.spans.len);
     try testing.expectEqual(native_sdk.code.Language.tsx, editor.code_language);
     try testing.expectEqual(native_sdk.geometry.InsetsF{}, editor.layout.padding);

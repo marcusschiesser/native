@@ -3,7 +3,7 @@
 //! momentum, overlay scrollbars, and rubber-band for regions that opt
 //! into it — while the engine keeps rendering the content. The runtime:
 //!
-//! - stamps `widget.native_scroll` on every non-virtualized `.scroll_view`
+//! - stamps `widget.runtime_flags.native_scroll` on every non-virtualized `.scroll_view`
 //!   (and every RUNTIME-SCROLLED virtual list — a virtualized scroll_view
 //!   with a declared item count, whose driver content size is the full
 //!   virtual extent) so engine scrollbars and engine kinetic physics
@@ -52,7 +52,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
         pub fn stampCanvasWidgetNativeScroll(self: *const Runtime, nodes: []canvas.WidgetLayoutNode) void {
             if (!canvasWidgetScrollDriversSupported(self)) return;
             for (nodes) |*node| {
-                if (canvasWidgetScrollDriverEligible(node.*)) node.widget.native_scroll = true;
+                if (canvasWidgetScrollDriverEligible(node.*)) node.widget.runtime_flags.native_scroll = true;
             }
         }
 
@@ -117,7 +117,7 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
             }
             for (view.widget_layout_nodes[0..view.widget_layout_node_count], 0..) |*node, node_index| {
                 if (!canvasWidgetScrollDriverEligible(node.*)) continue;
-                node.widget.native_scroll = true;
+                node.widget.runtime_flags.native_scroll = true;
                 if (count >= drivers.len) continue;
 
                 const viewport = node.frame.inset(node.widget.layout.padding).normalized();

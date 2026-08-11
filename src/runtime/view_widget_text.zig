@@ -179,14 +179,16 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
                 return null;
             }
 
-            // Multi-line editing contract: Enter (plain or shift) inserts
-            // a newline; submit rides the primary-modifier chord instead.
-            // Shared with the app dispatch path so the model's `on_input`
-            // hears exactly the edit the retained text applied.
+            // Multi-line editing contract: Enter normally inserts a
+            // newline, while a submit-on-enter textarea leaves plain
+            // Enter for its submit handler and keeps Shift+Enter as the
+            // newline gesture. Shared with the app dispatch path so the
+            // model's `on_input` hears exactly the edit retained text
+            // applied.
             if (canvas.widgetCodeTabTextEditEvent(widget, keyboard)) |tab_edit| {
                 return tab_edit;
             }
-            if (canvas.widgetKeyboardNewlineTextEditEvent(widget.kind, keyboard)) |newline_edit| {
+            if (canvas.widgetKeyboardNewlineTextEditEvent(widget, keyboard)) |newline_edit| {
                 return newline_edit;
             }
 
@@ -957,6 +959,23 @@ pub fn RuntimeViewCanvasWidgetText(comptime RuntimeView: type) type {
             if (!canvasWidgetLayoutNodeFrameVisible(layout, index)) return false;
             const widget = self.widget_layout_nodes[index].widget;
             return canvasWidgetEditableTextKind(widget.kind) and !widget.state.disabled;
+        }
+
+        /// A controlled source replacement intentionally discards stale
+        /// selection state, but logical focus survives that rebuild. Give
+        /// the focused editor a fresh insertion point so an app clearing a
+        /// submitted composer never leaves a focused-but-caretless field.
+        /// Explicit source selections are left untouched.
+        pub fn ensureCanvasWidgetFocusedTextCaret(self: *RuntimeView) anyerror!bool {
+            const focused_id = self.canvas_widget_focused_id;
+            if (focused_id == 0 or !self.canEditCanvasWidgetText(focused_id)) return false;
+            const index = self.canvasWidgetNodeIndexById(focused_id) orelse return false;
+            const widget = &self.widget_layout_nodes[index].widget;
+            if (widget.text_selection != null) return false;
+            widget.text_selection = canvas.TextSelection.collapsed(widget.text.len);
+            try self.refreshCanvasWidgetSemantics();
+            self.widget_revision += 1;
+            return true;
         }
 
         pub fn applyCanvasWidgetTextPointer(
