@@ -1421,7 +1421,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .navigate_fn = effectsNavigateWebView,
             });
             self.effects.bindSystemServices(.{
-            self.effects.bindSystemServices(.{
                 .context = runtime,
                 .open_external_url_fn = effectsOpenExternalUrl,
                 .reveal_path_fn = effectsRevealPath,
