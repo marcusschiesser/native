@@ -1323,6 +1323,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       if (msg.which === 5) return [model, Cmd.clipboardRead({ key: "p", ok: "loaded", err: "failed" })];
       if (msg.which === 6) return [model, Cmd.delay("d", model.at + 100, "fired")];
       if (msg.which === 7) return [model, Cmd.showNotification({ title: model.data, subtitle: asciiBytes("native-sdk"), body: asciiBytes("Done") })];
+      if (msg.which === 8) return [model, Cmd.openExternalUrl(asciiBytes("https://native-sdk.dev/docs"))];
+      if (msg.which === 9) return [model, Cmd.revealPath(asciiBytes("/tmp/native-sdk.log"))];
+      if (msg.which === 10) return [model, Cmd.credentialSet(asciiBytes("dev.native-sdk.test"), asciiBytes("alice"), model.data, { key: "credential-set", ok: "loaded", err: "failed" })];
+      if (msg.which === 11) return [model, Cmd.credentialGet(asciiBytes("dev.native-sdk.test"), asciiBytes("alice"), { key: "credential-get", ok: "loaded", err: "failed" })];
+      if (msg.which === 12) return [model, Cmd.credentialDelete(asciiBytes("dev.native-sdk.test"), asciiBytes("alice"), { key: "credential-delete", ok: "loaded", err: "failed" })];
+      if (msg.which === 13) return [model, Cmd.formatLocalTime(model.at, "datetime", { key: "local-time", ok: "loaded", err: "failed" })];
       return [model, Cmd.batch([Cmd.delay("d", 250, "fired"), Cmd.cancel("d")])];
     case "loaded": return { ...model, data: msg.body };
     case "wrote": return { ...model, saved: true };
@@ -3785,7 +3791,10 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "go":
       if (msg.which === 0) return [model, Cmd.showWindow("player")];
-      if (msg.which === 1) return [model, Cmd.batch([Cmd.showWindow("player"), Cmd.quitApp()])];
+      if (msg.which === 1) return [model, Cmd.batch([Cmd.hideWindow("player"), Cmd.setDockPresence(false)])];
+      if (msg.which === 2) return [model, Cmd.launchAtLoginStatus({ key: "login-status", ok: "line", err: "failed" })];
+      if (msg.which === 3) return [model, Cmd.setLaunchAtLogin(true, { key: "login-set", ok: "line", err: "failed" })];
+      if (msg.which === 4) return [model, Cmd.batch([Cmd.showWindow("player"), Cmd.quitApp()])];
       return [model, Cmd.quitApp()];
 ${streamTail}
 `,
@@ -10189,7 +10198,7 @@ test("multi-file corpus: gated cases teach, emit cases transpile clean", () => {
   }
 });
 
-test("NS1028: Cmd.persist still compiles but teaches the writeFile path as a warning", () => {
+test("NS1028: Cmd.persist compiles but requires the manifest capability", () => {
   const result = check(`
 import { Cmd } from "@native-sdk/core";
 export interface Model { readonly count: number; }
@@ -10208,7 +10217,35 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(result.diagnostics.length, 0);
   const w = result.warnings.find((d) => d.id === "NS1028");
   assert.ok(w, "reports NS1028 as a warning");
-  assert.ok(w.message.includes("writeFile"), "points at the writeFile path");
+  assert.ok(w.message.includes("persist` capability"), "points at the capability declaration");
+
+  const declared = check(`
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "add" } | { readonly kind: "noop" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "add": return [{ count: model.count + 1 }, Cmd.persist()];
+    case "noop": return model;
+  }
+}
+`, { capabilities: ["persist"] });
+  assert.equal(declared.warnings.some((d) => d.id === "NS1028"), false);
+});
+
+test("NS1028: an unused persist capability is an inverse warning", () => {
+  const result = check(`
+export interface Model { readonly count: number; }
+export type Msg = { readonly kind: "noop" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model {
+  switch (msg.kind) { case "noop": return model; }
+}
+`, { capabilities: ["persist"] });
+  const warning = result.warnings.find((d) => d.id === "NS1028");
+  assert.ok(warning);
+  assert.ok(warning.message.includes("no `Cmd.persist()` call"));
 });
 
 test("NS1016 speaks in rule, fix, and why", () => {

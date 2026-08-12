@@ -161,6 +161,7 @@ pub const CapabilityKind = enum {
     dialog,
     clipboard,
     credentials,
+    persist,
     open_url,
     reveal_path,
     recent_documents,
@@ -186,6 +187,7 @@ pub const Capability = union(CapabilityKind) {
     dialog: void,
     clipboard: void,
     credentials: void,
+    persist: void,
     open_url: void,
     reveal_path: void,
     recent_documents: void,
@@ -363,6 +365,8 @@ pub const Window = struct {
     /// Show without activating the app or taking keyboard focus when
     /// false. An explicit focus action can still activate the window.
     activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     /// Content min-size floor the window itself enforces (macOS
     /// `contentMinSize`): the resize stops at the floor instead of the
     /// layout clamping/clipping panes below it. 0 = no floor.
@@ -496,6 +500,14 @@ pub const ShellWindow = struct {
     always_on_top: bool = false,
     click_through: bool = false,
     activate_on_show: bool = true,
+    /// Create the native window ordered out and keep it hidden until an
+    /// explicit show/focus request. Intended for retained menu-bar app
+    /// host windows that must never flash during launch.
+    initially_hidden: bool = false,
+    /// Whether macOS exposes native fullscreen for this window. False
+    /// keeps ordinary resizing but disables the green fullscreen button
+    /// and the fullscreen command.
+    allows_fullscreen: bool = true,
     /// Content min-size floor the window itself enforces (macOS
     /// `contentMinSize`): the resize stops at the floor instead of the
     /// layout clamping/clipping panes below it. 0 = no floor. Like
@@ -627,12 +639,25 @@ pub const UpdateConfig = struct {
     check_on_start: bool = false,
 };
 
+pub const PersistRestore = struct {
+    ok: []const u8,
+    none: []const u8,
+    err: []const u8,
+};
+
+pub const PersistConfig = struct {
+    version: u64,
+    debounce_ms: u32 = 500,
+    restore: PersistRestore,
+};
+
 pub const Manifest = struct {
     identity: AppIdentity,
     version: Version,
     icons: []const Icon = &.{},
     permissions: []const Permission = &.{},
     capabilities: []const Capability = &.{},
+    persist: ?PersistConfig = null,
     bridge: BridgeConfig = .{},
     frontend: ?FrontendConfig = null,
     security: SecurityConfig = .{},

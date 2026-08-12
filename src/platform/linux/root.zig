@@ -47,6 +47,7 @@ const GtkEvent = extern struct {
     y: f64,
     open: c_int,
     focused: c_int,
+    hidden: c_int,
     label: [*]const u8,
     label_len: usize,
     title: [*]const u8,
@@ -136,6 +137,7 @@ extern fn native_sdk_gtk_start_timer(host: *GtkHost, timer_id: u64, interval_ns:
 extern fn native_sdk_gtk_cancel_timer(host: *GtkHost, timer_id: u64) void;
 extern fn native_sdk_gtk_focus_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_show_window(host: *GtkHost, window_id: u64) c_int;
+extern fn native_sdk_gtk_hide_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_close_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_minimize_window(host: *GtkHost, window_id: u64) c_int;
 extern fn native_sdk_gtk_create_view(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
@@ -161,6 +163,7 @@ extern fn native_sdk_gtk_credentials_available(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_set_credential(host: *GtkHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, secret: [*]const u8, secret_len: usize) c_int;
 extern fn native_sdk_gtk_get_credential(host: *GtkHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_gtk_delete_credential(host: *GtkHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize) c_int;
+extern fn native_sdk_gtk_format_local_time(host: *GtkHost, timestamp_ms: i64, style: c_int, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_gtk_audio_available(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_audio_spectrum_available(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_audio_load(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
@@ -363,6 +366,7 @@ pub const LinuxPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
                 .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
@@ -394,6 +398,7 @@ pub const LinuxPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .format_local_time_fn = formatLocalTime,
                 .audio_load_fn = audioLoad,
                 .audio_load_url_fn = audioLoadUrl,
                 .audio_play_fn = audioPlay,
@@ -572,6 +577,7 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
                 .scale_factor = @floatCast(event.scale),
                 .open = event.open != 0,
                 .focused = event.focused != 0,
+                .hidden = event.hidden != 0,
             } });
         },
         .view_focused => state.emit(.{ .view_focused = .{
@@ -854,6 +860,7 @@ fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     return switch (mode) {
         .immediate => 0,
         .on_first_present => 1,
+        .hidden => 2,
     };
 }
 
@@ -863,6 +870,7 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (options.always_on_top) flags |= 1 << 1;
     if (options.click_through) flags |= 1 << 2;
     if (!options.activate_on_show) flags |= 1 << 3;
+    if (!options.allows_fullscreen) flags |= 1 << 4;
     return flags;
 }
 
@@ -885,6 +893,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
         .scale_factor = 1,
         .open = true,
         .focused = options.activate_on_show and options.show == .immediate,
+        .hidden = options.show == .hidden,
     };
 }
 
@@ -901,6 +910,11 @@ fn closeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!
 fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_gtk_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn hideWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_gtk_hide_window(self.host, window_id) == 0) return error.WindowNotFound;
 }
 
 /// GTK has no hide-on-close, but show is still distinct from explicit
@@ -1378,6 +1392,13 @@ fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyer
     );
     if (result < 0) return error.UnsupportedService;
     if (result == 0) return error.CredentialNotFound;
+}
+
+fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: platform_mod.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+    const self: *LinuxPlatform = @ptrCast(@alignCast(context.?));
+    const len = native_sdk_gtk_format_local_time(self.host, timestamp_ms, @intFromEnum(style), buffer.ptr, buffer.len);
+    if (len == 0 or len > buffer.len) return error.LocalTimeFormatFailed;
+    return buffer[0..len];
 }
 
 /// Map the audio host's synchronous load result: 0 loading (the
@@ -2017,7 +2038,7 @@ test "linux first-present windows stay unmapped until present with a cancellable
     const first_present_at = std.mem.indexOf(
         u8,
         host_source,
-        "if (first_present && win && !win->shown)",
+        "if (first_present && win && !win->shown && !win->policy_hidden)",
     ) orelse return error.TestExpectedEqual;
     const first_present_tail = host_source[first_present_at..];
     const cancel_at = std.mem.indexOf(

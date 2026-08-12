@@ -180,7 +180,11 @@ extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, windo
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_hide_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_show_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_set_dock_presence(host: *AppKitHost, visible: c_int) c_int;
+extern fn native_sdk_appkit_launch_at_login_status(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_set_launch_at_login(host: *AppKitHost, enabled: c_int) c_int;
 extern fn native_sdk_appkit_set_window_close_policy(host: *AppKitHost, window_id: u64, close_policy: c_int) c_int;
 extern fn native_sdk_appkit_start_window_drag(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_window_chrome_insets(host: *AppKitHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
@@ -250,6 +254,7 @@ extern fn native_sdk_appkit_clear_recent_documents(host: *AppKitHost) c_int;
 extern fn native_sdk_appkit_set_credential(host: *AppKitHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, secret: [*]const u8, secret_len: usize) c_int;
 extern fn native_sdk_appkit_get_credential(host: *AppKitHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_delete_credential(host: *AppKitHost, service: [*]const u8, service_len: usize, account: [*]const u8, account_len: usize) c_int;
+extern fn native_sdk_appkit_format_local_time(host: *AppKitHost, timestamp_ms: i64, style: c_int, buffer: [*]u8, buffer_len: usize) usize;
 
 const AppKitScrollOccluder = extern struct {
     x: f64,
@@ -710,7 +715,11 @@ pub const MacPlatform = struct {
                 .focus_window_fn = focusWindow,
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
+                .hide_window_fn = hideWindow,
                 .show_window_fn = showWindow,
+                .set_dock_presence_fn = setDockPresence,
+                .launch_at_login_status_fn = launchAtLoginStatus,
+                .set_launch_at_login_fn = setLaunchAtLogin,
                 .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
@@ -736,6 +745,7 @@ pub const MacPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .format_local_time_fn = formatLocalTime,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
                 .add_recent_document_fn = addRecentDocument,
@@ -1248,6 +1258,7 @@ fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     return switch (mode) {
         .immediate => 0,
         .on_first_present => 1,
+        .hidden => 2,
     };
 }
 
@@ -1257,6 +1268,7 @@ fn windowFlags(options: platform_mod.WindowOptions) u32 {
     if (options.always_on_top) flags |= 1 << 1;
     if (options.click_through) flags |= 1 << 2;
     if (!options.activate_on_show) flags |= 1 << 3;
+    if (!options.allows_fullscreen) flags |= 1 << 4;
     return flags;
 }
 
@@ -1307,6 +1319,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
         .scale_factor = 1,
         .open = true,
         .focused = options.activate_on_show and options.show == .immediate,
+        .hidden = options.show == .hidden,
     };
 }
 
@@ -1325,9 +1338,40 @@ fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerr
     if (native_sdk_appkit_minimize_window(self.host, window_id) == 0) return error.WindowNotFound;
 }
 
+fn hideWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_hide_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
 fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_show_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn setDockPresence(context: ?*anyopaque, visible: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_set_dock_presence(self.host, if (visible) 1 else 0) == 0) return error.UnsupportedService;
+}
+
+fn launchAtLoginStatus(context: ?*anyopaque) anyerror!platform_mod.LaunchAtLoginStatus {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    return launchAtLoginStatusFromInt(native_sdk_appkit_launch_at_login_status(self.host));
+}
+
+fn setLaunchAtLogin(context: ?*anyopaque, enabled: bool) anyerror!platform_mod.LaunchAtLoginStatus {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    return launchAtLoginStatusFromInt(native_sdk_appkit_set_launch_at_login(self.host, if (enabled) 1 else 0));
+}
+
+fn launchAtLoginStatusFromInt(value: c_int) anyerror!platform_mod.LaunchAtLoginStatus {
+    return switch (value) {
+        0 => .disabled,
+        1 => .enabled,
+        2 => .requires_approval,
+        3 => .not_found,
+        -1 => error.UnsupportedService,
+        else => error.LaunchAtLoginFailed,
+    };
 }
 
 /// The graceful quit: the same emitShutdown + stop the last-window
@@ -2108,6 +2152,13 @@ fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyer
     ) == 0) return error.CredentialNotFound;
 }
 
+fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: platform_mod.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    const len = native_sdk_appkit_format_local_time(self.host, timestamp_ms, @intFromEnum(style), buffer.ptr, buffer.len);
+    if (len == 0 or len > buffer.len) return error.LocalTimeFormatFailed;
+    return buffer[0..len];
+}
+
 fn openExternalUrl(context: ?*anyopaque, url: []const u8) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_open_external_url(self.host, url.ptr, url.len) == 0) return error.UnsupportedService;
@@ -2621,15 +2672,15 @@ test "mac webview presses report the focused child label" {
 }
 
 test "mac active implicit show activates before making the window key" {
-    const host_source = @embedFile("appkit_host.m");
-    try std.testing.expect(std.mem.indexOf(u8, host_source,
-        \\    if ([self.passiveShowWindows containsObject:@(windowId)]) {
-        \\        [window orderFront:nil];
-        \\    } else {
-        \\        [NSApp activate];
-        \\        [window makeKeyAndOrderFront:nil];
-        \\    }
-    ) != null);
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        const show_at = std.mem.indexOf(u8, host_source, "- (void)orderWindowForImplicitShow:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+        const show_tail = host_source[show_at..];
+        const show_end = std.mem.indexOf(u8, show_tail, "- (void)focusWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+        const show_body = show_tail[0..show_end];
+        const activate_at = std.mem.indexOf(u8, show_body, "[NSApp activateIgnoringOtherApps:YES];") orelse return error.TestExpectedEqual;
+        const make_key_at = std.mem.indexOf(u8, show_body, "[window makeKeyAndOrderFront:nil];") orelse return error.TestExpectedEqual;
+        try std.testing.expect(activate_at < make_key_at);
+    }
 }
 
 test "mac unrestored secondary windows cascade within the active screen" {
@@ -2646,17 +2697,26 @@ test "mac unrestored secondary windows cascade within the active screen" {
 }
 
 test "mac explicit focus activates before making the window key" {
-    const host_source = @embedFile("appkit_host.m");
-    try std.testing.expect(std.mem.indexOf(u8, host_source,
-        \\- (void)focusWindowWithId:(uint64_t)windowId {
-        \\    NSWindow *window = self.windows[@(windowId)];
-        \\    if (!window) return;
-        \\    // An explicit focus overrides a pending present-before-show defer:
-        \\    // the runtime asked for the window NOW.
-        \\    [self.deferredShowWindows removeObjectForKey:@(windowId)];
-        \\    [NSApp activate];
-        \\    [window makeKeyAndOrderFront:nil];
-    ) != null);
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        const focus_at = std.mem.indexOf(u8, host_source, "- (void)focusWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+        const focus_tail = host_source[focus_at..];
+        const focus_end = std.mem.indexOf(u8, focus_tail, "- (void)closeWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+        const focus_body = focus_tail[0..focus_end];
+        const activate_at = std.mem.indexOf(u8, focus_body, "[NSApp activateIgnoringOtherApps:YES];") orelse return error.TestExpectedEqual;
+        const make_key_at = std.mem.indexOf(u8, focus_body, "[window makeKeyAndOrderFront:nil];") orelse return error.TestExpectedEqual;
+        try std.testing.expect(activate_at < make_key_at);
+    }
+}
+
+test "mac dock presence changes policy without activating the app" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        const dock_at = std.mem.indexOf(u8, host_source, "int native_sdk_appkit_set_dock_presence(") orelse return error.TestExpectedEqual;
+        const dock_tail = host_source[dock_at..];
+        const dock_end = std.mem.indexOf(u8, dock_tail, "int native_sdk_appkit_launch_at_login_status(") orelse return error.TestExpectedEqual;
+        const dock_body = dock_tail[0..dock_end];
+        try std.testing.expect(std.mem.indexOf(u8, dock_body, "[NSApp setActivationPolicy:policy]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, dock_body, "[NSApp activate") == null);
+    }
 }
 
 test "mac transparent raw frames are premultiplied exactly once before Metal upload" {
@@ -2977,4 +3037,51 @@ test "mac appearance event carries accessibility preferences" {
     try std.testing.expectEqual(platform_mod.ColorScheme.dark, appKitColorScheme(event.color_scheme));
     try std.testing.expect(event.reduce_motion != 0);
     try std.testing.expect(event.high_contrast != 0);
+}
+
+test "mac launch-at-login result keeps unsupported separate from operation failure" {
+    try std.testing.expectEqual(platform_mod.LaunchAtLoginStatus.disabled, try launchAtLoginStatusFromInt(0));
+    try std.testing.expectEqual(platform_mod.LaunchAtLoginStatus.enabled, try launchAtLoginStatusFromInt(1));
+    try std.testing.expectEqual(platform_mod.LaunchAtLoginStatus.requires_approval, try launchAtLoginStatusFromInt(2));
+    try std.testing.expectEqual(platform_mod.LaunchAtLoginStatus.not_found, try launchAtLoginStatusFromInt(3));
+    try std.testing.expectError(error.UnsupportedService, launchAtLoginStatusFromInt(-1));
+    try std.testing.expectError(error.LaunchAtLoginFailed, launchAtLoginStatusFromInt(-2));
+    try std.testing.expectError(error.LaunchAtLoginFailed, launchAtLoginStatusFromInt(99));
+}
+
+test "both mac hosts carry the menu-bar lifecycle and fullscreen hooks" {
+    const hosts = [_][]const u8{
+        @embedFile("appkit_host.m"),
+        @embedFile("cef_host.mm"),
+    };
+    for (hosts) |host_source| {
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_hide_window") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_set_dock_presence") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_launch_at_login_status") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "native_sdk_appkit_set_launch_at_login") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "registerAndReturnError:") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "unregisterAndReturnError:") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "before == 1 || before == 2") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "return succeeded ? NativeSdkLaunchAtLoginStatus() : -2;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "dlopen(") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "ServiceManagement.framework/ServiceManagement") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NSWindowCollectionBehaviorFullScreenNone") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "standardWindowButton:NSWindowZoomButton") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "1u << 4") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "policyHiddenWindows") != null);
+    }
+
+    // AppKit canvas windows also carry a pending first-present/fallback
+    // reveal. An explicit hide must retire that pending reveal before it
+    // records the policy-hidden state.
+    const appkit_source = hosts[0];
+    try std.testing.expect(std.mem.indexOf(u8, appkit_source, "[NSApp activate]") == null);
+    try std.testing.expect(std.mem.indexOf(u8, appkit_source, "[NSApp activateIgnoringOtherApps:YES]") != null);
+    const hide_at = std.mem.indexOf(u8, appkit_source, "- (void)hideWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+    const hide_tail = appkit_source[hide_at..];
+    const show_at = std.mem.indexOf(u8, hide_tail, "- (void)showWindowWithId:(uint64_t)windowId {") orelse return error.TestExpectedEqual;
+    const hide_body = hide_tail[0..show_at];
+    const cancel_at = std.mem.indexOf(u8, hide_body, "[self.deferredShowWindows removeObjectForKey:@(windowId)];") orelse return error.TestExpectedEqual;
+    const policy_at = std.mem.indexOf(u8, hide_body, "[self.policyHiddenWindows addObject:@(windowId)];") orelse return error.TestExpectedEqual;
+    try std.testing.expect(cancel_at < policy_at);
 }

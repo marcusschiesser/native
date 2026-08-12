@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 @class NativeSdkAppKitHost;
 @class NativeSdkAudioCaptureTarget;
@@ -38,6 +39,53 @@ static const uint32_t NativeSdkShortcutModifierCommand = 1u << 1;
 static const uint32_t NativeSdkShortcutModifierControl = 1u << 2;
 static const uint32_t NativeSdkShortcutModifierOption = 1u << 3;
 static const uint32_t NativeSdkShortcutModifierShift = 1u << 4;
+
+// SMAppService is resolved dynamically so the host keeps its existing
+// deployment target. Class lookup alone does not load the framework, so
+// load it explicitly on first use; older macOS releases simply leave the
+// class unavailable and report unsupported.
+static id NativeSdkMainAppService(void) {
+    static void *serviceManagementHandle = NULL;
+    static dispatch_once_t serviceManagementOnce;
+    dispatch_once(&serviceManagementOnce, ^{
+        serviceManagementHandle = dlopen(
+            "/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement",
+            RTLD_LAZY | RTLD_LOCAL);
+    });
+    if (!serviceManagementHandle) return nil;
+    Class serviceClass = NSClassFromString(@"SMAppService");
+    SEL selector = NSSelectorFromString(@"mainApp");
+    if (!serviceClass || ![serviceClass respondsToSelector:selector]) return nil;
+    IMP implementation = [serviceClass methodForSelector:selector];
+    return ((id (*)(id, SEL))implementation)(serviceClass, selector);
+}
+
+static int NativeSdkLaunchAtLoginStatus(void) {
+    id service = NativeSdkMainAppService();
+    SEL selector = NSSelectorFromString(@"status");
+    if (!service || ![service respondsToSelector:selector]) return -1;
+    IMP implementation = [service methodForSelector:selector];
+    return (int)((NSInteger (*)(id, SEL))implementation)(service, selector);
+}
+
+static int NativeSdkSetLaunchAtLogin(BOOL enabled) {
+    id service = NativeSdkMainAppService();
+    if (!service) return -1;
+    int before = NativeSdkLaunchAtLoginStatus();
+    // Requires-approval is already registered in the requested enabled
+    // direction. Re-registering it returns kSMErrorAlreadyRegistered or
+    // kSMErrorLaunchDeniedByUser instead of advancing the user's consent.
+    if ((enabled && (before == 1 || before == 2)) || (!enabled && before == 0)) return before;
+    SEL selector = NSSelectorFromString(enabled ? @"registerAndReturnError:" : @"unregisterAndReturnError:");
+    if (![service respondsToSelector:selector]) return -1;
+    NSError *error = nil;
+    IMP implementation = [service methodForSelector:selector];
+    BOOL succeeded = ((BOOL (*)(id, SEL, NSError **))implementation)(service, selector, &error);
+    // -1 is reserved for an unavailable service/API. A supported service
+    // refusing the operation is a real failure so the TypeScript effect can
+    // distinguish "failed" from "unsupported".
+    return succeeded ? NativeSdkLaunchAtLoginStatus() : -2;
+}
 static void *NativeSdkAppKitAppearanceObservationContext = &NativeSdkAppKitAppearanceObservationContext;
 /* KVO contexts for the app's single audio player: the AVPlayerItem's
  * load status (readyToPlay -> the LOADED acknowledgment; failed -> one
@@ -119,7 +167,10 @@ static BOOL NativeSdkAppKitHighContrastEnabled(void) {
 }
 
 static uint64_t NativeSdkTimestampNanoseconds(void) {
-    return (uint64_t)([[NSDate date] timeIntervalSince1970] * 1000000000.0);
+    /* GPU input, frame pacing, and present-completion latency are duration
+     * math. CLOCK_MONOTONIC matches the runtime's monotonicNanoseconds seam
+     * and cannot jump when the wall clock is adjusted. */
+    return clock_gettime_nsec_np(CLOCK_MONOTONIC);
 }
 
 static uint64_t NativeSdkRetainedFrameIntervalNanoseconds(NSScreen *screen) {
@@ -7725,6 +7776,12 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     if ((windowFlags & (1u << 1)) != 0) window.level = NSFloatingWindowLevel;
     if ((windowFlags & (1u << 2)) != 0) window.ignoresMouseEvents = YES;
     if ((windowFlags & (1u << 3)) != 0) [self.passiveShowWindows addObject:key];
+    if ((windowFlags & (1u << 4)) != 0) {
+        NSWindowCollectionBehavior behavior = window.collectionBehavior;
+        behavior &= ~(NSWindowCollectionBehaviorFullScreenPrimary | NSWindowCollectionBehaviorFullScreenAuxiliary);
+        window.collectionBehavior = behavior | NSWindowCollectionBehaviorFullScreenNone;
+        [window standardWindowButton:NSWindowZoomButton].enabled = NO;
+    }
     [window setTitle:(title.length > 0 ? title : self.appName)];
     if (titlebarStyle == 1 || titlebarStyle == 2) {
         window.titlebarAppearsTransparent = YES;
@@ -7814,12 +7871,14 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             [weakSelf showDeferredWindowIfPending:windowId reason:"fallback-deadline"];
         });
+    } else if (showPolicy == 2) {
+        [self.policyHiddenWindows addObject:key];
     }
     if (makeMain) {
         self.window = window;
         self.delegate = delegate;
         self.windowLabel = label.length > 0 ? label : @"main";
-    } else if (showPolicy != 1) {
+    } else if (showPolicy == 0) {
         [self orderWindowForImplicitShow:windowId];
     }
     return YES;
@@ -7836,7 +7895,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     if ([self.passiveShowWindows containsObject:@(windowId)]) {
         [window orderFront:nil];
     } else {
-        [NSApp activate];
+        [NSApp activateIgnoringOtherApps:YES];
         [window makeKeyAndOrderFront:nil];
     }
 }
@@ -7908,7 +7967,8 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     // An explicit focus overrides a pending present-before-show defer:
     // the runtime asked for the window NOW.
     [self.deferredShowWindows removeObjectForKey:@(windowId)];
-    [NSApp activate];
+    [self.policyHiddenWindows removeObject:@(windowId)];
+    [NSApp activateIgnoringOtherApps:YES];
     [window makeKeyAndOrderFront:nil];
     [self emitWindowFrameForWindowId:windowId open:YES];
     [self scheduleFrame];
@@ -7946,6 +8006,9 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 - (void)hideWindowWithId:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)];
     if (!window) return;
+    // Hiding is an explicit policy decision and therefore supersedes a
+    // pending first-present reveal and its fallback deadline.
+    [self.deferredShowWindows removeObjectForKey:@(windowId)];
     [self.policyHiddenWindows addObject:@(windowId)];
     [window orderOut:nil];
     [self emitWindowFrameForWindowId:windowId open:YES];
@@ -9588,7 +9651,7 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     // Present-before-show: a deferred startup window stays ordered out
     // here and appears when its first canvas present lands (or the
     // create-time fallback deadline fires).
-    if (!self.deferredShowWindows[@1]) {
+    if (!self.deferredShowWindows[@1] && ![self.policyHiddenWindows containsObject:@1]) {
         [self orderWindowForImplicitShow:1];
     }
     if (!self.shortcutEventMonitor) {
@@ -12434,11 +12497,35 @@ int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t w
     return 1;
 }
 
+int native_sdk_appkit_hide_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    [object hideWindowWithId:window_id];
+    return 1;
+}
+
 int native_sdk_appkit_show_window(native_sdk_appkit_host_t *host, uint64_t window_id) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object showWindowWithId:window_id];
     return 1;
+}
+
+int native_sdk_appkit_set_dock_presence(native_sdk_appkit_host_t *host, int visible) {
+    (void)host;
+    NSApplicationActivationPolicy policy = visible ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
+    BOOL changed = [NSApp setActivationPolicy:policy];
+    return changed || NSApp.activationPolicy == policy ? 1 : 0;
+}
+
+int native_sdk_appkit_launch_at_login_status(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return NativeSdkLaunchAtLoginStatus();
+}
+
+int native_sdk_appkit_set_launch_at_login(native_sdk_appkit_host_t *host, int enabled) {
+    (void)host;
+    return NativeSdkSetLaunchAtLogin(enabled != 0);
 }
 
 int native_sdk_appkit_set_window_close_policy(native_sdk_appkit_host_t *host, uint64_t window_id, int close_policy) {
@@ -12756,6 +12843,25 @@ int native_sdk_appkit_delete_credential(native_sdk_appkit_host_t *host, const ch
         NSMutableDictionary *query = NativeSdkCredentialQuery(serviceString, accountString);
         OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
         return status == errSecSuccess ? 1 : 0;
+    }
+}
+
+size_t native_sdk_appkit_format_local_time(native_sdk_appkit_host_t *host, int64_t timestamp_ms, int style, char *buffer, size_t buffer_len) {
+    (void)host;
+    if (!buffer || buffer_len == 0 || style < 0 || style > 2) return 0;
+    @autoreleasepool {
+        NSDate *date = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)timestamp_ms / 1000.0];
+        if (!date) return 0;
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.locale = [NSLocale autoupdatingCurrentLocale];
+        formatter.timeZone = [NSTimeZone localTimeZone];
+        formatter.dateStyle = (style == 0 || style == 2) ? NSDateFormatterShortStyle : NSDateFormatterNoStyle;
+        formatter.timeStyle = (style == 1 || style == 2) ? NSDateFormatterMediumStyle : NSDateFormatterNoStyle;
+        NSString *text = [formatter stringFromDate:date];
+        NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
+        if (!utf8 || utf8.length == 0 || utf8.length > buffer_len) return 0;
+        memcpy(buffer, utf8.bytes, utf8.length);
+        return utf8.length;
     }
 }
 

@@ -75,6 +75,18 @@
 //   Cmd.showNotification({ title, subtitle?, body? })
 //                                fire-and-forget desktop notification; the OS
 //                                remains authoritative over final delivery
+//   Cmd.openExternalUrl(url)      open an allowed HTTP(S) URL in the system
+//                                browser; denied/invalid URLs fail closed
+//   Cmd.revealPath(path)          reveal a path in the system file manager;
+//                                invalid/unavailable requests fail closed
+//   Cmd.credentialSet(service, account, secret, route)
+//   Cmd.credentialGet(service, account, route)
+//   Cmd.credentialDelete(service, account, route)
+//                                routed access to Keychain / Secret Service /
+//                                Credential Manager
+//   Cmd.formatLocalTime(ms, style, route)
+//                                format an epoch timestamp through the host's
+//                                current locale and time zone
 //   Cmd.delay(key, ms, "fired")  a keyed ONE-SHOT timer: dispatches the named
 //                                arm once after `ms`, with the fire time (ms)
 //                                as its single number payload; re-issuing a
@@ -232,6 +244,10 @@
 //   Cmd.navigateWebView(label, url)
 //                                navigate a declared child WebView in the
 //                                main window (fire-and-forget).
+//   Cmd.hideWindow(label)        order a live window out while retaining
+//                                its views; showWindow is the inverse.
+//   Cmd.setDockPresence(visible) show or remove the app from the macOS
+//                                Dock/app switcher.
 //   Cmd.quitApp()                graceful terminate, the tray "Quit"
 //                                consequence: the host quits through the
 //                                SAME shutdown path a last-window close
@@ -937,6 +953,11 @@ export interface NotificationSpec {
   readonly body?: Uint8Array;
 }
 
+/// The three bounded host-local timestamp presentations. Unlike the markup
+/// `date`/`time`/`datetime` functions (fixed UTC), this is intentionally an
+/// effect because the user's locale and time zone are ambient host state.
+export type LocalTimeStyle = "date" | "time" | "datetime";
+
 /// An inert command value, parameterized by the app's Msg union so the
 /// factories can validate message targets. Opaque to app code: build with
 /// the `Cmd.*` factories, return from `update`/`initialModel`, never inspect
@@ -1052,6 +1073,8 @@ export type Cmd<M extends Msgish> =
     }
   | { readonly op: "window_show"; readonly label: string }
   | { readonly op: "webview_navigate"; readonly label: string; readonly url: Uint8Array }
+  | { readonly op: "window_hide"; readonly label: string }
+  | { readonly op: "dock_presence"; readonly visible: boolean }
   | { readonly op: "quit_app" }
   | {
       readonly op: "image_load";
@@ -1188,7 +1211,9 @@ export const Cmd = {
   /// No effects. `return model` is sugar for `return [model, Cmd.none]`.
   none: { op: "none" } as Cmd<never>,
 
-  /// Ask the host to persist the committed model.
+  /// Snapshot the just-committed Model through the engine-owned store.
+  /// Requires app.zon's `persist` capability and restore-route config;
+  /// the host owns coalescing, atomic placement, and journal/replay.
   persist(): Cmd<never> {
     return { op: "persist" };
   },
@@ -1270,6 +1295,51 @@ export const Cmd = {
       subtitle: spec.subtitle ?? new Uint8Array(0),
       body: spec.body ?? new Uint8Array(0),
     };
+  },
+
+  /// Open an HTTP(S) URL in the user's system browser. Fire-and-forget: the
+  /// runtime validates the URL and enforces `external_links`; invalid,
+  /// denied, or unavailable requests fail closed.
+  openExternalUrl(url: Uint8Array): Cmd<never> {
+    return { op: "host_bytes", name: "native-sdk.os.openUrl", payload: url };
+  },
+
+  /// Reveal a path in the system file manager (Finder, Files, or Explorer).
+  /// Fire-and-forget; invalid or unavailable requests fail closed.
+  revealPath(path: Uint8Array): Cmd<never> {
+    return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  /// Store a secret in the platform credential store. The ok arm receives
+  /// empty bytes; the err arm receives `invalid_request`, `unsupported`, or
+  /// `failed`.
+  credentialSet<M extends Msgish>(
+    service: Uint8Array,
+    account: Uint8Array,
+    secret: Uint8Array,
+    route: RequestRoute<M>,
+  ): Cmd<M> {
+    return Cmd.request("native-sdk.credentials.set", { service, account, secret }, route);
+  },
+
+  /// Read a secret from the platform credential store. The ok arm receives
+  /// the secret bytes; a missing item routes err with `not_found`.
+  credentialGet<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.credentials.get", { service, account }, route);
+  },
+
+  /// Delete a secret from the platform credential store. The ok arm receives
+  /// empty bytes; a missing item routes err with `not_found`.
+  credentialDelete<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.credentials.delete", { service, account }, route);
+  },
+
+  /// Format an epoch timestamp (milliseconds, the same unit as `Cmd.now`) in
+  /// the host's current locale and local time zone. The localized UTF-8 text
+  /// arrives on ok; invalid timestamps or unavailable services route err.
+  formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M> {
+    const styleCode = style === "date" ? 0 : style === "time" ? 1 : 2;
+    return Cmd.request("native-sdk.time.formatLocal", { style: styleCode, timestampMs }, route);
   },
 
   /// A keyed one-shot delay: dispatch the named Msg arm once, `ms` from now,
@@ -1446,6 +1516,31 @@ export const Cmd = {
   /// the update loop. Passing the current URL again forces a reload.
   navigateWebView(label: string, url: Uint8Array): Cmd<never> {
     return { op: "webview_navigate", label, url };
+  },
+
+  /// Hide a live window without closing it. Its views and native identity
+  /// remain intact; `showWindow` brings it back. Unknown labels no-op.
+  hideWindow(label: string): Cmd<never> {
+    return { op: "window_hide", label };
+  },
+
+  /// Control whether the app appears in the macOS Dock and app switcher.
+  /// Unsupported hosts ignore the command.
+  setDockPresence(visible: boolean): Cmd<never> {
+    return { op: "dock_presence", visible };
+  },
+
+  /// Query the installed bundle's launch-at-login registration. The ok
+  /// route receives UTF-8 bytes naming `enabled`, `disabled`,
+  /// `requires_approval`, or `not_found`; the err route receives a reason.
+  launchAtLoginStatus<M extends Msgish>(route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.launch-at-login.status", new Uint8Array(0), route);
+  },
+
+  /// Register or unregister the installed bundle for launch at login. The
+  /// ok and err payloads follow `launchAtLoginStatus`.
+  setLaunchAtLogin<M extends Msgish>(enabled: boolean, route: RequestRoute<M>): Cmd<M> {
+    return Cmd.request("native-sdk.launch-at-login.set", new Uint8Array([enabled ? 1 : 0]), route);
   },
 
   /// Quit the app for real — the graceful terminate, and the tray "Quit"

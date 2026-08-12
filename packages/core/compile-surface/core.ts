@@ -252,6 +252,8 @@ export interface NotificationSpec {
   readonly body?: Uint8Array;
 }
 
+export type LocalTimeStyle = "date" | "time" | "datetime";
+
 /// The inert command data — the reference module's Cmd<M> union with
 /// the type parameter erased (M constrains only the factories' arm-name
 /// checking, never the data).
@@ -357,6 +359,8 @@ export type CmdData =
     }
   | { readonly op: "window_show"; readonly label: string }
   | { readonly op: "webview_navigate"; readonly label: string; readonly url: Uint8Array }
+  | { readonly op: "window_hide"; readonly label: string }
+  | { readonly op: "dock_presence"; readonly visible: boolean }
   | { readonly op: "quit_app" }
   | {
       readonly op: "image_load";
@@ -448,6 +452,8 @@ export function hostArgs(name: string, args: readonly number[]): CmdData {
 export const Cmd = {
   none: { op: "none" } as CmdData,
 
+  /// Snapshot the just-committed Model through the capability-gated,
+  /// engine-owned persistence store. Wire output remains the reserved 0x01.
   persist(): CmdData {
     return { op: "persist" };
   },
@@ -533,6 +539,48 @@ export const Cmd = {
       subtitle: spec.subtitle ?? new Uint8Array(0),
       body: spec.body ?? new Uint8Array(0),
     };
+  },
+
+  openExternalUrl(url: Uint8Array): CmdData {
+    return { op: "host_bytes", name: "native-sdk.os.openUrl", payload: url };
+  },
+
+  revealPath(path: Uint8Array): CmdData {
+    return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  credentialSet(
+    service: Uint8Array,
+    account: Uint8Array,
+    secret: Uint8Array,
+    route: { readonly key?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
+    return Cmd.request("native-sdk.credentials.set", hostRecordBytes({ service, account, secret }), route);
+  },
+
+  credentialGet(
+    service: Uint8Array,
+    account: Uint8Array,
+    route: { readonly key?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
+    return Cmd.request("native-sdk.credentials.get", hostRecordBytes({ service, account }), route);
+  },
+
+  credentialDelete(
+    service: Uint8Array,
+    account: Uint8Array,
+    route: { readonly key?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
+    return Cmd.request("native-sdk.credentials.delete", hostRecordBytes({ service, account }), route);
+  },
+
+  formatLocalTime(
+    timestampMs: number,
+    style: LocalTimeStyle,
+    route: { readonly key?: string; readonly ok: string; readonly err: string },
+  ): CmdData {
+    const styleCode = style === "date" ? 0 : style === "time" ? 1 : 2;
+    return Cmd.request("native-sdk.time.formatLocal", hostRecordBytes({ style: styleCode, timestampMs }), route);
   },
 
   delay(key: string, ms: number, msgKind: string): CmdData {
@@ -636,6 +684,22 @@ export const Cmd = {
 
   navigateWebView(label: string, url: Uint8Array): CmdData {
     return { op: "webview_navigate", label, url };
+  },
+
+  hideWindow(label: string): CmdData {
+    return { op: "window_hide", label };
+  },
+
+  setDockPresence(visible: boolean): CmdData {
+    return { op: "dock_presence", visible };
+  },
+
+  launchAtLoginStatus(route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return Cmd.request("native-sdk.launch-at-login.status", new Uint8Array(0), route);
+  },
+
+  setLaunchAtLogin(enabled: boolean, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return Cmd.request("native-sdk.launch-at-login.set", new Uint8Array([enabled ? 1 : 0]), route);
   },
 
   quitApp(): CmdData {
