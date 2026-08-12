@@ -186,9 +186,9 @@ export const rules = {
   },
   NS1028: {
     id: "NS1028",
-    title: "Cmd.persist is not yet host-backed",
-    fix: "Persist app state yourself with `Cmd.writeFile(path, bytes, { ok, err })` and load it back at boot with `Cmd.readFile` from `initialModel`'s command.",
-    why: "No shipping host implements the persist verb yet, so the record is performed by nobody — a writeFile you control (own path, own format, a load path) is the persistence real apps use. The op still compiles and stays on the wire for hosts that add the service.",
+    title: "Cmd.persist and its capability must agree",
+    fix: "Add `\"persist\"` to app.zon's `capabilities` and configure `.persist = .{ .version = 1, .restore = .{ .ok = \"restored\", .none = \"fresh_boot\", .err = \"restore_failed\" } }`; or remove the unused capability/command.",
+    why: "The persist capability controls whether the engine-owned snapshot store and `core.persist` binding are linked into the app. Keeping the declaration and command in lockstep prevents a silently unperformed write and sheds storage code from apps that do not use it.",
   },
   NS1029: {
     id: "NS1029",
@@ -217,8 +217,8 @@ export const rules = {
   NS1033: {
     id: "NS1033",
     title: "wiring exports match their runtime shapes",
-    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack`; `statusItem(model: Model): StatusItemState`; `appearanceMsg` / `chromeMsg` naming an arm with that channel's record shape; and `envMsgs` entries targeting one-`Uint8Array`-field arms. Import canonical records from `@native-sdk/core/events`.",
-    why: "The generated wiring builds host events, model-derived theme selection, and the live menu-bar status item structurally from your declarations at build time; a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
+    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack`; `statusItem(model: Model): StatusItemState`; `appearanceMsg` / `chromeMsg` naming an arm with that channel's record shape; `envMsgs` entries targeting one-`Uint8Array`-field arms; and persistence ok/none routes naming void arms while err names a one-`Uint8Array`-field arm. Import canonical records from `@native-sdk/core/events`.",
+    why: "The generated wiring builds host events, persistence restore results, model-derived theme selection, and the live menu-bar status item structurally from your declarations at build time; a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
   },
   NS1034: {
     id: "NS1034",
@@ -229,12 +229,12 @@ export const rules = {
   NS1035: {
     id: "NS1035",
     title: "npm packages do not run inside a core",
-    fix: "Vendor the logic as a module under src/ and import it relatively, or make the import type-only (`import type`); only \"@native-sdk/core\" modules carry runtime meaning.",
-    why: "No JS engine ships in the binary — an npm package's code has nowhere to run natively, while types erase and cost nothing.",
+    fix: "Move ordinary TypeScript work into `src/services/` and call it through `Cmd.request`, vendor subset-legal core logic under src/ and import it relatively, or make the import type-only (`import type`); only \"@native-sdk/core\" modules carry runtime meaning in the core class.",
+    why: "No JS engine ships in the binary — the deterministic core carries only its closed subset, while service modules compile separately through scriptc's ordinary static tier and results return as messages.",
   },
   NS1036: {
     id: "NS1036",
-    title: "core modules do not import in a cycle",
+    title: "runtime modules do not import in a cycle",
     fix: "Hoist the shared declarations into a module both sides import, or make the back-edge type-only (`import type { Model } from \"./core.ts\"` is fine).",
     why: "A runtime import cycle only works through JS's live-binding indirection, which the emitted native module (and plain reading order) cannot represent; type-only edges erase and are exempt.",
   },
@@ -405,6 +405,30 @@ export const rules = {
     title: "asciiBytes is ASCII-only",
     fix: "Use `utf8Bytes(...)` for user-visible or Unicode text; keep `asciiBytes(...)` for guaranteed-ASCII command names, keys, paths, URLs, and protocol values.",
     why: "JavaScript strings are UTF-16 while the native text boundary is UTF-8; naming the encoding explicitly prevents a non-ASCII code unit from being truncated into a different byte sequence.",
+  },
+  NS1065: {
+    id: "NS1065",
+    title: "the core does not import services",
+    fix: "Issue the operation as `Cmd.request(\"module.operation\", payload, { ok, err })`; shared subset-legal shapes may live in a core module that the service imports, but the core-to-service edge is always an effect.",
+    why: "A direct import would run ambient, non-deterministic service authority inside update and erase the command/result boundary that journaling and replay depend on.",
+  },
+  NS1066: {
+    id: "NS1066",
+    title: "service dependencies are vendored in phase 1",
+    fix: "Vendor the source under `src/services/` and import it relatively; checked-in, hash-verified npm sources arrive with the typed ecosystem phase.",
+    why: "Phase 1 is hermetic by construction: every service source compiled into the bundle is present in the app tree, with no package-manager or network input during the build.",
+  },
+  NS1067: {
+    id: "NS1067",
+    title: "service calls match the generated byte contract",
+    fix: "Export a synchronous, non-default named function taking zero arguments or one `Uint8Array` and returning `Uint8Array`; let exactly `{ kind: \"...\", message: <string> }` escape through the operation boundary, and call only a name listed by the generated service contract. Names beginning `__nativeSdk` are reserved for generated transport lowering.",
+    why: "The service host and runner dispatch exclusively from `services.contract.json`; a shape or name outside that document cannot be encoded, routed, or checked for contract skew.",
+  },
+  NS1068: {
+    id: "NS1068",
+    title: "persistent model shapes advance monotonically",
+    fix: "Increase app.zon's `.persist.version` when the `Model` shape changes, and never decrease or reuse a version number.",
+    why: "The version selects the app's pure migration path while the model fingerprint rejects accidental shape drift; reusing a version would make old bytes ambiguous and could restore them into the wrong model layout.",
   },
 } as const satisfies Record<string, RuleCopy>;
 

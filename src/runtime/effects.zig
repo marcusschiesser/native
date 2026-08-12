@@ -74,6 +74,7 @@ const canvas_limits = @import("canvas_limits.zig");
 const platform = @import("../platform/root.zig");
 const validation = @import("validation.zig");
 const runtime_clock = @import("clock.zig");
+const persist_store = @import("persist_store.zig");
 const pty_transport = @import("pty.zig");
 
 /// Maximum in-flight effects (spawn slots / worker threads).
@@ -165,6 +166,18 @@ pub const max_effect_file_path_bytes: usize = 1024;
 /// write would corrupt the file on disk, which truncation flags cannot
 /// undo.
 pub const max_effect_file_bytes: usize = 1024 * 1024;
+/// Model persistence owns a separate payload family and bound; it does not
+/// consume a file-effect slot or inherit the raw-file cap.
+pub const max_effect_persist_snapshot_bytes: usize = persist_store.max_snapshot_bytes;
+pub const EffectPersistOutcome = persist_store.Outcome;
+/// The one boot-time model-restore result delivered to a persistence-enabled
+/// Zig core. Successful bytes contain the generated snapshot body; every
+/// other outcome carries an empty slice. The bytes are instance-lived, so an
+/// app may retain them while decoding or migrating its model.
+pub const EffectPersistResult = struct {
+    outcome: EffectPersistOutcome,
+    bytes: []const u8 = "",
+};
 /// How long teardown waits (total, in milliseconds) for file workers
 /// stuck in blocking I/O before abandoning them — the default of the
 /// channel's injectable `file_join_deadline_ms`. File I/O is the one
@@ -282,6 +295,20 @@ pub const WindowActionBinding = struct {
     quit_fn: *const fn (context: *anyopaque) bool,
 };
 
+/// Runtime-owned platform-service entry points used by the intrinsic
+/// `native-sdk.*` named commands. Binding the Runtime methods—not the raw
+/// PlatformServices table—keeps validation and external-link policy in the
+/// same place for TypeScript effects, Zig callers, and built-in bridge calls.
+pub const SystemServiceBinding = struct {
+    context: *anyopaque,
+    open_external_url_fn: *const fn (context: *anyopaque, url: []const u8) anyerror!void,
+    reveal_path_fn: *const fn (context: *anyopaque, path: []const u8) anyerror!void,
+    set_credential_fn: *const fn (context: *anyopaque, credential: platform.Credential) anyerror!void,
+    get_credential_fn: *const fn (context: *anyopaque, key: platform.CredentialKey, buffer: []u8) anyerror!?[]const u8,
+    delete_credential_fn: *const fn (context: *anyopaque, key: platform.CredentialKey) anyerror!bool,
+    format_local_time_fn: *const fn (context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8,
+};
+
 /// Type-erased handle to the embedding host's named-command services,
 /// bound onto the effects channel (`bindHostCalls`). This is the seam
 /// behind `hostRequest`/`hostSend` — the generic named host call a
@@ -303,6 +330,24 @@ pub const HostCallBinding = struct {
     /// cancelled — any late `feedHostResult` for it reports
     /// `error.EffectNotFound` and delivers nothing.
     cancel_fn: ?*const fn (context: *anyopaque, key: u64) void = null,
+    /// Service transports join the spawn/stream keyed discipline: a second
+    /// live request rejects without replacing the first. Legacy embedding
+    /// bindings retain the generic host seam's replacement behavior.
+    reject_duplicate_keys: bool = false,
+    /// Optional worker-carrier completion seam. `bytes` stays valid until
+    /// the next poll; Effects copies it immediately on the loop thread.
+    poll_fn: ?*const fn (context: *anyopaque) ?HostCallCompletion = null,
+    pending_fn: ?*const fn (context: *anyopaque) bool = null,
+    /// Supplies the platform's thread-safe wake handle after UiApp binds it.
+    bind_services_fn: ?*const fn (context: *anyopaque, services: *const platform.PlatformServices) void = null,
+    /// Quiesce carrier workers/children before PlatformServices is severed.
+    shutdown_fn: ?*const fn (context: *anyopaque) void = null,
+};
+
+pub const HostCallCompletion = struct {
+    key: u64,
+    ok: bool,
+    bytes: []const u8,
 };
 
 /// Window-action label capacity (`Effects.closeWindow`/`minimizeWindow`/
@@ -1885,10 +1930,14 @@ pub const EffectResultKind = enum(u8) {
     /// opposite of the channel records' inline argument. Exit records
     /// ride `code`/`exit_reason` plus the pty fields.
     pty = 15,
+    /// One boot model-restore outcome. Successful canonical model bytes ride
+    /// `payload` at the live boundary and move to the session blob store;
+    /// replay feeds those exact bytes before the installing app-start event.
+    persist = 16,
     /// One secure credential-store terminal. Credential secrets never
     /// ride `payload`: get is rejected while recording, and set/delete
     /// records contain only operation and outcome metadata.
-    credential = 16,
+    credential = 17,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -1934,6 +1983,11 @@ pub const max_effect_replay_env_entries: usize = 32;
 pub const ReplayEnvEntry = struct {
     msg: []const u8,
     value: []const u8,
+};
+
+pub const ReplayPersistEntry = struct {
+    outcome: EffectPersistOutcome,
+    bytes: []const u8,
 };
 
 /// One drained effect result, flattened for the session journal: the
@@ -2035,6 +2089,12 @@ pub const EffectResultRecord = struct {
     /// when it moves `payload` out of line (the image convention).
     pty_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
     pty_blob_len: u64 = 0,
+    /// `.persist` records: the closed restore outcome and the content address
+    /// of successful canonical model bytes (empty models honestly use no
+    /// blob). The recorder moves non-empty payloads out of line.
+    persist_outcome: EffectPersistOutcome = .none,
+    persist_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
+    persist_blob_len: u64 = 0,
 };
 
 /// Type-erased sink the drain reports every delivered result to while a
@@ -2548,6 +2608,7 @@ pub fn Effects(comptime Msg: type) type {
         pub const ExitMsgFn = *const fn (exit: EffectExit) Msg;
         pub const ResponseMsgFn = *const fn (response: EffectResponse) Msg;
         pub const FileMsgFn = *const fn (result: EffectFileResult) Msg;
+        pub const PersistMsgFn = *const fn (result: EffectPersistResult) Msg;
         pub const ClipboardMsgFn = *const fn (result: EffectClipboardResult) Msg;
         pub const CredentialMsgFn = *const fn (result: EffectCredentialResult) Msg;
         pub const TimerMsgFn = *const fn (timer: EffectTimer) Msg;
@@ -2600,6 +2661,17 @@ pub fn Effects(comptime Msg: type) type {
         pub fn fileMsg(comptime tag: std.meta.Tag(Msg)) FileMsgFn {
             return struct {
                 fn make(result: EffectFileResult) Msg {
+                    return @unionInit(Msg, @tagName(tag), result);
+                }
+            }.make;
+        }
+
+        /// Comptime Msg constructor for model restore delivery:
+        /// `persistMsg(.restored)` builds `Msg{ .restored = result }` — the
+        /// variant's payload type must be `native_sdk.EffectPersistResult`.
+        pub fn persistMsg(comptime tag: std.meta.Tag(Msg)) PersistMsgFn {
+            return struct {
+                fn make(result: EffectPersistResult) Msg {
                     return @unionInit(Msg, @tagName(tag), result);
                 }
             }.make;
@@ -4338,6 +4410,15 @@ pub fn Effects(comptime Msg: type) type {
         replay_env: [max_effect_replay_env_entries]ReplayEnvEntry = undefined,
         replay_env_head: usize = 0,
         replay_env_len: usize = 0,
+        /// Exactly one restore outcome is owed to a persistence-enabled boot.
+        /// A two-entry queue makes a damaged duplicate journal detectable at
+        /// replay settle instead of overwriting the first outcome. Payloads
+        /// are copied at the journal handoff: session replay's blob scratch
+        /// expires with the installing event.
+        replay_persist: [2]ReplayPersistEntry = undefined,
+        replay_persist_bytes: [2]?[]u8 = @splat(null),
+        replay_persist_head: usize = 0,
+        replay_persist_len: usize = 0,
         /// Set once from the loop thread before the first dispatch;
         /// workers call `services.wake()` through it (the one
         /// thread-safe PlatformServices entry). Loop-thread reads only
@@ -4408,6 +4489,10 @@ pub fn Effects(comptime Msg: type) type {
         /// by `UiApp` alongside the services — the seam behind
         /// app-drawn window controls (loop-thread only).
         window_actions: ?WindowActionBinding = null,
+        /// Runtime system services with their validation/policy layer intact.
+        /// Intrinsic platform commands use this binding; generic host calls
+        /// continue to use `host_calls` below.
+        system_services: ?SystemServiceBinding = null,
         /// The embedding host's named-command services (`hostSend` /
         /// `hostRequest`), bound by whoever hosts a transpiled app core
         /// (loop-thread only). Null means no host services: sends drop,
@@ -4664,6 +4749,9 @@ pub fn Effects(comptime Msg: type) type {
         /// vocabulary, not its rejection count.
         staged_keys: [][]u8 = &.{},
         staged_keys_len: usize = 0,
+        /// Stable backing for the single boot restore Msg. Unlike ordinary
+        /// drain scratch, a model may retain this slice after update commits.
+        persist_restore_bytes: ?[]u8 = null,
         /// Scratch the drained entry is copied into so its line slice
         /// stays valid while `update` runs (recycled per drained Msg).
         drain_scratch: Entry = .{},
@@ -5244,6 +5332,16 @@ pub fn Effects(comptime Msg: type) type {
                 self.allocator.free(self.staged_keys);
                 self.staged_keys = &.{};
             }
+            if (self.persist_restore_bytes) |bytes| {
+                self.allocator.free(bytes);
+                self.persist_restore_bytes = null;
+            }
+            for (&self.replay_persist_bytes) |*bytes| {
+                if (bytes.*) |owned| self.allocator.free(owned);
+                bytes.* = null;
+            }
+            self.replay_persist_head = 0;
+            self.replay_persist_len = 0;
             // And an undrained replay write-verdict spill.
             if (self.replay_pty_write_spill.len > 0) {
                 self.allocator.free(self.replay_pty_write_spill);
@@ -5251,6 +5349,11 @@ pub fn Effects(comptime Msg: type) type {
             }
             self.replay_pty_write_head = 0;
             self.replay_pty_write_len = 0;
+            // A worker-backed host carrier may still be blocked in a child
+            // read. Quiesce it while the platform wake binding remains live.
+            if (self.host_calls) |binding| {
+                if (binding.shutdown_fn) |shutdown_fn| shutdown_fn(binding.context);
+            }
             // Sever the services binding last: the platform this pointer
             // reaches into may be destroyed before the next call arrives
             // (main's deferred app deinit runs after the runner's platform
@@ -5282,6 +5385,7 @@ pub fn Effects(comptime Msg: type) type {
             // Sever the host-call binding for the same reason: its
             // context belongs to the embedding host.
             self.host_calls = null;
+            self.system_services = null;
         }
 
         /// Discard every queued completion, freeing heap line payloads
@@ -5365,6 +5469,9 @@ pub fn Effects(comptime Msg: type) type {
         pub fn bindServices(self: *Self, services: *const platform.PlatformServices) void {
             if (self.services != null) return;
             self.services = services;
+            if (self.host_calls) |binding| {
+                if (binding.bind_services_fn) |bind_fn| bind_fn(binding.context, services);
+            }
             // Open-before-bind: a channel wake header is already armed
             // and its producer may already be posting, so this bind IS
             // the publication site. Bind-before-open publishes at the
@@ -5608,11 +5715,21 @@ pub fn Effects(comptime Msg: type) type {
             if (self.window_actions == null) self.window_actions = binding;
         }
 
+        /// Bind runtime-validated platform services for the SDK-reserved
+        /// named command family. Loop-thread only; the first bind sticks.
+        pub fn bindSystemServices(self: *Self, binding: SystemServiceBinding) void {
+            if (self.system_services == null) self.system_services = binding;
+        }
+
         /// Point named host commands at the embedding host's services
         /// (see `HostCallBinding`). Loop-thread only; the first bind
         /// sticks.
         pub fn bindHostCalls(self: *Self, binding: HostCallBinding) void {
-            if (self.host_calls == null) self.host_calls = binding;
+            if (self.host_calls != null) return;
+            self.host_calls = binding;
+            if (self.services) |services| {
+                if (binding.bind_services_fn) |bind_fn| bind_fn(binding.context, services);
+            }
         }
 
         /// Switch this channel into session-replay mode: the fake
@@ -5805,6 +5922,15 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 return error.ReplayDivergence;
             }
+            if (self.replay_persist_len > 0) {
+                if (comptime builtin.os.tag != .freestanding) {
+                    std.debug.print(
+                        "replay diverged: {d} journaled model-restore record(s) were never consumed - the replayed app no longer drains its persistence route\n",
+                        .{self.replay_persist_len},
+                    );
+                }
+                return error.ReplayDivergence;
+            }
             // Fed results still awaiting delivery — EVERY kind, not one
             // family: the recorder journals every result at its live
             // DELIVERY (inside a dispatched event that follows it in the
@@ -5934,6 +6060,89 @@ pub fn Effects(comptime Msg: type) type {
             self.replay_env_head = (self.replay_env_head + 1) % max_effect_replay_env_entries;
             self.replay_env_len -= 1;
             return entry;
+        }
+
+        /// Journal the one boot restore outcome. Successful bytes are moved to
+        /// the content-addressed session blob store by SessionRecorder.
+        pub fn journalPersistRestore(self: *Self, outcome: EffectPersistOutcome, bytes: []const u8) void {
+            self.journalNote(.{ .kind = .persist, .key = 0, .payload = bytes, .persist_outcome = outcome });
+        }
+
+        /// Queue a journaled boot restore for the persistence adapter. Copy
+        /// successful bytes because the replay blob scratch that supplies
+        /// them expires with the installing event.
+        pub fn pushReplayPersist(self: *Self, outcome: EffectPersistOutcome, bytes: []const u8) error{EffectNotFound}!void {
+            if (self.replay_persist_len >= self.replay_persist.len) return error.EffectNotFound;
+            const index = (self.replay_persist_head + self.replay_persist_len) % self.replay_persist.len;
+            std.debug.assert(self.replay_persist_bytes[index] == null);
+            const owned = if (bytes.len > 0)
+                self.allocator.dupe(u8, bytes) catch
+                    @panic("effects: out of memory retaining a replayed model restore payload")
+            else
+                null;
+            self.replay_persist_bytes[index] = owned;
+            self.replay_persist[index] = .{ .outcome = outcome, .bytes = if (owned) |copy| copy else "" };
+            self.replay_persist_len += 1;
+        }
+
+        pub fn takeReplayPersist(self: *Self) ?ReplayPersistEntry {
+            if (self.replay_persist_len == 0) return null;
+            const index = self.replay_persist_head;
+            const entry = self.replay_persist[index];
+            const owned = self.replay_persist_bytes[index];
+            self.replay_persist_bytes[index] = null;
+            if (self.persist_restore_bytes) |old| self.allocator.free(old);
+            self.persist_restore_bytes = owned;
+            self.replay_persist_head = (self.replay_persist_head + 1) % self.replay_persist.len;
+            self.replay_persist_len -= 1;
+            return entry;
+        }
+
+        /// Deliver the engine-resolved boot snapshot through the ordinary
+        /// effect stream. Live delivery journals exactly what reaches the
+        /// Msg. Replay ignores the live app-data result and consumes the
+        /// recorded restore instead, so replay never depends on or mutates
+        /// the current snapshot store. The Msg is staged at this call's
+        /// command-stream position and therefore runs only after the current
+        /// model commit.
+        ///
+        /// Call once from `init_fx` after the host has resolved the snapshot.
+        /// Under replay, no queued `.persist` record means an older recording
+        /// with no persistence delivery, so no Msg is staged.
+        pub fn deliverPersistRestore(
+            self: *Self,
+            live_outcome: EffectPersistOutcome,
+            live_bytes: []const u8,
+            on_result: PersistMsgFn,
+        ) void {
+            const entry = if (self.replay)
+                self.takeReplayPersist() orelse return
+            else
+                ReplayPersistEntry{ .outcome = live_outcome, .bytes = live_bytes };
+            const source_bytes = if (entry.outcome == .ok) entry.bytes else "";
+            if (source_bytes.len > max_effect_persist_snapshot_bytes) {
+                if (!self.replay) self.journalPersistRestore(.rejected, "");
+                self.stagePendingStaged(.{
+                    .seq = self.nextPendingSeq(),
+                    .msg = on_result(.{ .outcome = .rejected }),
+                });
+                return;
+            }
+            const stable = if (self.replay)
+                source_bytes
+            else blk: {
+                if (self.persist_restore_bytes) |old| self.allocator.free(old);
+                const copy = self.allocator.dupe(u8, source_bytes) catch
+                    @panic("effects: out of memory retaining the model restore payload");
+                self.persist_restore_bytes = copy;
+                break :blk copy;
+            };
+            const result: EffectPersistResult = .{ .outcome = entry.outcome, .bytes = stable };
+            if (!self.replay) self.journalPersistRestore(result.outcome, result.bytes);
+            self.stagePendingStaged(.{
+                .seq = self.nextPendingSeq(),
+                .msg = on_result(result),
+            });
         }
 
         // ------------------------------------------------------------- API
@@ -7891,8 +8100,23 @@ pub fn Effects(comptime Msg: type) type {
         pub fn hostSend(self: *Self, name: []const u8, payload: []const u8) void {
             if (self.replay) return;
             if (name.len == 0 or name.len > max_effect_host_name_bytes) return;
+            if (isNativeHostSendName(name)) {
+                if (self.executor == .fake) return;
+                self.performNativeHostSend(name, payload);
+                return;
+            }
             const binding = self.host_calls orelse return;
             binding.send_fn(binding.context, name, payload);
+        }
+
+        /// Request an engine-owned snapshot of the committed app model. This
+        /// is the Zig-core twin of TypeScript `Cmd.persist()`: fire-and-forget
+        /// command data, performed only after the model commit. A Zig host
+        /// binding owns the model codec/source and therefore receives no app
+        /// payload; the generated TS host supplies its canonical bytes at the
+        /// same named-service seam.
+        pub fn persist(self: *Self) void {
+            self.hostSend("core.persist", "");
         }
 
         /// A keyed, routed host command — the generic named host call
@@ -7900,11 +8124,11 @@ pub fn Effects(comptime Msg: type) type {
         /// performs `name` with `payload` and answers with exactly one
         /// `feedHostResult(key, ok, bytes)`, delivered as one
         /// `on_result` Msg (`EffectHostResult`) on the next drain. Key
-        /// discipline differs from spawn/fetch/file/clipboard on
-        /// purpose (the wire contract): issuing a key whose host
-        /// request is still in flight REPLACES it — the old request's
-        /// result is dropped, silently — and `cancelHostRequest` drops
-        /// one without dispatching anything. Rejection is never silent:
+        /// discipline is selected by the binding: legacy generic host
+        /// bindings replace a still-live same-key request, while the
+        /// service carrier joins spawn/stream discipline and rejects the
+        /// duplicate without disturbing the first. `cancelHostRequest`
+        /// drops one without dispatching anything. Rejection is never silent:
         /// an over-bound name/payload, a key colliding with another
         /// effect kind, a full slot table, or a real-mode channel with
         /// no bound host services delivers exactly one err-route Msg
@@ -7967,6 +8191,9 @@ pub fn Effects(comptime Msg: type) type {
                         }
                         continue;
                     }
+                    if (!native_request and self.host_calls != null and self.host_calls.?.reject_duplicate_keys) {
+                        return self.rejectHost(options.key, options.on_result);
+                    }
                     // Tell the host first: a late answer for the old
                     // occupancy must find nothing.
                     if (state == .running and !slot.fake) self.notifyHostCancel(options.key);
@@ -8025,10 +8252,34 @@ pub fn Effects(comptime Msg: type) type {
 
         fn isNativeHostRequestName(name: []const u8) bool {
             return std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
-                std.mem.eql(u8, name, "native-sdk.launch-at-login.set");
+                std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
+                std.mem.eql(u8, name, "native-sdk.credentials.set") or
+                std.mem.eql(u8, name, "native-sdk.credentials.get") or
+                std.mem.eql(u8, name, "native-sdk.credentials.delete") or
+                std.mem.eql(u8, name, "native-sdk.time.formatLocal");
+        }
+
+        fn isNativeHostSendName(name: []const u8) bool {
+            return std.mem.eql(u8, name, "native-sdk.os.openUrl") or
+                std.mem.eql(u8, name, "native-sdk.os.revealPath");
+        }
+
+        fn performNativeHostSend(self: *Self, name: []const u8, payload: []const u8) void {
+            const binding = self.system_services orelse return;
+            if (std.mem.eql(u8, name, "native-sdk.os.openUrl")) {
+                binding.open_external_url_fn(binding.context, payload) catch {};
+            } else {
+                binding.reveal_path_fn(binding.context, payload) catch {};
+            }
         }
 
         fn performNativeHostRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
+            if (std.mem.startsWith(u8, name, "native-sdk.credentials.") or
+                std.mem.eql(u8, name, "native-sdk.time.formatLocal"))
+            {
+                self.performBoundSystemRequest(name, key, payload);
+                return;
+            }
             const services = self.services orelse {
                 self.feedHostResult(key, false, "unsupported") catch {};
                 return;
@@ -8054,6 +8305,98 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};
+        }
+
+        fn performBoundSystemRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
+            const binding = self.system_services orelse {
+                self.feedHostResult(key, false, "unsupported") catch {};
+                return;
+            };
+
+            if (std.mem.eql(u8, name, "native-sdk.time.formatLocal")) {
+                if (payload.len != 16) return self.feedInvalidNativeRequest(key);
+                const style_value: f64 = @bitCast(std.mem.readInt(u64, payload[0..8], .little));
+                const timestamp_value: f64 = @bitCast(std.mem.readInt(u64, payload[8..16], .little));
+                if (!std.math.isFinite(style_value) or style_value != @floor(style_value) or style_value < 0 or style_value > 2 or
+                    !std.math.isFinite(timestamp_value) or timestamp_value != @floor(timestamp_value) or
+                    timestamp_value < -8_640_000_000_000_000 or timestamp_value > 8_640_000_000_000_000)
+                {
+                    return self.feedInvalidNativeRequest(key);
+                }
+                const style: platform.LocalTimeStyle = @enumFromInt(@as(u8, @intFromFloat(style_value)));
+                const timestamp_ms: i64 = @intFromFloat(timestamp_value);
+                var result_buffer: [platform.max_local_time_text_bytes]u8 = undefined;
+                const result = binding.format_local_time_fn(binding.context, timestamp_ms, style, &result_buffer) catch |err| {
+                    self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                    return;
+                };
+                if (result.len == 0 or result.len > result_buffer.len) return self.feedInvalidNativeRequest(key);
+                self.feedHostResult(key, true, result) catch {};
+                return;
+            }
+
+            var at: usize = 0;
+            const account = takeNativeRequestBytes(payload, &at) orelse return self.feedInvalidNativeRequest(key);
+            if (std.mem.eql(u8, name, "native-sdk.credentials.set")) {
+                const secret = takeNativeRequestBytes(payload, &at) orelse return self.feedInvalidNativeRequest(key);
+                const service = takeNativeRequestBytes(payload, &at) orelse return self.feedInvalidNativeRequest(key);
+                if (at != payload.len) return self.feedInvalidNativeRequest(key);
+                binding.set_credential_fn(binding.context, .{ .service = service, .account = account, .secret = secret }) catch |err| {
+                    self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                    return;
+                };
+                self.feedHostResult(key, true, "") catch {};
+                return;
+            }
+            const service = takeNativeRequestBytes(payload, &at) orelse return self.feedInvalidNativeRequest(key);
+            if (at != payload.len) return self.feedInvalidNativeRequest(key);
+            const credential_key: platform.CredentialKey = .{ .service = service, .account = account };
+            if (std.mem.eql(u8, name, "native-sdk.credentials.get")) {
+                var secret_buffer: [platform.max_credential_secret_bytes]u8 = undefined;
+                const secret = binding.get_credential_fn(binding.context, credential_key, &secret_buffer) catch |err| {
+                    self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                    return;
+                } orelse {
+                    self.feedHostResult(key, false, "not_found") catch {};
+                    return;
+                };
+                self.feedHostResult(key, true, secret) catch {};
+                return;
+            }
+            const deleted = binding.delete_credential_fn(binding.context, credential_key) catch |err| {
+                self.feedHostResult(key, false, systemServiceErrorName(err)) catch {};
+                return;
+            };
+            self.feedHostResult(key, deleted, if (deleted) "" else "not_found") catch {};
+        }
+
+        fn takeNativeRequestBytes(payload: []const u8, at: *usize) ?[]const u8 {
+            if (at.* > payload.len or payload.len - at.* < 4) return null;
+            const len: usize = std.mem.readInt(u32, payload[at.*..][0..4], .little);
+            at.* += 4;
+            if (len > payload.len - at.*) return null;
+            const bytes = payload[at.*..][0..len];
+            at.* += len;
+            return bytes;
+        }
+
+        fn feedInvalidNativeRequest(self: *Self, key: u64) void {
+            self.feedHostResult(key, false, "invalid_request") catch {};
+        }
+
+        fn systemServiceErrorName(err: anyerror) []const u8 {
+            return switch (err) {
+                error.UnsupportedService => "unsupported",
+                error.InvalidCredentialOptions,
+                error.CredentialFieldTooLarge,
+                error.InvalidExternalUrl,
+                error.ExternalUrlTooLarge,
+                error.InvalidRevealPath,
+                error.RevealPathTooLarge,
+                => "invalid_request",
+                error.CredentialNotFound => "not_found",
+                else => "failed",
+            };
         }
 
         fn launchAtLoginStatusName(status: platform.LaunchAtLoginStatus) []const u8 {
@@ -9450,7 +9793,23 @@ pub fn Effects(comptime Msg: type) type {
                 self.pending_staged_len > 0 or
                 self.channel_pending_count.load(.seq_cst) > 0 or
                 self.pty_pending_count.load(.seq_cst) > 0 or
-                self.queue_count.load(.seq_cst) > 0;
+                self.queue_count.load(.seq_cst) > 0 or
+                (if (self.host_calls) |binding|
+                    if (binding.pending_fn) |pending_fn| pending_fn(binding.context) else false
+                else
+                    false);
+        }
+
+        /// Move carrier-owned terminals into the ordinary host-result queue
+        /// on the loop thread. A late terminal for a cancelled/replaced key
+        /// finds no slot and retires silently, exactly like every other keyed
+        /// effect family.
+        fn adoptHostCompletions(self: *Self) void {
+            const binding = self.host_calls orelse return;
+            const poll_fn = binding.poll_fn orelse return;
+            while (poll_fn(binding.context)) |completion| {
+                self.feedHostResult(completion.key, completion.ok, completion.bytes) catch {};
+            }
         }
 
         /// One drain pass's causal boundary: a snapshot of the
@@ -9497,6 +9856,7 @@ pub fn Effects(comptime Msg: type) type {
         /// Snapshot the completion backlog at the start of one drain
         /// pass. Loop-thread only, like the drain itself.
         pub fn drainBoundary(self: *Self) DrainBoundary {
+            self.adoptHostCompletions();
             // Advance the pass clock and release replay-side retired
             // video identities whose window closed (`sweepRetiredVideos`
             // has the full argument). Cheap and empty outside replay.
@@ -9545,6 +9905,7 @@ pub fn Effects(comptime Msg: type) type {
         /// this form serves callers that own their delivery timing —
         /// tests driving the channel directly.
         pub fn takeMsg(self: *Self) ?Msg {
+            self.adoptHostCompletions();
             var unbounded: DrainBoundary = .{
                 .pending_before = std.math.maxInt(u64),
                 .queue_budget = std.math.maxInt(usize),
