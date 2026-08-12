@@ -189,6 +189,7 @@ export interface NotificationSpec {
     readonly subtitle?: Uint8Array;
     readonly body?: Uint8Array;
 }
+export type LocalTimeStyle = "date" | "time" | "datetime";
 export type Cmd<M extends Msgish> = {
     readonly op: "none";
 } | {
@@ -314,6 +315,12 @@ export type Cmd<M extends Msgish> = {
     readonly op: "window_show";
     readonly label: string;
 } | {
+    readonly op: "window_hide";
+    readonly label: string;
+} | {
+    readonly op: "dock_presence";
+    readonly visible: boolean;
+} | {
     readonly op: "quit_app";
 } | {
     readonly op: "image_load";
@@ -388,6 +395,12 @@ export declare const Cmd: {
     clipboardWrite(bytes: Uint8Array): Cmd<never>;
     clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
     showNotification(spec: NotificationSpec): Cmd<never>;
+    openExternalUrl(url: Uint8Array): Cmd<never>;
+    revealPath(path: Uint8Array): Cmd<never>;
+    credentialSet<M extends Msgish>(service: Uint8Array, account: Uint8Array, secret: Uint8Array, route: RequestRoute<M>): Cmd<M>;
+    credentialGet<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M>;
+    credentialDelete<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M>;
+    formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M>;
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;
     audioPlay<M extends Msgish>(key: string, source: AudioSource, route: AudioRoute<M>): Cmd<M>;
@@ -405,6 +418,10 @@ export declare const Cmd: {
     videoSetMuted(key: string, muted: boolean): Cmd<never>;
     videoSetLoop(key: string, loop: boolean): Cmd<never>;
     showWindow(label: string): Cmd<never>;
+    hideWindow(label: string): Cmd<never>;
+    setDockPresence(visible: boolean): Cmd<never>;
+    launchAtLoginStatus<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
+    setLaunchAtLogin<M extends Msgish>(enabled: boolean, route: RequestRoute<M>): Cmd<M>;
     quitApp(): Cmd<never>;
     imageLoad<M extends Msgish>(id: number, source: ImageSource, route: ImageRoute<M>): Cmd<M>;
     imageCancel(id: number): Cmd<never>;

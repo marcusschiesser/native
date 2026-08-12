@@ -185,6 +185,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             const runtime_index = try WindowViewMethods().reserveWindow(self, window.id, window.label, window.resolvedTitle(app_info.app_name), null, true, .allow_source_less);
             self.windows[runtime_index].activate_on_show = window.activate_on_show;
             self.windows[runtime_index].info.focused = window.activate_on_show and window.show == .immediate;
+            self.windows[runtime_index].info.hidden = window.show == .hidden;
             self.windows[runtime_index].main_focused = self.windows[runtime_index].info.focused;
             self.windows[runtime_index].info.frame = window.default_frame;
             self.windows[runtime_index].main_frame = geometry.RectF.init(0, 0, window.default_frame.width, window.default_frame.height);
@@ -1023,7 +1024,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.command_count += 1;
                     const enable = std.mem.eql(u8, command.value, "on");
                     if (!enable and !std.mem.eql(u8, command.value, "off")) return error.InvalidCommand;
-                    if (enable and !self.frame_profile.enabled) self.frame_profile.reset();
+                    if (enable and !self.frame_profile.enabled) {
+                        self.frame_profile.reset();
+                        for (self.views[0..self.view_count]) |*view| {
+                            view.gpu_frame_profile_timestamp_ns = 0;
+                        }
+                    }
                     self.frame_profile.enabled = enable;
                     self.invalidateFor(.command, null);
                 },

@@ -386,7 +386,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
             },
         );
         if (view.kind == .gpu_surface) {
-            try writer.print(" gpu_size={d}x{d} gpu_scale={d} gpu_backend={s} gpu_pixel_format={s} gpu_present_mode={s} gpu_alpha_mode={s} gpu_color_space={s} gpu_vsync={any} gpu_status={s} gpu_present_path={s} gpu_frame={d} gpu_timestamp_ns={d} gpu_frame_interval_ns={d} gpu_input_timestamp_ns={d} gpu_input_latency_ns={d} gpu_input_latency_budget_ns={d} gpu_input_latency_budget_exceeded={d} gpu_input_latency_budget_ok={any} gpu_first_frame_latency_ns={d} gpu_first_frame_latency_budget_ns={d} gpu_first_frame_latency_budget_exceeded={d} gpu_first_frame_latency_budget_ok={any} gpu_nonblank={any} gpu_sample=0x{x:0>8}", .{
+            try writer.print(" gpu_size={d}x{d} gpu_scale={d} gpu_backend={s} gpu_pixel_format={s} gpu_present_mode={s} gpu_alpha_mode={s} gpu_color_space={s} gpu_vsync={any} gpu_status={s} gpu_present_path={s} gpu_frame={d} gpu_timestamp_ns={d} gpu_frame_interval_ns={d} gpu_input_count={d} gpu_input_timestamp_ns={d} gpu_input_latency_ns={d} gpu_input_latency_budget_ns={d} gpu_input_latency_budget_exceeded={d} gpu_input_latency_budget_ok={any} gpu_first_frame_latency_ns={d} gpu_first_frame_latency_budget_ns={d} gpu_first_frame_latency_budget_exceeded={d} gpu_first_frame_latency_budget_ok={any} gpu_nonblank={any} gpu_occluded={any} gpu_sample=0x{x:0>8}", .{
                 view.gpu_size.width,
                 view.gpu_size.height,
                 view.gpu_scale_factor,
@@ -401,6 +401,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 view.gpu_frame_index,
                 view.gpu_timestamp_ns,
                 view.gpu_frame_interval_ns,
+                view.gpu_input_event_count,
                 view.gpu_input_timestamp_ns,
                 view.gpu_input_latency_ns,
                 view.gpu_input_latency_budget_ns,
@@ -411,6 +412,7 @@ pub fn writeText(input: Input, writer: anytype) !void {
                 view.gpu_first_frame_latency_budget_exceeded_count,
                 view.gpu_first_frame_latency_budget_ok,
                 view.gpu_frame_nonblank,
+                view.gpu_occluded,
                 view.gpu_sample_color,
             });
             // Packet-fallback telemetry: WHY the last packet attempt
@@ -993,6 +995,7 @@ test "snapshot emits GPU surface frame proof" {
         .gpu_frame_index = 4,
         .gpu_timestamp_ns = 99,
         .gpu_frame_interval_ns = 8,
+        .gpu_input_event_count = 7,
         .gpu_input_timestamp_ns = 80,
         .gpu_input_latency_ns = 19,
         .gpu_input_latency_budget_ns = 16,
@@ -1003,6 +1006,7 @@ test "snapshot emits GPU surface frame proof" {
         .gpu_first_frame_latency_budget_exceeded_count = 0,
         .gpu_first_frame_latency_budget_ok = true,
         .gpu_frame_nonblank = true,
+        .gpu_occluded = true,
         .gpu_sample_color = 0xff336699,
         .canvas_revision = 2,
         .canvas_command_count = 5,
@@ -1100,6 +1104,7 @@ test "snapshot emits GPU surface frame proof" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_frame=4") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_timestamp_ns=99") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_frame_interval_ns=8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_input_count=7") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_input_timestamp_ns=80") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_input_latency_ns=19") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_input_latency_budget_ns=16") != null);
@@ -1110,6 +1115,7 @@ test "snapshot emits GPU surface frame proof" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_first_frame_latency_budget_exceeded=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_first_frame_latency_budget_ok=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_nonblank=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_occluded=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "gpu_sample=0xff336699") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_revision=2") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "canvas_commands=5") != null);

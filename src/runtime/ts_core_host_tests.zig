@@ -325,6 +325,8 @@ const mini_core = struct {
         stream_over_get, // 91: streaming fetch collides with buffered fetch "get"
         get_over_stream, // 92: buffered fetch collides with streaming fetch "events"
         fill_streams, // 93: seventeen distinct streams exceed the bridge table
+        hide_win, // 94: window_hide "player"
+        dock_off, // 95: dock_presence false
     };
 
     const stream_fill_keys = [_][]const u8{
@@ -337,6 +339,7 @@ const mini_core = struct {
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
     pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var initial_model_calls: usize = 0;
 
     fn frameCreate(value: Model) *Model {
         const slot = rt.frameAlloc(Model, 1);
@@ -345,6 +348,7 @@ const mini_core = struct {
     }
 
     pub fn initialModel() InitResult {
+        initial_model_calls += 1;
         return .{
             .model = frameCreate(.{
                 .polling = false,
@@ -411,6 +415,10 @@ const mini_core = struct {
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
+    }
+
+    pub fn bootCommand() []const u8 {
+        return cmdRequest("status.read", "status", 7, 8, "boot");
     }
 
     pub fn update(model: *const Model, msg: Msg) UpdateResult {
@@ -652,6 +660,8 @@ const mini_core = struct {
             .drop_get => return .{ .model = model, .cmd = cmdCancel("get") },
             .drop_paste => return .{ .model = model, .cmd = cmdCancel("paste") },
             .open_win => return .{ .model = model, .cmd = cmdWindowShow("player") },
+            .hide_win => return .{ .model = model, .cmd = cmdWindowHide("player") },
+            .dock_off => return .{ .model = model, .cmd = cmdDockPresence(false) },
             .quit_app => return .{ .model = model, .cmd = cmdQuitApp() },
             .open_chan => return .{ .model = model, .cmd = cmdChannelOpen(41, 47) },
             .close_chan => return .{ .model = model, .cmd = cmdChannelClose(41) },
@@ -1070,6 +1080,21 @@ const mini_core = struct {
         out[0] = 0x10;
         out[1] = @intCast(label.len);
         @memcpy(out[2..][0..label.len], label);
+        return out;
+    }
+
+    fn cmdWindowHide(label: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 2 + label.len);
+        out[0] = 0x21;
+        out[1] = @intCast(label.len);
+        @memcpy(out[2..][0..label.len], label);
+        return out;
+    }
+
+    fn cmdDockPresence(visible: bool) []const u8 {
+        const out = rt.frameAlloc(u8, 2);
+        out[0] = 0x22;
+        out[1] = if (visible) 1 else 0;
         return out;
     }
 
@@ -2467,12 +2492,14 @@ test "boot commits the model before any effects and performBoot fires the boot c
     // The pre-effects half: the committed boot model is readable, no
     // effect has been issued, and the frame arena is reset.
     Host.boot();
+    const calls_after_boot = mini_core.initial_model_calls;
     try std.testing.expect(!Host.model().polling);
     try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
 
-    // The effects half re-derives the boot command from the pure
-    // initialModel and performs it exactly as init does.
+    // The effects half retrieves only the command. Re-running initialModel
+    // here would also reset a compiled core after persistence restore.
     Host.performBoot(fx);
+    try std.testing.expectEqual(calls_after_boot, mini_core.initial_model_calls);
     try std.testing.expectEqual(@as(usize, 1), fx.pendingHostCount());
     const request = fx.pendingHostAt(0).?;
     try std.testing.expectEqual(boot_request_key, request.key);
@@ -2518,6 +2545,14 @@ test "window verbs bridge to the effects channel's label-addressed verbs" {
     Host.dispatch(fx, .open_win);
     try std.testing.expectEqual(@as(u32, 1), fx.windowActionState().show_count);
     try std.testing.expectEqualStrings("player", fx.windowActionState().lastLabel());
+
+    Host.dispatch(fx, .hide_win);
+    try std.testing.expectEqual(@as(u32, 1), fx.windowActionState().hide_count);
+    try std.testing.expectEqualStrings("player", fx.windowActionState().lastLabel());
+
+    Host.dispatch(fx, .dock_off);
+    try std.testing.expectEqual(@as(u32, 1), fx.windowActionState().dock_presence_count);
+    try std.testing.expect(!fx.windowActionState().dock_visible);
 
     // quit_app decodes onto fx.quitApp — the graceful terminate request.
     Host.dispatch(fx, .quit_app);

@@ -22,6 +22,7 @@ pub const Metadata = struct {
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
+    persist: ?PersistMetadata = null,
     bridge_commands: []const BridgeCommandMetadata = &.{},
     web_engine: []const u8 = "system",
     /// Whether the app ships the embedded web layer: "auto" (default,
@@ -79,6 +80,11 @@ pub const Metadata = struct {
         if (self.permissions.len > 0) allocator.free(self.permissions);
         for (self.capabilities) |value| allocator.free(value);
         if (self.capabilities.len > 0) allocator.free(self.capabilities);
+        if (self.persist) |persist| {
+            allocator.free(persist.restore.ok);
+            allocator.free(persist.restore.none);
+            allocator.free(persist.restore.err);
+        }
         for (self.bridge_commands) |command| {
             allocator.free(command.name);
             for (command.permissions) |value| allocator.free(value);
@@ -197,6 +203,18 @@ pub const Metadata = struct {
     }
 };
 
+pub const PersistMetadata = struct {
+    version: u64,
+    debounce_ms: u32 = 500,
+    restore: PersistRestoreMetadata,
+};
+
+pub const PersistRestoreMetadata = struct {
+    ok: []const u8,
+    none: []const u8,
+    err: []const u8,
+};
+
 pub const BridgeCommandMetadata = struct {
     name: []const u8,
     permissions: []const []const u8 = &.{},
@@ -217,6 +235,8 @@ pub const WindowMetadata = struct {
     always_on_top: bool = false,
     click_through: bool = false,
     activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
     close_policy: []const u8 = "quit",
@@ -259,6 +279,8 @@ pub const ShellWindowMetadata = struct {
     always_on_top: bool = false,
     click_through: bool = false,
     activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
     close_policy: []const u8 = "quit",
@@ -453,6 +475,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer allocator.free(permissions);
     const capabilities = parseCapabilities(allocator, metadata.capabilities) catch return .{ .ok = false, .message = "app.zon capabilities are invalid" };
     defer allocator.free(capabilities);
+    const persist = convertPersist(metadata.persist);
     const bridge_commands = parseBridgeCommands(allocator, metadata.bridge_commands) catch return .{ .ok = false, .message = "app.zon bridge commands are invalid" };
     defer {
         for (bridge_commands) |command| allocator.free(command.permissions);
@@ -498,6 +521,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .version = parseVersion(metadata.version) catch return .{ .ok = false, .message = "app.zon version is invalid" },
         .permissions = permissions,
         .capabilities = capabilities,
+        .persist = persist,
         .bridge = .{ .commands = bridge_commands },
         .frontend = frontend,
         .security = security,
@@ -571,6 +595,7 @@ pub fn parseText(allocator: std.mem.Allocator, source: []const u8) !Metadata {
         .platforms = try duplicateStringList(allocator, raw.platforms),
         .permissions = try duplicateStringList(allocator, raw.permissions),
         .capabilities = try duplicateStringList(allocator, raw.capabilities),
+        .persist = try duplicateRawPersist(allocator, raw.persist),
         .bridge_commands = try convertRawBridgeCommands(allocator, raw.bridge.commands),
         .web_engine = try allocator.dupe(u8, raw.web_engine),
         .webview_layer = try allocator.dupe(u8, raw.webview_layer),
@@ -684,6 +709,33 @@ fn convertRawFrontend(allocator: std.mem.Allocator, frontend: ?RawFrontend) !?Fr
     };
 }
 
+fn duplicateRawPersist(allocator: std.mem.Allocator, raw: ?raw_manifest.RawPersist) !?PersistMetadata {
+    const persist = raw orelse return null;
+    const ok = try allocator.dupe(u8, persist.restore.ok);
+    errdefer allocator.free(ok);
+    const none = try allocator.dupe(u8, persist.restore.none);
+    errdefer allocator.free(none);
+    const err = try allocator.dupe(u8, persist.restore.err);
+    return .{
+        .version = persist.version,
+        .debounce_ms = persist.debounce_ms,
+        .restore = .{ .ok = ok, .none = none, .err = err },
+    };
+}
+
+fn convertPersist(persist: ?PersistMetadata) ?app_manifest.PersistConfig {
+    const value = persist orelse return null;
+    return .{
+        .version = value.version,
+        .debounce_ms = value.debounce_ms,
+        .restore = .{
+            .ok = value.restore.ok,
+            .none = value.restore.none,
+            .err = value.restore.err,
+        },
+    };
+}
+
 fn convertRawSecurity(allocator: std.mem.Allocator, security: RawSecurity) !SecurityMetadata {
     const external_action = if (security.navigation.external_links.allowed_urls.len == 0 and
         std.mem.eql(u8, security.navigation.external_links.action, "deny"))
@@ -719,6 +771,8 @@ fn convertRawWindows(allocator: std.mem.Allocator, windows: []const RawWindow) !
             .always_on_top = window.always_on_top,
             .click_through = window.click_through,
             .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = window.min_width,
             .min_height = window.min_height,
             .close_policy = try allocator.dupe(u8, window.close_policy),
@@ -776,6 +830,8 @@ fn convertRawShellWindows(allocator: std.mem.Allocator, windows: []const RawShel
             .always_on_top = window.always_on_top,
             .click_through = window.click_through,
             .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = window.min_width,
             .min_height = window.min_height,
             .close_policy = try allocator.dupe(u8, window.close_policy),
@@ -980,6 +1036,8 @@ fn convertWindows(allocator: std.mem.Allocator, windows: []const WindowMetadata)
             .always_on_top = window.always_on_top,
             .click_through = window.click_through,
             .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = try parseWindowMinSize(window.min_width),
             .min_height = try parseWindowMinSize(window.min_height),
             .close_policy = try parseClosePolicy(window.close_policy),
@@ -1024,6 +1082,8 @@ fn parseShell(allocator: std.mem.Allocator, shell: ShellMetadata) !app_manifest.
             .always_on_top = window.always_on_top,
             .click_through = window.click_through,
             .activate_on_show = window.activate_on_show,
+            .initially_hidden = window.initially_hidden,
+            .allows_fullscreen = window.allows_fullscreen,
             .min_width = min_width,
             .min_height = min_height,
             .close_policy = close_policy,
@@ -1235,6 +1295,7 @@ fn parseCapability(value: []const u8) !app_manifest.Capability {
     if (std.mem.eql(u8, value, "dialog")) return .dialog;
     if (std.mem.eql(u8, value, "clipboard")) return .clipboard;
     if (std.mem.eql(u8, value, "credentials")) return .credentials;
+    if (std.mem.eql(u8, value, "persist")) return .persist;
     if (std.mem.eql(u8, value, "open_url")) return .open_url;
     if (std.mem.eql(u8, value, "reveal_path")) return .reveal_path;
     if (std.mem.eql(u8, value, "recent_documents")) return .recent_documents;
@@ -2357,6 +2418,34 @@ test "manifest metadata parser reads identity version and lists" {
     });
 }
 
+test "manifest metadata parser carries model persistence configuration" {
+    const metadata = try parseText(std.testing.allocator,
+        \\.{
+        \\  .id = "com.example.persisted",
+        \\  .name = "persisted",
+        \\  .version = "1.0.0",
+        \\  .capabilities = .{ "persist" },
+        \\  .persist = .{
+        \\    .version = 3,
+        \\    .debounce_ms = 250,
+        \\    .restore = .{ .ok = "restored", .none = "fresh_boot", .err = "restore_failed" },
+        \\  },
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    const persist = metadata.persist.?;
+    try std.testing.expectEqual(@as(u64, 3), persist.version);
+    try std.testing.expectEqual(@as(u32, 250), persist.debounce_ms);
+    try std.testing.expectEqualStrings("restored", persist.restore.ok);
+    try std.testing.expectEqualStrings("fresh_boot", persist.restore.none);
+    try std.testing.expectEqualStrings("restore_failed", persist.restore.err);
+
+    const capabilities = try parseCapabilities(std.testing.allocator, metadata.capabilities);
+    defer std.testing.allocator.free(capabilities);
+    try app_manifest.validatePersist(convertPersist(metadata.persist), capabilities);
+    try std.testing.expectError(error.MissingRequiredField, app_manifest.validatePersist(convertPersist(metadata.persist), &.{}));
+}
+
 test "manifest metadata parser reads structured security policy" {
     const metadata = try parseText(std.testing.allocator,
         \\.{
@@ -2529,13 +2618,13 @@ test "manifest parser reads window titlebar styles" {
         \\  .name = "example",
         \\  .version = "1.2.3",
         \\  .windows = .{
-        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false },
+        \\    .{ .label = "main", .resizable = false, .titlebar = "hidden_inset", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false, .initially_hidden = true, .allows_fullscreen = false },
         \\    .{ .label = "tall", .titlebar = "hidden_inset_tall" },
         \\    .{ .label = "skinned", .titlebar = "chromeless" },
         \\  },
         \\  .shell = .{
         \\    .windows = .{
-        \\      .{ .label = "scene", .titlebar = "hidden_inset_tall", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false, .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
+        \\      .{ .label = "scene", .titlebar = "hidden_inset_tall", .transparent = true, .always_on_top = true, .click_through = true, .activate_on_show = false, .initially_hidden = true, .allows_fullscreen = false, .views = .{ .{ .label = "content", .kind = "webview", .url = "zero://app/index.html" } } },
         \\    },
         \\  },
         \\}
@@ -2548,6 +2637,8 @@ test "manifest parser reads window titlebar styles" {
     try std.testing.expect(metadata.windows[0].always_on_top);
     try std.testing.expect(metadata.windows[0].click_through);
     try std.testing.expect(!metadata.windows[0].activate_on_show);
+    try std.testing.expect(metadata.windows[0].initially_hidden);
+    try std.testing.expect(!metadata.windows[0].allows_fullscreen);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.windows[1].titlebar);
     try std.testing.expectEqualStrings("chromeless", metadata.windows[2].titlebar);
     try std.testing.expectEqualStrings("hidden_inset_tall", metadata.shell.windows[0].titlebar);
@@ -2560,6 +2651,8 @@ test "manifest parser reads window titlebar styles" {
     try std.testing.expect(windows[0].always_on_top);
     try std.testing.expect(windows[0].click_through);
     try std.testing.expect(!windows[0].activate_on_show);
+    try std.testing.expect(windows[0].initially_hidden);
+    try std.testing.expect(!windows[0].allows_fullscreen);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.hidden_inset_tall, windows[1].titlebar);
     try std.testing.expectEqual(app_manifest.WindowTitlebarStyle.chromeless, windows[2].titlebar);
 
@@ -2570,6 +2663,8 @@ test "manifest parser reads window titlebar styles" {
     try std.testing.expect(shell.windows[0].always_on_top);
     try std.testing.expect(shell.windows[0].click_through);
     try std.testing.expect(!shell.windows[0].activate_on_show);
+    try std.testing.expect(shell.windows[0].initially_hidden);
+    try std.testing.expect(!shell.windows[0].allows_fullscreen);
 }
 
 test "manifest parser reads window min sizes" {

@@ -10,6 +10,7 @@ pub const RawManifest = struct {
     platforms: []const []const u8 = &.{},
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
+    persist: ?RawPersist = null,
     bridge: RawBridge = .{},
     web_engine: []const u8 = @tagName(web_engine.default_engine),
     webview_layer: []const u8 = "auto",
@@ -31,6 +32,18 @@ pub const RawManifest = struct {
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
     dmg: RawDmg = .{},
+};
+
+pub const RawPersist = struct {
+    version: u64,
+    debounce_ms: u32 = 500,
+    restore: RawPersistRestore,
+};
+
+pub const RawPersistRestore = struct {
+    ok: []const u8,
+    none: []const u8,
+    err: []const u8,
 };
 
 pub const RawCef = struct {
@@ -103,6 +116,8 @@ pub const RawWindow = struct {
     always_on_top: bool = false,
     click_through: bool = false,
     activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
     close_policy: []const u8 = "quit",
@@ -145,6 +160,8 @@ pub const RawShellWindow = struct {
     always_on_top: bool = false,
     click_through: bool = false,
     activate_on_show: bool = true,
+    initially_hidden: bool = false,
+    allows_fullscreen: bool = true,
     min_width: f32 = 0,
     min_height: f32 = 0,
     close_policy: []const u8 = "quit",
