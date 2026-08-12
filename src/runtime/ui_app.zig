@@ -1420,6 +1420,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .window_id = self.canvas_window_id,
                 .navigate_fn = effectsNavigateWebView,
             });
+            self.effects.bindSystemServices(.{
+            self.effects.bindSystemServices(.{
+                .context = runtime,
+                .open_external_url_fn = effectsOpenExternalUrl,
+                .reveal_path_fn = effectsRevealPath,
+                .set_credential_fn = effectsSetCredential,
+                .get_credential_fn = effectsGetCredential,
+                .delete_credential_fn = effectsDeleteCredential,
+                .format_local_time_fn = effectsFormatLocalTime,
+            });
             if (runtime.options.session_recorder) |recorder| {
                 self.effects.bindJournal(recorder.effectJournal());
             }
@@ -1491,6 +1501,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // envMsgs dispatch consumes the queue on the
                     // replayed installing frame (zero env reads).
                     .env => try self.effects.pushReplayEnv(record.stderr_tail, record.payload),
+                    .persist => try self.effects.pushReplayPersist(record.persist_outcome, record.payload),
                     // `.image` records deliver the RECORDED terminal
                     // verbatim (byte-identical Msg stream on any host)
                     // and re-register the journaled source bytes —
@@ -6191,6 +6202,36 @@ fn effectsNavigateWebView(context: *anyopaque, window_id: platform.WindowId, lab
         return false;
     };
     return true;
+}
+
+fn effectsOpenExternalUrl(context: *anyopaque, url: []const u8) anyerror!void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.openExternalUrl(url);
+}
+
+fn effectsRevealPath(context: *anyopaque, path: []const u8) anyerror!void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.revealPath(path);
+}
+
+fn effectsSetCredential(context: *anyopaque, credential: platform.Credential) anyerror!void {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.setCredential(credential);
+}
+
+fn effectsGetCredential(context: *anyopaque, key: platform.CredentialKey, buffer: []u8) anyerror!?[]const u8 {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.getCredential(key, buffer);
+}
+
+fn effectsDeleteCredential(context: *anyopaque, key: platform.CredentialKey) anyerror!bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.deleteCredential(key);
+}
+
+fn effectsFormatLocalTime(context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    return runtime.formatLocalTime(timestamp_ms, style, buffer);
 }
 
 /// The build storage pinned under a presented native context menu:

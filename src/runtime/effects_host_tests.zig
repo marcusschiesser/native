@@ -67,6 +67,8 @@ const HostMsg = union(enum) {
     ask_colliding,
     query_launch_at_login,
     enable_launch_at_login,
+    open_external_url,
+    reveal_path,
     replace,
     drop,
     send,
@@ -132,6 +134,8 @@ fn hostUpdate(model: *HostModel, msg: HostMsg, fx: *HostEffects) void {
             .payload = &.{1},
             .on_result = HostEffects.hostMsg(.host_result),
         }),
+        .open_external_url => fx.hostSend("native-sdk.os.openUrl", "https://example.com/docs"),
+        .reveal_path => fx.hostSend("native-sdk.os.revealPath", "/tmp/native-sdk.log"),
         .replace => fx.hostRequest(.{
             .key = ask_key,
             .name = "svc.echo",
@@ -307,6 +311,79 @@ test "native launch-at-login requests distinguish operation failures from unsupp
     try std.testing.expectEqualStrings("failed", h.app_state.model.bytesPrefix());
 }
 
+test "native system commands use runtime validation and platform services" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    const allowed_urls = [_][]const u8{"https://example.com/*"};
+    h.harness.runtime.options.security.navigation.external_links = .{
+        .action = .open_system_browser,
+        .allowed_urls = &allowed_urls,
+    };
+    try h.app_state.dispatch(&h.harness.runtime, 1, .open_external_url);
+    try h.app_state.dispatch(&h.harness.runtime, 1, .reveal_path);
+    try std.testing.expectEqualStrings("https://example.com/docs", h.harness.null_platform.lastExternalUrl());
+    try std.testing.expectEqualStrings("/tmp/native-sdk.log", h.harness.null_platform.lastRevealedPath());
+
+    var credential_payload: [4 + 5 + 4 + 12 + 4 + 19]u8 = undefined;
+    var credential_at: usize = 0;
+    appendNativeRequestBytes(&credential_payload, &credential_at, "alice");
+    appendNativeRequestBytes(&credential_payload, &credential_at, "secret-token");
+    appendNativeRequestBytes(&credential_payload, &credential_at, "dev.native-sdk.test");
+    fx.hostRequest(.{
+        .key = ask_key,
+        .name = "native-sdk.credentials.set",
+        .payload = &credential_payload,
+        .on_result = HostEffects.hostMsg(.host_result),
+    });
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.credentialSetCount());
+
+    var key_payload: [4 + 5 + 4 + 19]u8 = undefined;
+    var key_at: usize = 0;
+    appendNativeRequestBytes(&key_payload, &key_at, "alice");
+    appendNativeRequestBytes(&key_payload, &key_at, "dev.native-sdk.test");
+    fx.hostRequest(.{
+        .key = ask_key,
+        .name = "native-sdk.credentials.get",
+        .payload = &key_payload,
+        .on_result = HostEffects.hostMsg(.host_result),
+    });
+    try h.wake();
+    try std.testing.expectEqualStrings("secret-token", h.app_state.model.bytesPrefix());
+
+    fx.hostRequest(.{
+        .key = ask_key,
+        .name = "native-sdk.credentials.delete",
+        .payload = &key_payload,
+        .on_result = HostEffects.hostMsg(.host_result),
+    });
+    try h.wake();
+    try std.testing.expectEqual(@as(usize, 1), h.harness.null_platform.credentialDeleteCount());
+
+    h.harness.null_platform.local_time_offset_minutes = -360;
+    var time_payload: [16]u8 = undefined;
+    std.mem.writeInt(u64, time_payload[0..8], @bitCast(@as(f64, 2)), .little);
+    std.mem.writeInt(u64, time_payload[8..16], @bitCast(@as(f64, 1_704_164_645_000)), .little);
+    fx.hostRequest(.{
+        .key = ask_key,
+        .name = "native-sdk.time.formatLocal",
+        .payload = &time_payload,
+        .on_result = HostEffects.hostMsg(.host_result),
+    });
+    try h.wake();
+    try std.testing.expectEqualStrings("2024-01-01 21:04:05", h.app_state.model.bytesPrefix());
+}
+
+fn appendNativeRequestBytes(buffer: []u8, at: *usize, bytes: []const u8) void {
+    std.mem.writeInt(u32, buffer[at.*..][0..4], @intCast(bytes.len), .little);
+    at.* += 4;
+    @memcpy(buffer[at.*..][0..bytes.len], bytes);
+    at.* += bytes.len;
+}
+
 test "re-issuing a live host key replaces the pending request and drops the undelivered result" {
     var h = try Harness.create();
     defer h.destroy();
@@ -457,6 +534,55 @@ test "host journal records carry the route in code and mark rejections regenerab
     try std.testing.expectEqual(effects_mod.EffectExitReason.rejected, Capture.records[2].exit_reason);
 }
 
+test "Zig persistence restore is a staged, journaled Msg and replay ignores live storage" {
+    const PersistMsg = union(enum) { restored: effects_mod.EffectPersistResult };
+    const PersistEffects = effects_mod.Effects(PersistMsg);
+    const Capture = struct {
+        var count: usize = 0;
+        var outcome: effects_mod.EffectPersistOutcome = .none;
+        var bytes: [32]u8 = undefined;
+        var bytes_len: usize = 0;
+
+        fn note(_: *anyopaque, record: effects_mod.EffectResultRecord) void {
+            count += 1;
+            outcome = record.persist_outcome;
+            bytes_len = record.payload.len;
+            @memcpy(bytes[0..bytes_len], record.payload);
+        }
+    };
+
+    Capture.count = 0;
+    var context: u8 = 0;
+    var live = PersistEffects.init(std.testing.allocator);
+    defer live.deinit();
+    live.bindJournal(.{ .context = &context, .record_fn = Capture.note });
+    var source = [_]u8{ 's', 'n', 'a', 'p' };
+    live.deliverPersistRestore(.ok, &source, PersistEffects.persistMsg(.restored));
+    @memset(&source, 'x');
+
+    const live_msg = live.takeMsg() orelse return error.TestExpectedMsg;
+    try std.testing.expectEqual(effects_mod.EffectPersistOutcome.ok, live_msg.restored.outcome);
+    try std.testing.expectEqualStrings("snap", live_msg.restored.bytes);
+    try std.testing.expectEqual(@as(usize, 1), Capture.count);
+    try std.testing.expectEqual(effects_mod.EffectPersistOutcome.ok, Capture.outcome);
+    try std.testing.expectEqualStrings("snap", Capture.bytes[0..Capture.bytes_len]);
+
+    Capture.count = 0;
+    var replay = PersistEffects.init(std.testing.allocator);
+    defer replay.deinit();
+    replay.bindJournal(.{ .context = &context, .record_fn = Capture.note });
+    replay.armReplay();
+    var replay_source = "recorded".*;
+    try replay.pushReplayPersist(.ok, &replay_source);
+    @memset(&replay_source, 'x');
+    replay.deliverPersistRestore(.ok, "live bytes must lose", PersistEffects.persistMsg(.restored));
+    const replay_msg = replay.takeMsg() orelse return error.TestExpectedMsg;
+    try std.testing.expectEqual(effects_mod.EffectPersistOutcome.ok, replay_msg.restored.outcome);
+    try std.testing.expectEqualStrings("recorded", replay_msg.restored.bytes);
+    try std.testing.expectEqual(@as(usize, 0), Capture.count);
+    try replay.settleReplayFeeds();
+}
+
 // ------------------------------------------------------------ real executor
 
 test "real-mode host calls ride the binding and answer through the feed" {
@@ -520,6 +646,43 @@ test "real-mode host calls ride the binding and answer through the feed" {
     try std.testing.expectEqual(@as(usize, 1), Stub.cancel_count);
     try std.testing.expectEqual(other_key, Stub.last_cancelled);
     try std.testing.expectEqual(@as(u32, 1), h.app_state.model.result_count);
+}
+
+test "service bindings reject a duplicate live key without replacing the first request" {
+    var h = try Harness.create();
+    defer h.destroy();
+    const fx = &h.app_state.effects;
+
+    const Stub = struct {
+        var request_count: usize = 0;
+        fn send(_: *anyopaque, _: []const u8, _: []const u8) void {}
+        fn request(_: *anyopaque, _: []const u8, _: u64, _: []const u8) void {
+            request_count += 1;
+        }
+    };
+    Stub.request_count = 0;
+    var context: u8 = 0;
+    fx.bindHostCalls(.{
+        .context = &context,
+        .send_fn = Stub.send,
+        .request_fn = Stub.request,
+        .reject_duplicate_keys = true,
+    });
+
+    test_payload = "first";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .ask);
+    test_payload = "duplicate";
+    try h.app_state.dispatch(&h.harness.runtime, 1, .replace);
+    try std.testing.expectEqual(@as(usize, 1), Stub.request_count);
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.err_count);
+    try std.testing.expectEqualStrings("rejected", h.app_state.model.bytesPrefix());
+
+    // The first occupancy survived the refusal and can still complete.
+    try fx.feedHostResult(ask_key, true, "first-answer");
+    try h.wake();
+    try std.testing.expectEqual(@as(u32, 1), h.app_state.model.ok_count);
+    try std.testing.expectEqualStrings("first-answer", h.app_state.model.bytesPrefix());
 }
 
 test "real-mode requests without bound host services reject through the err route" {
