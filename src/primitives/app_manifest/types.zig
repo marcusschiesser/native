@@ -32,6 +32,9 @@ pub const ValidationError = error{
 
 pub const max_shortcuts: usize = 64;
 pub const max_shortcut_id_bytes: usize = 64;
+/// App identities double as the credential-manager service namespace, whose
+/// cross-platform ABI is bounded to this size.
+pub const max_app_id_bytes: usize = 128;
 pub const max_shortcut_key_bytes: usize = 32;
 pub const max_shell_windows: usize = 16;
 pub const max_shell_views_per_window: usize = 128;
@@ -162,6 +165,8 @@ pub const CapabilityKind = enum {
     clipboard,
     credentials,
     persist,
+    store,
+    sqlite,
     open_url,
     reveal_path,
     recent_documents,
@@ -188,6 +193,8 @@ pub const Capability = union(CapabilityKind) {
     clipboard: void,
     credentials: void,
     persist: void,
+    store: void,
+    sqlite: void,
     open_url: void,
     reveal_path: void,
     recent_documents: void,

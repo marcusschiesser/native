@@ -1,7 +1,7 @@
 //! Bridge coverage for `TsCoreHost` against a hand-written core that
 //! replicates the transpiler's emitted ABI (rt kernel, commit walker,
 //! `UpdateResult`/`InitResult`, wire-encoded commands and
-//! subscriptions). Hand-encoding the wire records here pins the v2
+//! subscriptions). Hand-encoding the wire records here pins the v4
 //! byte layout independently of the rt builders that normally produce
 //! it; the transpiled-fixture end-to-end suite (tests/ts-core) drives
 //! the same bridge with genuinely emitted code through a full UiApp.
@@ -18,7 +18,7 @@ const platform = @import("../platform/root.zig");
 //
 // The emitted-core ABI in miniature: a two-region kernel, a poller
 // model, and an update that exercises every wire record. Cmd/Sub bytes
-// are hand-encoded to the documented v2 layout. Polling starts OFF so
+// are hand-encoded to the documented v4 layout. Polling starts OFF so
 // the real-executor tests below (which bind no platform timer service)
 // never arm a timer; the e2e suite covers boot-time subscriptions
 // through a full UiApp with live null-platform services.
@@ -160,6 +160,8 @@ const mini_core = struct {
         // Unsigned-class mirrors (u64-classed arm routing).
         ustamp_ms: u64,
         ucode: u64,
+        db_live: bool,
+        db_live_set: u8,
     };
 
     pub const Msg = union(enum) {
@@ -329,6 +331,12 @@ const mini_core = struct {
         fill_streams, // 93: seventeen distinct streams exceed the bridge table
         hide_win, // 94: window_hide "player"
         dock_off, // 95: dock_presence false
+        arm_db_live, // 96: install a live query under wire key "shared-db"
+        query_over_db_live, // 97: a one-shot query collides with that live key
+        stop_db_live_with_cancel, // 98: remove the Sub while Cmd.cancel names its key
+        arm_full_db_live_set, // 99: fill all relational slots with live keys
+        replace_full_db_live_set, // 100: replace them with one disjoint key
+        malformed_credential, // 101: reserved request with an invalid inner record
     };
 
     const stream_fill_keys = [_][]const u8{
@@ -337,6 +345,13 @@ const mini_core = struct {
         "fill-08", "fill-09", "fill-10", "fill-11",
         "fill-12", "fill-13", "fill-14", "fill-15",
         "fill-16",
+    };
+
+    const db_live_set_a_keys = [_][]const u8{
+        "old-db-00", "old-db-01", "old-db-02", "old-db-03",
+        "old-db-04", "old-db-05", "old-db-06", "old-db-07",
+        "old-db-08", "old-db-09", "old-db-10", "old-db-11",
+        "old-db-12", "old-db-13", "old-db-14", "old-db-15",
     };
 
     pub const InitResult = struct { model: *const Model, cmd: []const u8 };
@@ -414,6 +429,8 @@ const mini_core = struct {
                 .video2_events = 0,
                 .ustamp_ms = 0,
                 .ucode = 0,
+                .db_live = false,
+                .db_live_set = 0,
             }),
             .cmd = cmdRequest("status.read", "status", 7, 8, "boot"),
         };
@@ -436,6 +453,7 @@ const mini_core = struct {
                 return .{ .model = out, .cmd = "" };
             },
             .refresh => return .{ .model = model, .cmd = cmdRequest("status.read", "status", 7, 8, model.status) },
+            .malformed_credential => return .{ .model = model, .cmd = cmdRequest("core.credentials.get", "bad-credential", 7, 8, "") },
             .pair => {
                 const first = cmdRequest("a.read", "", 7, 8, "1");
                 const second = cmdRequest("b.read", "", 7, 8, "2");
@@ -812,6 +830,27 @@ const mini_core = struct {
                 out.capture_events = model.capture_events + 1;
                 return .{ .model = out, .cmd = "" };
             },
+            .arm_db_live => {
+                const out = frameCreate(model.*);
+                out.db_live = true;
+                return .{ .model = out, .cmd = "" };
+            },
+            .query_over_db_live => return .{ .model = model, .cmd = cmdDbQuery("shared-db", 7, 12, 8, "SELECT id FROM item") },
+            .stop_db_live_with_cancel => {
+                const out = frameCreate(model.*);
+                out.db_live = false;
+                return .{ .model = out, .cmd = cmdCancel("shared-db") };
+            },
+            .arm_full_db_live_set => {
+                const out = frameCreate(model.*);
+                out.db_live_set = 1;
+                return .{ .model = out, .cmd = "" };
+            },
+            .replace_full_db_live_set => {
+                const out = frameCreate(model.*);
+                out.db_live_set = 2;
+                return .{ .model = out, .cmd = "" };
+            },
         }
     }
 
@@ -823,8 +862,24 @@ const mini_core = struct {
     }
 
     pub fn subscriptions(model: *const Model) []const u8 {
-        if (!model.polling) return "";
-        return subTimer("tick", if (model.fast) 40 else 100, 9);
+        const timer = if (model.polling) subTimer("tick", if (model.fast) 40 else 100, 9) else "";
+        const live = if (model.db_live) subDbLive("shared-db", 7, 12, 8, "SELECT id FROM item", "item") else "";
+        const live_set = switch (model.db_live_set) {
+            1 => subDbLiveBatch(&db_live_set_a_keys),
+            2 => subDbLive("new-db", 7, 12, 8, "SELECT id FROM item", "item"),
+            else => "",
+        };
+        const parts = [_][]const u8{ timer, live, live_set };
+        var total: usize = 0;
+        for (parts) |part| total += part.len;
+        if (total == 0) return "";
+        const out = rt.frameAlloc(u8, total);
+        var at: usize = 0;
+        for (parts) |part| {
+            @memcpy(out[at..][0..part.len], part);
+            at += part.len;
+        }
+        return out;
     }
 
     pub fn commitModelRoot(next: *const Model) *const Model {
@@ -850,7 +905,7 @@ const mini_core = struct {
         return out;
     }
 
-    // Hand-encoded v2 wire records (rt.zig's documented layout).
+    // Hand-encoded v4 wire records (rt.zig's documented layout).
 
     fn cmdNow(msg_tag: u8) []const u8 {
         const out = rt.frameAlloc(u8, 2);
@@ -882,7 +937,7 @@ const mini_core = struct {
     }
 
     fn cmdRequest(name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) []const u8 {
-        const out = rt.frameAlloc(u8, 2 + name.len + 1 + key.len + 2 + 4 + payload.len);
+        const out = rt.frameAlloc(u8, 2 + name.len + 1 + key.len + 3 + 4 + payload.len);
         out[0] = 0x05;
         out[1] = @intCast(name.len);
         @memcpy(out[2..][0..name.len], name);
@@ -892,8 +947,9 @@ const mini_core = struct {
         off += 1 + key.len;
         out[off] = ok_tag;
         out[off + 1] = err_tag;
-        std.mem.writeInt(u32, out[off + 2 ..][0..4], @intCast(payload.len), .little);
-        @memcpy(out[off + 6 ..][0..payload.len], payload);
+        out[off + 2] = 0; // raw byte request, not a generated typed service call
+        std.mem.writeInt(u32, out[off + 3 ..][0..4], @intCast(payload.len), .little);
+        @memcpy(out[off + 7 ..][0..payload.len], payload);
         return out;
     }
 
@@ -1109,7 +1165,7 @@ const mini_core = struct {
 
     fn cmdWebViewNavigate(label: []const u8, url: []const u8) []const u8 {
         const out = rt.frameAlloc(u8, 2 + label.len + 4 + url.len);
-        out[0] = 0x23;
+        out[0] = 0x2B;
         out[1] = @intCast(label.len);
         @memcpy(out[2..][0..label.len], label);
         _ = writeLongBytes(out, 2 + label.len, url);
@@ -1130,10 +1186,11 @@ const mini_core = struct {
     }
 
     fn cmdChannelOpen(key: f64, event_tag: u8) []const u8 {
-        const out = rt.frameAlloc(u8, 1 + 8 + 1);
+        const out = rt.frameAlloc(u8, 1 + 8 + 1 + 1);
         out[0] = 0x15;
         std.mem.writeInt(u64, out[1..][0..8], @bitCast(key), .little);
         out[9] = event_tag;
+        out[10] = 64;
         return out;
     }
 
@@ -1210,6 +1267,27 @@ const mini_core = struct {
         return out;
     }
 
+    fn cmdDbQuery(key: []const u8, page_tag: u8, done_tag: u8, err_tag: u8, sql: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 1 + 1 + key.len + 3 + 4 + sql.len + 4);
+        var at: usize = 0;
+        out[at] = 0x29;
+        at += 1;
+        out[at] = @intCast(key.len);
+        at += 1;
+        @memcpy(out[at..][0..key.len], key);
+        at += key.len;
+        out[at] = page_tag;
+        out[at + 1] = done_tag;
+        out[at + 2] = err_tag;
+        at += 3;
+        std.mem.writeInt(u32, out[at..][0..4], @intCast(sql.len), .little);
+        at += 4;
+        @memcpy(out[at..][0..sql.len], sql);
+        at += sql.len;
+        std.mem.writeInt(u32, out[at..][0..4], 0, .little);
+        return out;
+    }
+
     fn subTimer(key: []const u8, every_ms: f64, msg_tag: u8) []const u8 {
         const out = rt.frameAlloc(u8, 2 + key.len + 8 + 1);
         out[0] = 0x01;
@@ -1217,6 +1295,50 @@ const mini_core = struct {
         @memcpy(out[2..][0..key.len], key);
         std.mem.writeInt(u64, out[2 + key.len ..][0..8], @bitCast(every_ms), .little);
         out[2 + key.len + 8] = msg_tag;
+        return out;
+    }
+
+    fn subDbLive(key: []const u8, page_tag: u8, done_tag: u8, err_tag: u8, sql: []const u8, table: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 1 + 1 + key.len + 3 + 4 + sql.len + 4 + 4 + 1 + table.len);
+        var at: usize = 0;
+        out[at] = 0x02;
+        at += 1;
+        out[at] = @intCast(key.len);
+        at += 1;
+        @memcpy(out[at..][0..key.len], key);
+        at += key.len;
+        out[at] = page_tag;
+        out[at + 1] = done_tag;
+        out[at + 2] = err_tag;
+        at += 3;
+        std.mem.writeInt(u32, out[at..][0..4], @intCast(sql.len), .little);
+        at += 4;
+        @memcpy(out[at..][0..sql.len], sql);
+        at += sql.len;
+        std.mem.writeInt(u32, out[at..][0..4], 0, .little);
+        at += 4;
+        std.mem.writeInt(u32, out[at..][0..4], 1, .little);
+        at += 4;
+        out[at] = @intCast(table.len);
+        at += 1;
+        @memcpy(out[at..][0..table.len], table);
+        return out;
+    }
+
+    fn subDbLiveBatch(keys: []const []const u8) []const u8 {
+        var records: [effects_mod.max_db_effects][]const u8 = undefined;
+        std.debug.assert(keys.len <= records.len);
+        var total: usize = 0;
+        for (keys, 0..) |key, index| {
+            records[index] = subDbLive(key, 7, 12, 8, "SELECT id FROM item", "item");
+            total += records[index].len;
+        }
+        const out = rt.frameAlloc(u8, total);
+        var at: usize = 0;
+        for (records[0..keys.len]) |record| {
+            @memcpy(out[at..][0..record.len], record);
+            at += record.len;
+        }
         return out;
     }
 };
@@ -1346,6 +1468,20 @@ test "unkeyed requests dispatch in completion order" {
     try std.testing.expectEqualStrings("from-a", Host.model().status);
 }
 
+test "malformed credential request records reject instead of panicking" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+    try fx.feedHostResult(boot_request_key, true, "");
+    Host.drain(fx);
+
+    Host.dispatch(fx, .malformed_credential);
+    Host.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Host.model().errs);
+    try std.testing.expectEqualStrings("rejected", Host.model().last_err);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+}
+
 test "subscription reconcile arms, pauses, resumes, and re-arms on interval change" {
     const fx = freshChannel();
     defer fx.deinit();
@@ -1373,6 +1509,55 @@ test "subscription reconcile arms, pauses, resumes, and re-arms on interval chan
     try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
     try std.testing.expectEqual(tick_timer_key, fx.pendingTimerAt(0).?.key);
     try std.testing.expectEqual(@as(u64, 40), fx.pendingTimerAt(0).?.interval_ms);
+}
+
+test "a one-shot database query cannot overwrite a live subscription slot with the same wire key" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .arm_db_live);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+
+    const errors_before = Host.model().errs;
+    Host.dispatch(fx, .query_over_db_live);
+    Host.drain(fx);
+    try std.testing.expectEqual(errors_before + 1, Host.model().errs);
+    try std.testing.expectEqualStrings("rejected", Host.model().last_err);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+}
+
+test "Cmd.cancel leaves a live query to declarative subscription reconciliation" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .arm_db_live);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+
+    // The command walk sees Cmd.cancel first, then reconciliation sees that
+    // the committed model no longer declares the Sub. Cancel must leave the
+    // bridge entry intact so that reconciliation can retire the engine slot.
+    Host.dispatch(fx, .stop_db_live_with_cancel);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingDbCount());
+
+    // The same bridge/engine slot is immediately reusable by a one-shot read.
+    Host.dispatch(fx, .query_over_db_live);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+}
+
+test "live-query reconciliation retires stale slots before arming disjoint replacements" {
+    const fx = freshChannel();
+    defer fx.deinit();
+    Host.init(fx);
+
+    Host.dispatch(fx, .arm_full_db_live_set);
+    try std.testing.expectEqual(effects_mod.max_db_effects, fx.pendingDbCount());
+
+    // Every old key disappears at once. The final declaration contains one
+    // query and must fit without trying to hold its sixteen predecessors too.
+    Host.dispatch(fx, .replace_full_db_live_set);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
 }
 
 test "timer fires dispatch the named arm with the fire time" {

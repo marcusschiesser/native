@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 3) onto the real effect engine
+//! emits (`cmd_format_version` 4) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -437,6 +437,10 @@ pub fn videoKeyForTag(event_tag: u8) u64 {
 /// families' one engine key space without ever colliding on a key.
 pub const pty_key_base: u64 = 0x5453_5054_0000_0000;
 
+/// Engine-key namespace for relational effects ("TSDB"). The DB family has
+/// its own engine table, so these never consume the general request slots.
+pub const db_key_base: u64 = 0x5453_4442_0000_0000;
+
 /// The spawn wire record's "no line routing" tag sentinel (the wire
 /// format's shared constant).
 pub const spawn_no_line_tag: u8 = 0xFF;
@@ -460,6 +464,15 @@ pub fn TsCoreHost(comptime core: type) type {
         pub const Msg = core.Msg;
         pub const Fx = runtime_effects.Effects(Msg);
 
+        /// Generated service contracts bind their operation table and the
+        /// canonical result decoder here. Ordinary HostCallBinding users do
+        /// not install this seam, so raw Cmd.request keeps its byte result.
+        pub const ServiceResultBinding = struct {
+            index_fn: *const fn (name: []const u8) ?u16,
+            streaming_fn: *const fn (operation: u16) bool,
+            decode_fn: *const fn (operation: u16, tag: u8, bytes: []const u8) Msg,
+        };
+
         const msg_arms = @typeInfo(Msg).@"union".fields;
 
         const update_returns_cmd = @typeInfo(@TypeOf(core.update)).@"fn".return_type.? != *const Model;
@@ -477,6 +490,9 @@ pub fn TsCoreHost(comptime core: type) type {
             key: [max_wire_key_bytes]u8 = undefined,
             ok_tag: u8 = 0,
             err_tag: u8 = 0,
+            service_operation: ?u16 = null,
+            service_channel: ?u64 = null,
+            ok_void: bool = false,
 
             fn wireKey(entry: *const RequestEntry) []const u8 {
                 return entry.key[0..entry.key_len];
@@ -652,6 +668,22 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         };
 
+        const DbEntry = struct {
+            used: bool = false,
+            query: bool = true,
+            live: bool = false,
+            signature: u64 = 0,
+            key_len: usize = 0,
+            key: [max_wire_key_bytes]u8 = undefined,
+            page_tag: u8 = 0,
+            done_tag: u8 = 0,
+            err_tag: u8 = 0,
+
+            fn wireKey(entry: *const DbEntry) []const u8 {
+                return entry.key[0..entry.key_len];
+            }
+        };
+
         var model_root: *const Model = undefined;
         /// The platform caches directory for URL audio sources, set by
         /// the wiring (`TsUiApp`'s `audio_cache_dir`, or `setAudioCacheDir`
@@ -662,7 +694,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var audio_cache_dir_len: usize = 0;
         var audio_cache_dir_buf: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
         var audio_cache_path_buf: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
-        var requests: [runtime_effects.max_effects]RequestEntry = @splat(.{});
+        var requests: [runtime_effects.max_effects + runtime_effects.max_store_effects + runtime_effects.max_credentials_effects]RequestEntry = @splat(.{});
         var timers: [runtime_effects.max_effect_timers]TimerEntry = @splat(.{});
         var effects_table: [runtime_effects.max_effects]EffectEntry = @splat(.{});
         var delays: [runtime_effects.max_effect_timers]DelayEntry = @splat(.{});
@@ -673,6 +705,7 @@ pub fn TsCoreHost(comptime core: type) type {
         var channels: [runtime_effects.max_effect_channels]ChannelEntry = @splat(.{});
         var audio_captures: [runtime_effects.max_effect_channels]AudioCaptureEntry = @splat(.{});
         var ptys: [runtime_effects.max_effect_ptys]PtyEntry = @splat(.{});
+        var dbs: [runtime_effects.max_db_effects]DbEntry = @splat(.{});
         /// The platform caches directory for URL image sources, the
         /// audio cache dir's twin (`setImageCacheDir` / `TsUiApp`'s
         /// `image_cache_dir`): bridge-side derivation of the
@@ -690,6 +723,12 @@ pub fn TsCoreHost(comptime core: type) type {
         /// `TsCoreHost.drain` and the `TsUiApp` update_fx seam — keep
         /// that adjacency).
         var swallow_next_dispatch: bool = false;
+        var service_results: ?ServiceResultBinding = null;
+        var pending_service_channel_close: ?u64 = null;
+
+        pub fn bindServiceResults(binding: ?ServiceResultBinding) void {
+            service_results = binding;
+        }
 
         /// A `now` record captured during the command walk, dispatched
         /// after the issuing cycle's frame reset.
@@ -748,6 +787,7 @@ pub fn TsCoreHost(comptime core: type) type {
             channels = @splat(.{});
             audio_captures = @splat(.{});
             ptys = @splat(.{});
+            dbs = @splat(.{});
             clip_write_counter = 0;
             audio_cache_dir_len = 0;
             image_cache_dir_len = 0;
@@ -865,6 +905,10 @@ pub fn TsCoreHost(comptime core: type) type {
                 swallow_next_dispatch = false;
                 return;
             }
+            if (pending_service_channel_close) |channel_key| {
+                pending_service_channel_close = null;
+                fx.closeChannel(channel_key);
+            }
             dispatchDepth(fx, msg, 0);
         }
 
@@ -906,7 +950,8 @@ pub fn TsCoreHost(comptime core: type) type {
             var nows: [max_nows_per_cmd]PendingNow = undefined;
             var now_count: usize = 0;
             runCmd(fx, cmd, &nows, &now_count);
-            reconcileTimers(fx);
+            reconcileSubscriptions(fx);
+            fx.flushDbSubscriptions();
             core.rt.frameReset();
             for (nows[0..now_count]) |pending| {
                 dispatchDepth(fx, msgFromTagNumber(pending.tag, @floatFromInt(pending.ms)), depth + 1);
@@ -958,14 +1003,16 @@ pub fn TsCoreHost(comptime core: type) type {
                         fx.hostSend(name, payload);
                     },
                     // request [op][name_len][name][key_len][key]
-                    //         [ok_tag][err_tag][len u32 LE][payload]
+                    //         [ok_tag][err_tag][typed_service][len u32 LE][payload]
                     0x05 => {
                         const name = takeShortBytes(cmd, &at);
                         const key = takeShortBytes(cmd, &at);
                         const ok_tag = takeByte(cmd, &at);
                         const err_tag = takeByte(cmd, &at);
+                        const typed_service = takeByte(cmd, &at);
+                        if (typed_service > 1) @panic("ts core host: invalid typed-service request flag");
                         const payload = takeLongBytes(cmd, &at);
-                        issueRequest(fx, name, key, ok_tag, err_tag, payload);
+                        issueRequest(fx, name, key, ok_tag, err_tag, typed_service == 1, payload);
                     },
                     // cancel [op][key_len][key]
                     0x06 => {
@@ -1141,7 +1188,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // webview_navigate [op][label_len][label]
                     //                  [url_len u32 LE][url]
-                    0x23 => {
+                    0x2B => {
                         const label = takeShortBytes(cmd, &at);
                         const url = takeLongBytes(cmd, &at);
                         fx.navigateWebView(label, url);
@@ -1174,12 +1221,13 @@ pub fn TsCoreHost(comptime core: type) type {
                         const id_value: f64 = @bitCast(std.mem.readInt(u64, id_bits[0..8], .little));
                         runImageUnregister(fx, id_value);
                     },
-                    // channel_open [op][key f64 LE][event_tag]
+                    // channel_open [op][key f64 LE][event_tag][max_pending]
                     0x15 => {
                         const key_bits = takeBytes(cmd, &at, 8);
                         const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
                         const event_tag = takeByte(cmd, &at);
-                        issueChannelOpen(fx, key_value, event_tag);
+                        const max_pending = takeByte(cmd, &at);
+                        _ = issueChannelOpen(fx, key_value, event_tag, max_pending);
                     },
                     // channel_close [op][key f64 LE]
                     0x16 => {
@@ -1386,6 +1434,170 @@ pub fn TsCoreHost(comptime core: type) type {
                     },
                     // dock_presence [op][visible u8]
                     0x22 => fx.setDockPresence(takeByte(cmd, &at) != 0),
+                    // service_stream_request [op][channel_key f64 LE]
+                    //                        [event_tag][max_pending]
+                    //                        [name_len][name][key_len][key]
+                    //                        [ok_tag][err_tag]
+                    //                        [payload_len u32 LE][payload]
+                    0x28 => {
+                        const channel_bits = takeBytes(cmd, &at, 8);
+                        const channel_value: f64 = @bitCast(std.mem.readInt(u64, channel_bits[0..8], .little));
+                        const event_tag = takeByte(cmd, &at);
+                        const max_pending = takeByte(cmd, &at);
+                        const name = takeShortBytes(cmd, &at);
+                        const key = takeShortBytes(cmd, &at);
+                        const ok_tag = takeByte(cmd, &at);
+                        const err_tag = takeByte(cmd, &at);
+                        const payload = takeLongBytes(cmd, &at);
+                        issueServiceStreamRequest(fx, name, key, ok_tag, err_tag, channel_value, event_tag, max_pending, payload);
+                    },
+                    // store_set [op][route][scope u32][key bytes][value bytes]
+                    0x23 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const record_key = takeLongBytes(cmd, &at);
+                        const bytes = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, true) orelse continue;
+                        fx.storeSet(.{
+                            .key = request_key,
+                            .record_key = record_key,
+                            .bytes = bytes,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_get [op][route][scope u32][key bytes]
+                    0x24 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const record_key = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, false) orelse continue;
+                        fx.storeGet(.{
+                            .key = request_key,
+                            .record_key = record_key,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_delete [op][route][scope u32][key bytes]
+                    0x25 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const record_key = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, true) orelse continue;
+                        fx.storeDelete(.{
+                            .key = request_key,
+                            .record_key = record_key,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_scan [op][route][scope u32][prefix bytes]
+                    //            [limit u32][after bytes]
+                    0x26 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const prefix = takeLongBytes(cmd, &at);
+                        const limit = takeU32(cmd, &at);
+                        const after = takeLongBytes(cmd, &at);
+                        const request_key = allocStoreRequestEntry(fx, head, false) orelse continue;
+                        fx.storeScan(.{
+                            .key = request_key,
+                            .prefix = prefix,
+                            .limit = limit,
+                            .after = after,
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // store_set_many [op][route][scope u32][count u32]
+                    //                [count * (key bytes,value bytes)]
+                    0x27 => {
+                        const head = takeRoutedHead(cmd, &at);
+                        const scope = takeU32(cmd, &at);
+                        if (scope != 0) @panic("ts core host: record-store scope is reserved and must be zero in cmd format v3");
+                        const count: usize = @intCast(takeU32(cmd, &at));
+                        var entries: [runtime_effects.max_effect_store_batch_entries]Fx.StoreEntry = undefined;
+                        var kept: usize = 0;
+                        for (0..count) |_| {
+                            const record_key = takeLongBytes(cmd, &at);
+                            const bytes = takeLongBytes(cmd, &at);
+                            if (kept < entries.len) {
+                                entries[kept] = .{ .key = record_key, .bytes = bytes };
+                                kept += 1;
+                            }
+                        }
+                        const request_key = allocStoreRequestEntry(fx, head, true) orelse continue;
+                        fx.storeSetMany(.{
+                            .key = request_key,
+                            .entries = if (count <= entries.len) entries[0..kept] else &.{},
+                            .on_result = hostResultMsg,
+                        });
+                    },
+                    // db_query [op][key][page][done][err][sql bytes]
+                    //          [param count u32][tagged params]
+                    0x29 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const page_tag = takeByte(cmd, &at);
+                        const done_tag = takeByte(cmd, &at);
+                        const err_tag = takeByte(cmd, &at);
+                        const sql = takeLongBytes(cmd, &at);
+                        const count: usize = @intCast(takeU32(cmd, &at));
+                        var params: [runtime_effects.max_effect_db_parameters]runtime_effects.EffectDbValue = undefined;
+                        var kept: usize = 0;
+                        for (0..count) |_| {
+                            const value = takeDbValue(cmd, &at);
+                            if (kept < params.len) {
+                                params[kept] = value;
+                                kept += 1;
+                            }
+                        }
+                        const index = allocDbEntry(fx, key, true, page_tag, done_tag, err_tag) orelse continue;
+                        fx.dbQuery(.{
+                            .key = db_key_base + index,
+                            .sql = if (count <= params.len) sql else "",
+                            .params = if (count <= params.len) params[0..kept] else &.{},
+                            .on_result = dbResultMsg,
+                        });
+                    },
+                    // db_exec [op][key][ok][err][statement count u32]
+                    //         [statement sql bytes][param count u32][params]...
+                    0x2A => {
+                        const key = takeShortBytes(cmd, &at);
+                        const ok_tag = takeByte(cmd, &at);
+                        const err_tag = takeByte(cmd, &at);
+                        const count: usize = @intCast(takeU32(cmd, &at));
+                        var statements: [runtime_effects.max_effect_db_exec_statements]runtime_effects.EffectDbStatement = undefined;
+                        var values: [runtime_effects.max_effect_db_exec_statements * runtime_effects.max_effect_db_parameters]runtime_effects.EffectDbValue = undefined;
+                        var statement_kept: usize = 0;
+                        var value_kept: usize = 0;
+                        var valid = count <= statements.len;
+                        for (0..count) |_| {
+                            const sql = takeLongBytes(cmd, &at);
+                            const param_count: usize = @intCast(takeU32(cmd, &at));
+                            const start = value_kept;
+                            if (param_count > runtime_effects.max_effect_db_parameters) valid = false;
+                            for (0..param_count) |_| {
+                                const value = takeDbValue(cmd, &at);
+                                if (value_kept < values.len) {
+                                    values[value_kept] = value;
+                                    value_kept += 1;
+                                } else {
+                                    valid = false;
+                                }
+                            }
+                            if (statement_kept < statements.len and start + param_count <= value_kept) {
+                                statements[statement_kept] = .{ .sql = sql, .params = values[start .. start + param_count] };
+                                statement_kept += 1;
+                            }
+                        }
+                        const index = allocDbEntry(fx, key, false, 0, ok_tag, err_tag) orelse continue;
+                        fx.dbExec(.{
+                            .key = db_key_base + index,
+                            .statements = if (valid and count == statement_kept) statements[0..statement_kept] else &.{},
+                            .on_result = dbResultMsg,
+                        });
+                    },
                     else => @panic("ts core host: unknown command wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
@@ -1399,6 +1611,24 @@ pub fn TsCoreHost(comptime core: type) type {
             const ok_tag = takeByte(cmd, at);
             const err_tag = takeByte(cmd, at);
             return .{ .key = key, .ok_tag = ok_tag, .err_tag = err_tag };
+        }
+
+        fn takeDbValue(cmd: []const u8, at: *usize) runtime_effects.EffectDbValue {
+            return switch (takeByte(cmd, at)) {
+                0 => .null_value,
+                1 => blk: {
+                    const raw = takeBytes(cmd, at, 8);
+                    const number: f64 = @bitCast(std.mem.readInt(u64, raw[0..8], .little));
+                    if (std.math.isFinite(number) and @trunc(number) == number and number >= -9_007_199_254_740_991.0 and number <= 9_007_199_254_740_991.0) {
+                        break :blk .{ .integer = @intFromFloat(number) };
+                    }
+                    break :blk .{ .real = number };
+                },
+                2 => .{ .text = takeLongBytes(cmd, at) },
+                3 => .{ .blob = takeLongBytes(cmd, at) },
+                4 => .{ .integer = if (takeByte(cmd, at) == 0) 0 else 1 },
+                else => @panic("ts core host: unknown SQLite parameter tag - the core and runtime disagree on cmd_format_version"),
+            };
         }
 
         fn fetchMethod(wire: u8) std.http.Method {
@@ -1975,22 +2205,23 @@ pub fn TsCoreHost(comptime core: type) type {
             fx: *Fx,
             key_value: f64,
             event_tag: u8,
-        ) void {
+            max_pending: u8,
+        ) bool {
             const representable = std.math.isFinite(key_value) and
                 key_value >= 1 and key_value < 9007199254740992.0 and
                 @floor(key_value) == key_value;
             if (!representable) {
                 fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = 0, .kind = .rejected }));
-                return;
+                return false;
             }
             const key: u64 = @intFromFloat(key_value);
             if (findChannel(key) != null) {
                 fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return;
+                return false;
             }
             const index = freeChannelIndex() orelse {
                 fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return;
+                return false;
             };
             const entry = &channels[index];
             entry.used = true;
@@ -1999,7 +2230,13 @@ pub fn TsCoreHost(comptime core: type) type {
             _ = fx.openChannel(.{
                 .key = key,
                 .on_event = channelEventMsg,
+                .max_pending = max_pending,
             });
+            // A non-null lookup means the engine accepted the occupancy in
+            // both live execution and replay (whose accepted handle is inert).
+            // Validation and capacity refusals stage their rejection without
+            // leaving an open slot.
+            return fx.channelHandle(key) != null;
         }
 
         fn findChannel(key: u64) ?usize {
@@ -2277,6 +2514,82 @@ pub fn TsCoreHost(comptime core: type) type {
             return msgFromTagPty(entry.event_tag, wire_key, false, event);
         }
 
+        fn allocDbEntry(
+            fx: *Fx,
+            key: []const u8,
+            query: bool,
+            page_tag: u8,
+            done_tag: u8,
+            err_tag: u8,
+        ) ?usize {
+            const index = blk: {
+                if (key.len > 0) {
+                    if (findDb(key)) |existing| {
+                        // One-shot queries replace only earlier one-shot
+                        // queries. A live subscription owns its slot until
+                        // subscription reconciliation removes or re-arms it;
+                        // a command with the same wire key must reject rather
+                        // than silently erase that subscription.
+                        if (query and dbs[existing].query and !dbs[existing].live) break :blk existing;
+                        fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                        return null;
+                    }
+                }
+                break :blk freeDbIndex() orelse {
+                    fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                    return null;
+                };
+            };
+            const entry = &dbs[index];
+            entry.used = true;
+            entry.query = query;
+            entry.live = false;
+            entry.signature = 0;
+            entry.key_len = key.len;
+            @memcpy(entry.key[0..key.len], key);
+            entry.page_tag = page_tag;
+            entry.done_tag = done_tag;
+            entry.err_tag = err_tag;
+            return index;
+        }
+
+        fn findDb(key: []const u8) ?usize {
+            if (key.len == 0) return null;
+            for (&dbs, 0..) |*entry, index| {
+                if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
+            }
+            return null;
+        }
+
+        fn freeDbIndex() ?usize {
+            for (&dbs, 0..) |*entry, index| if (!entry.used) return index;
+            return null;
+        }
+
+        fn dbResultMsg(result: runtime_effects.EffectDbResult) Msg {
+            if (result.key < db_key_base) @panic("ts core host: a relational result arrived outside the bridge DB key namespace");
+            const index = result.key - db_key_base;
+            if (index >= dbs.len or !dbs[index].used) @panic("ts core host: a relational result arrived for an untracked command");
+            const entry = &dbs[index];
+            if (result.outcome != .ok) {
+                if (!entry.live) entry.used = false;
+                return msgFromTagBytes(entry.err_tag, @tagName(result.outcome));
+            }
+            return switch (result.kind) {
+                .page => msgFromTagBytes(entry.page_tag, result.bytes),
+                .done => blk: {
+                    if (!entry.query) @panic("ts core host: a query terminal reached an exec route");
+                    if (!entry.live) entry.used = false;
+                    break :blk msgFromTagVoid(entry.done_tag);
+                },
+                .exec => blk: {
+                    if (entry.query) @panic("ts core host: an exec terminal reached a query route");
+                    entry.used = false;
+                    break :blk msgFromTagVoid(entry.done_tag);
+                },
+            };
+        }
+
         /// The wire `cancel` record: first match wins across the four
         /// keyed tables — requests (silent drop), named engine ops
         /// (silent drop: the entry is marked dropped, the engine's
@@ -2290,8 +2603,13 @@ pub fn TsCoreHost(comptime core: type) type {
         fn cancelWireKey(fx: *Fx, key: []const u8) void {
             if (key.len == 0) return;
             if (findRequest(key)) |index| {
+                const entry = requests[index];
                 fx.cancelHostRequest(request_key_base + index);
                 requests[index].used = false;
+                if (entry.service_channel) |channel_key| {
+                    fx.closeChannel(channel_key);
+                    fx.stageLoopMsg(msgFromTagStaticBytes(entry.err_tag, "cancelled"));
+                }
                 return;
             }
             if (findEffect(key)) |index| {
@@ -2307,21 +2625,57 @@ pub fn TsCoreHost(comptime core: type) type {
             if (findDelay(key)) |index| {
                 fx.cancelTimer(delay_key_base + index);
                 delays[index].used = false;
+                return;
+            }
+            if (findDb(key)) |index| {
+                // Declarative live queries belong exclusively to subscription
+                // reconciliation. Cmd.cancel may share their public key, but
+                // it must neither hide the bridge entry nor strand the
+                // engine's `.live` slot; dropping the Sub below performs the
+                // matching dbUnsubscribe.
+                if (dbs[index].query and !dbs[index].live) {
+                    fx.cancelDbQuery(db_key_base + index);
+                    dbs[index].used = false;
+                }
+                // Transactions are already synchronous host work by the time
+                // the next record in a batch is walked. Cancel never hides
+                // their terminal (or makes the bridge forget its route).
+                return;
             }
         }
 
-        /// Issue (or replace) a routed request. Keyed requests reuse
-        /// their live table entry — re-routing the tags in place while
-        /// the engine replaces the in-flight call under the same engine
-        /// key. Unkeyed requests (`key.len == 0`) each take a fresh
-        /// entry: nothing can replace or cancel them.
-        fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) void {
+        const RequestPool = enum { host, store, credentials };
+
+        fn requestPoolAt(index: usize) RequestPool {
+            if (index < runtime_effects.max_effects) return .host;
+            if (index < runtime_effects.max_effects + runtime_effects.max_store_effects) return .store;
+            return .credentials;
+        }
+
+        /// Allocate a routed request slot. Host, record-store, and credential
+        /// pools are disjoint, while wire keys still share one replacement
+        /// namespace.
+        fn allocRequestEntry(
+            fx: *Fx,
+            key: []const u8,
+            ok_tag: u8,
+            err_tag: u8,
+            ok_void: bool,
+            pool: RequestPool,
+        ) ?u64 {
             const index = blk: {
                 if (key.len > 0) {
-                    if (findRequest(key)) |existing| break :blk existing;
+                    if (findRequest(key)) |existing| {
+                        if (requestPoolAt(existing) == pool) break :blk existing;
+                        fx.cancelHostRequest(request_key_base + existing);
+                        requests[existing].used = false;
+                    }
                 }
-                break :blk freeRequestIndex() orelse
-                    @panic("ts core host: more than 16 host requests in flight - the request table mirrors the engine's max_effects slots");
+                break :blk switch (pool) {
+                    .host => freeRequestIndex(),
+                    .store => freeStoreRequestIndex(),
+                    .credentials => freeCredentialsRequestIndex(),
+                } orelse return null;
             };
             const entry = &requests[index];
             entry.used = true;
@@ -2329,12 +2683,187 @@ pub fn TsCoreHost(comptime core: type) type {
             @memcpy(entry.key[0..key.len], key);
             entry.ok_tag = ok_tag;
             entry.err_tag = err_tag;
+            entry.ok_void = ok_void;
+            entry.service_operation = null;
+            entry.service_channel = null;
+            return index;
+        }
+
+        fn allocStoreRequestEntry(fx: *Fx, head: RoutedHead, ok_void: bool) ?u64 {
+            const index = allocRequestEntry(fx, head.key, head.ok_tag, head.err_tag, ok_void, .store) orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+                return null;
+            };
+            return request_key_base + index;
+        }
+
+        fn allocCredentialsRequestEntry(fx: *Fx, key: []const u8, ok_tag: u8, err_tag: u8, ok_void: bool) ?u64 {
+            const index = allocRequestEntry(fx, key, ok_tag, err_tag, ok_void, .credentials) orelse {
+                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                return null;
+            };
+            return request_key_base + index;
+        }
+
+        /// Issue (or replace) a routed request. Raw keyed requests reuse their
+        /// live table entry when the bound host supports replacement. Typed
+        /// services and reject-on-duplicate host bindings refuse before
+        /// touching the original entry, so its eventual terminal still owns
+        /// the route and table slot it started with. Unkeyed requests each
+        /// take a fresh entry.
+        fn issueRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, typed_service: bool, payload: []const u8) void {
+            if (!typed_service and std.mem.startsWith(u8, name, "core.credentials.")) {
+                issueCredentialsRequest(fx, name, key, ok_tag, err_tag, payload);
+                return;
+            }
+            if (key.len > 0 and findRequest(key) != null and (typed_service or fx.rejectsDuplicateHostRequestKeys())) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            const index = allocRequestEntry(fx, key, ok_tag, err_tag, false, .host) orelse {
+                stageRequestRejected(fx, err_tag);
+                return;
+            };
+            const entry = &requests[index];
+            if (typed_service) if (service_results) |binding| {
+                entry.service_operation = binding.index_fn(name);
+            };
+            if (entry.service_operation) |operation| {
+                const binding = service_results.?;
+                if (binding.streaming_fn(operation) and payload.len >= 8) {
+                    entry.service_channel = exactEngineKey(readF64(payload, 0));
+                }
+            }
             fx.hostRequest(.{
                 .key = request_key_base + index,
                 .name = name,
                 .payload = payload,
                 .on_result = hostResultMsg,
             });
+        }
+
+        fn issueCredentialsRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) void {
+            const is_set = std.mem.eql(u8, name, "core.credentials.set");
+            const is_get = std.mem.eql(u8, name, "core.credentials.get");
+            const is_delete = std.mem.eql(u8, name, "core.credentials.delete");
+            if (!is_set and !is_get and !is_delete) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            var at: usize = 0;
+            const credential_key = takeCredentialBytes(payload, &at) orelse {
+                stageRequestRejected(fx, err_tag);
+                return;
+            };
+            if (is_set) {
+                const secret = takeCredentialBytes(payload, &at) orelse {
+                    stageRequestRejected(fx, err_tag);
+                    return;
+                };
+                if (at != payload.len) {
+                    stageRequestRejected(fx, err_tag);
+                    return;
+                }
+                const request_key = allocCredentialsRequestEntry(fx, key, ok_tag, err_tag, true) orelse return;
+                fx.credentialsSet(.{
+                    .key = request_key,
+                    .credential_key = credential_key,
+                    .secret = secret,
+                    .host_result = hostResultMsg,
+                });
+                return;
+            }
+            if (at != payload.len) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            const request_key = allocCredentialsRequestEntry(
+                fx,
+                key,
+                ok_tag,
+                err_tag,
+                is_delete,
+            ) orelse return;
+            if (is_get) {
+                fx.credentialsGet(.{
+                    .key = request_key,
+                    .credential_key = credential_key,
+                    .host_result = hostResultMsg,
+                });
+            } else {
+                fx.credentialsDelete(.{
+                    .key = request_key,
+                    .credential_key = credential_key,
+                    .host_result = hostResultMsg,
+                });
+            }
+        }
+
+        /// Credential records can also arrive through public `Cmd.request`,
+        /// so their inner fields are untrusted even though the outer command
+        /// wire was emitted correctly. Decode them fallibly and route a
+        /// normal rejection instead of turning authored bytes into a panic.
+        fn takeCredentialBytes(bytes: []const u8, at: *usize) ?[]const u8 {
+            if (at.* > bytes.len or bytes.len - at.* < 4) return null;
+            const len: usize = std.mem.readInt(u32, bytes[at.*..][0..4], .little);
+            at.* += 4;
+            if (len > bytes.len - at.*) return null;
+            const field = bytes[at.* .. at.* + len];
+            at.* += len;
+            return field;
+        }
+
+        /// Streaming services are one admission, not a channel-open/request
+        /// batch. A duplicate route key or an already-open channel rejects
+        /// before either table changes; otherwise the ordinary channel and
+        /// request issuers retain their journal/replay behavior. An engine-side
+        /// channel refusal is followed by the service err arm's matching
+        /// rejection without starting the service transport.
+        fn issueServiceStreamRequest(
+            fx: *Fx,
+            name: []const u8,
+            key: []const u8,
+            ok_tag: u8,
+            err_tag: u8,
+            channel_value: f64,
+            event_tag: u8,
+            max_pending: u8,
+            payload: []const u8,
+        ) void {
+            if (key.len > 0 and findRequest(key) != null) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            // Fail the existing request-table bound before opening a channel;
+            // an admission failure must not leave an orphaned stream.
+            if (freeRequestIndex() == null) {
+                @panic("ts core host: more than 16 host requests in flight - the request table mirrors the engine's max_effects slots");
+            }
+
+            const channel_key = exactEngineKey(channel_value);
+            if (channel_key) |value| {
+                // `findChannel` covers every TS bridge occupancy, including a
+                // rejected terminal waiting to drain. `channelHandle` also
+                // sees an open embedder-owned channel and replay's parked
+                // occupancy. Never let this service acquire either one.
+                if (findChannel(value) != null or fx.channelHandle(value) != null) {
+                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = value, .kind = .rejected }));
+                    stageRequestRejected(fx, err_tag);
+                    return;
+                }
+            }
+
+            // Validation/table refusals generated by the bridge are final for
+            // this combined command, so no service request may follow them.
+            if (!issueChannelOpen(fx, channel_value, event_tag, max_pending)) {
+                stageRequestRejected(fx, err_tag);
+                return;
+            }
+            issueRequest(fx, name, key, ok_tag, err_tag, true, payload);
+        }
+
+        fn stageRequestRejected(fx: *Fx, err_tag: u8) void {
+            fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
         }
 
         fn findRequest(key: []const u8) ?usize {
@@ -2345,7 +2874,24 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn freeRequestIndex() ?usize {
-            for (&requests, 0..) |*entry, index| {
+            for (requests[0..runtime_effects.max_effects], 0..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            return null;
+        }
+
+        fn freeStoreRequestIndex() ?usize {
+            const first = runtime_effects.max_effects;
+            const end = first + runtime_effects.max_store_effects;
+            for (requests[first..end], first..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            return null;
+        }
+
+        fn freeCredentialsRequestIndex() ?usize {
+            const first = runtime_effects.max_effects + runtime_effects.max_store_effects;
+            for (requests[first..], first..) |*entry, index| {
                 if (!entry.used) return index;
             }
             return null;
@@ -2366,6 +2912,15 @@ pub fn TsCoreHost(comptime core: type) type {
             }
             const entry = &requests[index];
             entry.used = false;
+            if (entry.service_channel) |channel_key| pending_service_channel_close = channel_key;
+            if (result.ok) {
+                if (entry.service_operation) |operation| {
+                    const binding = service_results orelse
+                        @panic("ts core host: a typed service result arrived after its decoder was unbound");
+                    return binding.decode_fn(operation, entry.ok_tag, result.bytes);
+                }
+            }
+            if (result.ok and entry.ok_void) return msgFromTagVoid(entry.ok_tag);
             return msgFromTagBytes(if (result.ok) entry.ok_tag else entry.err_tag, result.bytes);
         }
 
@@ -2457,7 +3012,7 @@ pub fn TsCoreHost(comptime core: type) type {
             return msgFromTagNumber(delays[index].tag, ms);
         }
 
-        // ------------------------------------------ subscription timers
+        // ----------------------------------------------- subscriptions
 
         /// Reconcile the declarative subscription set against the fixed
         /// timer table — the same algorithm as the @native-sdk/core package's
@@ -2465,71 +3020,165 @@ pub fn TsCoreHost(comptime core: type) type {
         /// keys into the first free slot, re-arm on interval change,
         /// re-route on tag change, cancel the missing. Slot order
         /// everywhere, so record/replay walk identical tables.
-        fn reconcileTimers(fx: *Fx) void {
+        fn reconcileSubscriptions(fx: *Fx) void {
             if (comptime !has_subscriptions) return;
             const subs = core.subscriptions(model_root);
-            var seen = [_]bool{false} ** timers.len;
+            var seen_timers = [_]bool{false} ** timers.len;
+            var seen_db = [_]bool{false} ** dbs.len;
+
+            // Free live DB slots whose wire keys disappeared before the pass
+            // allocates replacements. Otherwise two independently valid sets
+            // can overflow the shared family at their transient union (for
+            // example, sixteen old keys replaced by one new key).
+            const retained_db = retainedDbSubscriptions(subs);
+            for (&dbs, 0..) |*entry, index| {
+                if (entry.used and entry.live and !retained_db[index]) {
+                    fx.dbUnsubscribe(db_key_base + index);
+                    entry.used = false;
+                }
+            }
+
             var at: usize = 0;
             while (at < subs.len) {
+                const record_start = at;
                 const op = takeByte(subs, &at);
-                if (op != 0x01) {
-                    @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version");
-                }
-                // timer [op][key_len][key][every_ms f64 LE][msg_tag]
-                const key = takeShortBytes(subs, &at);
-                const every_bits = takeBytes(subs, &at, 8);
-                const every_ms: f64 = @bitCast(std.mem.readInt(u64, every_bits[0..8], .little));
-                const tag = takeByte(subs, &at);
-                if (!(every_ms >= 1) or !(every_ms <= 31_536_000_000.0)) {
-                    // The lower bound also rejects NaN; the upper (one
-                    // year) keeps the engine's ns conversion in range.
-                    @panic("ts core host: Sub.timer interval must be between 1ms and one year");
-                }
-                var slot: ?usize = null;
-                for (&timers, 0..) |*entry, index| {
-                    if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) slot = index;
-                }
-                if (slot) |index| {
-                    seen[index] = true;
-                    const entry = &timers[index];
-                    if (entry.every_ms != every_ms) {
-                        entry.every_ms = every_ms;
-                        // Interval change re-arms: the engine replaces
-                        // the active key in place and the platform timer
-                        // restarts from now.
-                        fx.startTimer(.{
-                            .key = timer_key_base + index,
-                            .interval_ms = intervalMs(every_ms),
-                            .mode = .repeating,
-                            .on_fire = timerFireMsg,
-                        });
-                    }
-                    // A tag-only change re-routes without re-arming.
-                    entry.tag = tag;
-                } else {
-                    const index = freeTimerIndex() orelse
-                        @panic("ts core host: more than 16 subscription timers - the timer table mirrors the engine's max_effect_timers");
-                    seen[index] = true;
-                    const entry = &timers[index];
-                    entry.used = true;
-                    entry.key_len = key.len;
-                    @memcpy(entry.key[0..key.len], key);
-                    entry.every_ms = every_ms;
-                    entry.tag = tag;
-                    fx.startTimer(.{
-                        .key = timer_key_base + index,
-                        .interval_ms = intervalMs(every_ms),
-                        .mode = .repeating,
-                        .on_fire = timerFireMsg,
-                    });
+                switch (op) {
+                    // timer [op][key_len][key][every_ms f64 LE][msg_tag]
+                    0x01 => {
+                        const key = takeShortBytes(subs, &at);
+                        const every_bits = takeBytes(subs, &at, 8);
+                        const every_ms: f64 = @bitCast(std.mem.readInt(u64, every_bits[0..8], .little));
+                        const tag = takeByte(subs, &at);
+                        if (!(every_ms >= 1) or !(every_ms <= 31_536_000_000.0)) {
+                            @panic("ts core host: Sub.timer interval must be between 1ms and one year");
+                        }
+                        var slot: ?usize = null;
+                        for (&timers, 0..) |*entry, index| {
+                            if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) slot = index;
+                        }
+                        if (slot) |index| {
+                            seen_timers[index] = true;
+                            const entry = &timers[index];
+                            if (entry.every_ms != every_ms) {
+                                entry.every_ms = every_ms;
+                                fx.startTimer(.{
+                                    .key = timer_key_base + index,
+                                    .interval_ms = intervalMs(every_ms),
+                                    .mode = .repeating,
+                                    .on_fire = timerFireMsg,
+                                });
+                            }
+                            entry.tag = tag;
+                        } else {
+                            const index = freeTimerIndex() orelse
+                                @panic("ts core host: more than 16 subscription timers - the timer table mirrors the engine's max_effect_timers");
+                            seen_timers[index] = true;
+                            const entry = &timers[index];
+                            entry.used = true;
+                            entry.key_len = key.len;
+                            @memcpy(entry.key[0..key.len], key);
+                            entry.every_ms = every_ms;
+                            entry.tag = tag;
+                            fx.startTimer(.{
+                                .key = timer_key_base + index,
+                                .interval_ms = intervalMs(every_ms),
+                                .mode = .repeating,
+                                .on_fire = timerFireMsg,
+                            });
+                        }
+                    },
+                    // live query [op][key][page][done][err][sql bytes]
+                    //            [param count][tagged params]
+                    //            [table count][short table names]
+                    0x02 => {
+                        const key = takeShortBytes(subs, &at);
+                        if (key.len == 0) @panic("ts core host: a live query requires a non-empty subscription key");
+                        const page_tag = takeByte(subs, &at);
+                        const done_tag = takeByte(subs, &at);
+                        const err_tag = takeByte(subs, &at);
+                        const sql = takeLongBytes(subs, &at);
+                        const param_count: usize = @intCast(takeU32(subs, &at));
+                        var params: [runtime_effects.max_effect_db_parameters]runtime_effects.EffectDbValue = undefined;
+                        if (param_count > params.len) @panic("ts core host: a live query carries too many SQL parameters");
+                        for (0..param_count) |index| params[index] = takeDbValue(subs, &at);
+                        const table_count: usize = @intCast(takeU32(subs, &at));
+                        var tables: [runtime_effects.max_effect_db_live_tables][]const u8 = undefined;
+                        if (table_count == 0 or table_count > tables.len) @panic("ts core host: a live query carries an invalid dependency table set");
+                        for (0..table_count) |index| tables[index] = takeShortBytes(subs, &at);
+
+                        const signature = std.hash.Wyhash.hash(0, subs[record_start..at]);
+                        const index = findDb(key) orelse freeDbIndex() orelse
+                            @panic("ts core host: more relational commands and live queries are active than the database slot family can hold");
+                        const entry = &dbs[index];
+                        if (entry.used and !entry.live) @panic("ts core host: a live-query key collides with an in-flight database command");
+                        if (seen_db[index]) @panic("ts core host: duplicate live-query subscription key");
+                        seen_db[index] = true;
+                        if (!entry.used or entry.signature != signature) {
+                            if (entry.used) fx.dbUnsubscribe(db_key_base + index);
+                            entry.* = .{
+                                .used = true,
+                                .query = true,
+                                .live = true,
+                                .signature = signature,
+                                .key_len = key.len,
+                                .page_tag = page_tag,
+                                .done_tag = done_tag,
+                                .err_tag = err_tag,
+                            };
+                            @memcpy(entry.key[0..key.len], key);
+                            fx.dbSubscribe(.{
+                                .key = db_key_base + index,
+                                .sql = sql,
+                                .params = params[0..param_count],
+                                .tables = tables[0..table_count],
+                                .on_result = dbResultMsg,
+                            });
+                        }
+                    },
+                    else => @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
             for (&timers, 0..) |*entry, index| {
-                if (entry.used and !seen[index]) {
+                if (entry.used and !seen_timers[index]) {
                     entry.used = false;
                     fx.cancelTimer(timer_key_base + index);
                 }
             }
+        }
+
+        /// Parse the inert subscription stream without mutating it and mark
+        /// the currently-live DB entries whose public keys remain declared.
+        /// Reconciliation uses this pre-pass to retire genuinely stale slots
+        /// before it allocates any new ones.
+        fn retainedDbSubscriptions(subs: []const u8) [runtime_effects.max_db_effects]bool {
+            var retained = [_]bool{false} ** runtime_effects.max_db_effects;
+            var at: usize = 0;
+            while (at < subs.len) switch (takeByte(subs, &at)) {
+                0x01 => {
+                    _ = takeShortBytes(subs, &at);
+                    _ = takeBytes(subs, &at, 8);
+                    _ = takeByte(subs, &at);
+                },
+                0x02 => {
+                    const key = takeShortBytes(subs, &at);
+                    if (key.len == 0) @panic("ts core host: a live query requires a non-empty subscription key");
+                    _ = takeByte(subs, &at);
+                    _ = takeByte(subs, &at);
+                    _ = takeByte(subs, &at);
+                    _ = takeLongBytes(subs, &at);
+                    const param_count: usize = @intCast(takeU32(subs, &at));
+                    if (param_count > runtime_effects.max_effect_db_parameters) @panic("ts core host: a live query carries too many SQL parameters");
+                    for (0..param_count) |_| _ = takeDbValue(subs, &at);
+                    const table_count: usize = @intCast(takeU32(subs, &at));
+                    if (table_count == 0 or table_count > runtime_effects.max_effect_db_live_tables) @panic("ts core host: a live query carries an invalid dependency table set");
+                    for (0..table_count) |_| _ = takeShortBytes(subs, &at);
+                    if (findDb(key)) |index| {
+                        if (dbs[index].live) retained[index] = true;
+                    }
+                },
+                else => @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version"),
+            };
+            return retained;
         }
 
         fn freeTimerIndex() ?usize {
@@ -3184,6 +3833,16 @@ pub fn TsCoreHost(comptime core: type) type {
 
         // ------------------------------------------------- wire cursor
 
+        fn readF64(bytes: []const u8, at: usize) f64 {
+            if (at + 8 > bytes.len) @panic("ts core host: truncated f64 service metadata");
+            return @bitCast(std.mem.readInt(u64, bytes[at..][0..8], .little));
+        }
+
+        fn exactEngineKey(value: f64) ?u64 {
+            if (!std.math.isFinite(value) or value < 1 or value >= 9007199254740992.0 or @floor(value) != value) return null;
+            return @intFromFloat(value);
+        }
+
         fn takeByte(bytes: []const u8, at: *usize) u8 {
             if (at.* >= bytes.len) @panic("ts core host: truncated wire record");
             const value = bytes[at.*];
@@ -3196,6 +3855,12 @@ pub fn TsCoreHost(comptime core: type) type {
             const slice = bytes[at.* .. at.* + len];
             at.* += len;
             return slice;
+        }
+
+        /// A fixed-width little-endian integer.
+        fn takeU32(bytes: []const u8, at: *usize) u32 {
+            const raw = takeBytes(bytes, at, 4);
+            return std.mem.readInt(u32, raw[0..4], .little);
         }
 
         /// A one-byte-length-prefixed field (names and keys).

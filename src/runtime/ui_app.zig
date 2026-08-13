@@ -32,6 +32,7 @@ const builtin = @import("builtin");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const app_manifest = @import("app_manifest");
+const security = @import("../security/root.zig");
 const platform = @import("../platform/root.zig");
 const core = @import("core.zig");
 const canvas_frame = @import("canvas_frame.zig");
@@ -1404,6 +1405,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         fn bindEffectsChannel(self: *Self, runtime: *Runtime) void {
             self.effects.bindServices(&runtime.options.platform.services);
             self.effects.bindEnviron(runtime.options.environ);
+            if (runtime.options.record_store) |binding| {
+                self.effects.bindRecordStore(binding);
+            }
+            if (runtime.options.relational_store) |binding| {
+                self.effects.bindRelationalStore(binding);
+            }
+            self.effects.bindCredentialsStore(.{
+                .services = &runtime.options.platform.services,
+                .service = runtime.options.platform.app_info.bundle_id,
+                .permitted = runtime.options.credentials_enabled and
+                    security.hasPermission(runtime.options.security.permissions, security.permission_credentials),
+            });
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
             self.effects.bindMediaSurfaces(runtime.mediaSurfaceBinding());
             self.effects.bindWindowActions(.{
@@ -1424,9 +1437,6 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .context = runtime,
                 .open_external_url_fn = effectsOpenExternalUrl,
                 .reveal_path_fn = effectsRevealPath,
-                .set_credential_fn = effectsSetCredential,
-                .get_credential_fn = effectsGetCredential,
-                .delete_credential_fn = effectsDeleteCredential,
                 .format_local_time_fn = effectsFormatLocalTime,
             });
             if (runtime.options.session_recorder) |recorder| {
@@ -1494,6 +1504,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     // `.rejected` and regenerate from the same
                     // deterministic validation, like `.timer` records.
                     .host => try self.effects.feedHostResult(record.key, record.code == 0, record.payload),
+                    .credentials => try self.effects.feedCredentialsResult(
+                        record.key,
+                        record.credentials_operation,
+                        record.credentials_outcome,
+                        record.credentials_secret_len,
+                        record.credentials_digest,
+                    ),
+                    .db => try self.effects.feedDbResult(
+                        record.key,
+                        runtime_effects.dbKindFromJournalCode(record.code) orelse return error.ReplayDamagedRecord,
+                        runtime_effects.dbOutcomeFromJournalCode(record.code) orelse return error.ReplayDamagedRecord,
+                        record.payload,
+                    ),
                     .clock => try self.effects.pushReplayClock(record.clock_wall_ms),
                     // `.env` records carry the arm name in `stderr_tail`
                     // and the value in `payload`; the TS adapter's
@@ -1657,6 +1680,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             } else {
                 self.options.update.?(&self.model, msg);
             }
+            // One update call is one complete command batch. Re-run live
+            // relational reads only after the batch has walked so several
+            // writes touching the same table still coalesce into one result.
+            self.effects.flushDbSubscriptions();
         }
 
         /// Drain the effect completion queue on the loop thread: every
@@ -4251,6 +4278,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         self.init_fx_ran = true;
                         self.bindEffectsChannel(runtime);
                         init_fx(&self.model, &self.effects);
+                        // init_fx has the same batch contract as update_fx;
+                        // subscriptions dirtied by boot transactions must be
+                        // current before their staged results are drained.
+                        self.effects.flushDbSubscriptions();
                         self.publishAudioState(runtime);
                         // Launch lap (env-gated): boot-effect cost (asset
                         // decode/registration) splits out of the
@@ -6211,21 +6242,6 @@ fn effectsOpenExternalUrl(context: *anyopaque, url: []const u8) anyerror!void {
 fn effectsRevealPath(context: *anyopaque, path: []const u8) anyerror!void {
     const runtime: *Runtime = @ptrCast(@alignCast(context));
     return runtime.revealPath(path);
-}
-
-fn effectsSetCredential(context: *anyopaque, credential: platform.Credential) anyerror!void {
-    const runtime: *Runtime = @ptrCast(@alignCast(context));
-    return runtime.setCredential(credential);
-}
-
-fn effectsGetCredential(context: *anyopaque, key: platform.CredentialKey, buffer: []u8) anyerror!?[]const u8 {
-    const runtime: *Runtime = @ptrCast(@alignCast(context));
-    return runtime.getCredential(key, buffer);
-}
-
-fn effectsDeleteCredential(context: *anyopaque, key: platform.CredentialKey) anyerror!bool {
-    const runtime: *Runtime = @ptrCast(@alignCast(context));
-    return runtime.deleteCredential(key);
 }
 
 fn effectsFormatLocalTime(context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {

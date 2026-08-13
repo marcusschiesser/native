@@ -61,6 +61,8 @@ pub const Error = error{
     InvalidCredentialOptions,
     CredentialFieldTooLarge,
     CredentialNotFound,
+    CredentialStoreLocked,
+    CredentialStoreFailed,
     InvalidTrayOptions,
     TrayFieldTooLarge,
     InvalidAudioOptions,
@@ -245,7 +247,10 @@ pub const max_clipboard_mime_type_bytes: usize = 128;
 pub const max_clipboard_data_bytes: usize = 65536;
 pub const max_credential_service_bytes: usize = 128;
 pub const max_credential_account_bytes: usize = 256;
-pub const max_credential_secret_bytes: usize = 4096;
+/// One honest cross-platform bound: Windows Credential Manager's generic
+/// credential blob is the narrowest first-party backend at 5 * 512 bytes.
+/// Every host accepts this whole range; none silently truncates it.
+pub const max_credential_secret_bytes: usize = 5 * 512;
 pub const max_local_time_text_bytes: usize = 512;
 pub const max_tray_items: usize = 32;
 pub const max_tray_icon_path_bytes: usize = 4096;
@@ -2597,6 +2602,12 @@ pub const PlatformServices = struct {
     set_credential_fn: ?*const fn (context: ?*anyopaque, credential: Credential) anyerror!void = null,
     get_credential_fn: ?*const fn (context: ?*anyopaque, key: CredentialKey, buffer: []u8) anyerror![]const u8 = null,
     delete_credential_fn: ?*const fn (context: ?*anyopaque, key: CredentialKey) anyerror!void = null,
+    /// Teardown detached a synchronous platform operation which may still
+    /// use `context` after the runtime is gone. The platform must latch this
+    /// notification and skip destruction of everything the callback can
+    /// reach. First-party hosts share the channel-wake abandon latch because
+    /// its lifetime obligation is identical. Loop-thread, teardown-only.
+    note_blocking_call_abandoned_fn: ?*const fn (context: ?*anyopaque) void = null,
     format_local_time_fn: ?*const fn (context: ?*anyopaque, timestamp_ms: i64, style: LocalTimeStyle, buffer: []u8) anyerror![]const u8 = null,
     open_external_url_fn: ?*const fn (context: ?*anyopaque, url: []const u8) anyerror!void = null,
     reveal_path_fn: ?*const fn (context: ?*anyopaque, path: []const u8) anyerror!void = null,
@@ -3140,6 +3151,11 @@ pub const PlatformServices = struct {
         return delete_fn(self.context, key);
     }
 
+    pub fn noteBlockingCallAbandoned(self: PlatformServices) void {
+        const note_fn = self.note_blocking_call_abandoned_fn orelse return;
+        note_fn(self.context);
+    }
+
     pub fn formatLocalTime(self: PlatformServices, timestamp_ms: i64, style: LocalTimeStyle, buffer: []u8) anyerror![]const u8 {
         const format_fn = self.format_local_time_fn orelse return error.UnsupportedService;
         return format_fn(self.context, timestamp_ms, style, buffer);
@@ -3539,7 +3555,8 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         .reveal_path => services.reveal_path_fn != null,
         .notifications => services.show_notification_fn != null,
         .recent_documents => services.add_recent_document_fn != null or services.clear_recent_documents_fn != null,
-        .credentials => services.set_credential_fn != null and services.get_credential_fn != null and services.delete_credential_fn != null,
+        .credentials => services.set_credential_fn != null and services.get_credential_fn != null and services.delete_credential_fn != null and
+            services.note_blocking_call_abandoned_fn != null,
         .file_drops => false,
         .app_activation_events => false,
         .gpu_surfaces => false,
