@@ -1,6 +1,6 @@
 # Capabilities
 
-Native SDK capabilities are native OS services and app events exposed through `PlatformServices`, runtime methods, lifecycle events, and — for apps that [embed web content](/docs/frontend) — guarded bridge commands. Native code reaches them directly; web content does not receive capability access by default. In a [model core](/docs/app-model), OS work rides the effects channel (`Cmd.*` in TypeScript and `fx.*` in Zig) so `update` never needs a runtime handle. Zig cores access the credential store through `fx.setCredential`, `fx.getCredential`, and `fx.deleteCredential`.
+Native SDK capabilities are native OS services and app events exposed through `PlatformServices`, runtime methods, lifecycle events, and — for apps that [embed web content](/docs/frontend) — guarded bridge commands. Native code reaches them directly; web content does not receive capability access by default. In a [model core](/docs/app-model), OS work rides the effects channel (`Cmd.*` in TypeScript and `fx.*` in Zig) so `update` never needs a runtime handle.
 
 Web content itself is declare-to-use: an app ships the embedded web layer only when it declares web intent — `"webview"` in `.capabilities`, a `.frontend` block, a `.shell` webview view, or a web engine resolved to Chromium (`.web_engine = "chromium"` in app.zon, or the `-Dweb-engine`/`--web-engine` flags) — and an app that declares none of them builds native-only, where any attempt to create a webview fails with a teaching error instead of loading a layer the app never asked for. The [`webview_layer`](/docs/app-zon) manifest field overrides the inference in either direction. Native-only builds shed the platform web stack for real: the Windows executable carries no `WebView2Loader.dll` reference, and the Linux host neither links WebKitGTK nor requires `libwebkitgtk` on user machines.
 
@@ -37,6 +37,20 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
       <td>None. Model-core effect only.</td>
       <td>None. Gated by the <code>persist</code> build capability.</td>
       <td>Generated TypeScript app runners on every app-data platform; Zig-core hosts receive the same named <code>core.persist</code> effect seam</td>
+    </tr>
+    <tr>
+      <td>Record store</td>
+      <td><code>Cmd.store.set/get/delete/scan/setMany</code> / <code>fx.storeSet/storeGet/storeDelete/storeScan/storeSetMany</code></td>
+      <td>None. Model-core effect only.</td>
+      <td>None. Gated by the <code>store</code> build capability.</td>
+      <td>SQLite-backed engine store in the per-app data directory; replay remains offline and the core devhost uses a process-local map</td>
+    </tr>
+    <tr>
+      <td>Relational SQLite</td>
+      <td><code>Cmd.q&lt;Name&gt;</code> / <code>Cmd.qTx</code> / <code>Sub.q&lt;Name&gt;</code> / raw <code>Cmd.db.query/exec</code> / <code>fx.dbQuery/dbExec/dbSubscribe</code></td>
+      <td>None. Model-core effect only.</td>
+      <td>None. Gated by the <code>sqlite</code> build capability.</td>
+      <td>Checked migrations and named SQL over engine-owned <code>app.db</code>; real in-memory SQLite in check, devhost, and tests; journal-only replay</td>
     </tr>
     <tr>
       <td>Native dialogs</td>
@@ -89,10 +103,10 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
     </tr>
     <tr>
       <td>Credential store</td>
-      <td><code>Cmd.credentialSet(...)</code> / <code>credentialGet(...)</code> / <code>credentialDelete(...)</code>; Zig <code>UiApp</code>: <code>fx.setCredential</code> / <code>fx.getCredential</code> / <code>fx.deleteCredential</code>; runtime equivalents</td>
+      <td><code>Cmd.credentials.set/get/delete</code> / <code>fx.credentialsSet/Get/Delete</code> / runtime equivalents</td>
       <td><code>native-sdk.credentials.set</code> / <code>native-sdk.credentials.get</code> / <code>native-sdk.credentials.delete</code></td>
-      <td><code>credentials</code></td>
-      <td>macOS model cores, system WebView, and Chromium through Keychain; Linux model cores and system WebView through Secret Service/libsecret when available; Windows model cores and system WebView through Credential Manager</td>
+      <td><code>credentials</code>. Model cores require both the build capability and permission; WebView commands require the bridge permission.</td>
+      <td>macOS model cores, system WebView, and Chromium through Keychain; Linux model cores and system WebView through Secret Service/libsecret when available; Windows model cores and system WebView through Credential Manager; iOS toolkit apps through generic-password Keychain entries; Android toolkit apps through an AndroidKeyStore AES-GCM key and authenticated ciphertext in app-private preferences. Core dev and test hosts use hermetic memory.</td>
     </tr>
     <tr>
       <td>Local date/time formatting</td>
@@ -119,42 +133,6 @@ Web content itself is declare-to-use: an app ships the embedded web layer only w
 </table>
 
 Unsupported platform hosts reject with the standard unsupported-service error.
-
-### Credential effects in Zig UiApp
-
-The runtime methods remain appropriate for code that already owns a runtime handle. Inside a Zig `UiApp.update`, use the typed effects instead. `service` namespaces credentials for an app or integration; `account` selects an identity or slot within that namespace. Both are part of the lookup key, so keep them stable between set, get, and delete.
-
-```zig
-pub const Msg = union(enum) {
-    save_api_key,
-    load_api_key,
-    forget_api_key,
-    credential_result: native_sdk.EffectCredentialResult,
-};
-
-.save_api_key => fx.setCredential(.{
-    .key = credential_fx_key,
-    .service = "com.example.notes.openai",
-    .account = "default",
-    .secret = model.pending_api_key,
-    .on_result = Effects.credentialMsg(.credential_result),
-}),
-.load_api_key => fx.getCredential(.{
-    .key = credential_fx_key,
-    .service = "com.example.notes.openai",
-    .account = "default",
-    .on_result = Effects.credentialMsg(.credential_result),
-}),
-.forget_api_key => fx.deleteCredential(.{
-    .key = credential_fx_key,
-    .service = "com.example.notes.openai",
-    .account = "default",
-    .on_result = Effects.credentialMsg(.credential_result),
-}),
-.credential_result => |result| model.applyCredentialResult(result),
-```
-
-A successful get exposes `result.secret` only during that `update` call; copy it only if the app truly needs to retain it. Results distinguish `ok`, `not_found`, `failed`, `rejected`, `recording_unsupported`, and `cancelled`. Credential reads are rejected with `recording_unsupported` before the OS credential store is touched whenever session recording is active. Set/delete remain available, but their secret bytes never enter effect-result journal records. This boundary does not redact secrets that an app independently places in ordinary input events or other recorded data.
 
 ## Audio streaming and the track cache
 
@@ -272,6 +250,8 @@ window.zero.on("app:activate", () => {
 });
 ```
 
+Use the `app.zon` app id as `service` when WebView code and a model core need to address the same entry. Core credential effects apply that namespace automatically; their key corresponds to the bridge `account` field.
+
 ## Model cores
 
 Model-driven apps request notifications as effects. Delivery is fire-and-forget because OS focus modes and user settings remain authoritative after the host accepts the request; fake-executor tests and session replay do not display notifications.
@@ -298,5 +278,54 @@ case "build_finished":
 ```
 
 Apps using the lower-level runtime can call the same platform seam directly with `try runtime.showNotification(options)`.
+
+### Credentials
+
+Credentials are app-scoped effects, not Model data. Declare both gates; `native check` reports NS1071 for a missing capability and NS1072 for a missing permission when a TypeScript core uses `Cmd.credentials.*`. NS1073 reserves the underlying `core.credentials.*` request names for these typed factories:
+
+```zig:app.zon
+.capabilities = .{ "credentials" },
+.permissions = .{ "credentials" },
+```
+
+The manifest app id is the OS keychain service namespace and is bounded at 128 bytes, so authored code supplies only a key. Keys are NUL-free UTF-8 through 256 bytes and secrets are bounded at 2,560 bytes, the largest binary value every first-party OS backend can store whole. A get miss routes the error arm with `miss`; the other closed outcomes are `denied`, `locked`, `io_failed`, `over_bound`, and `rejected`. Set and delete route empty bytes on success, and delete is idempotent.
+
+```ts
+case "save_token":
+  return [model, Cmd.credentials.set("api-token", msg.token, {
+    key: "save-token",
+    ok: "token_saved",
+    err: "credential_failed",
+  })];
+case "load_token":
+  return [model, Cmd.credentials.get("api-token", {
+    key: "load-token",
+    ok: "token_loaded",
+    err: "credential_failed",
+  })];
+case "token_loaded":
+  // Consume msg.token immediately to construct the next effect. Do not
+  // copy it into Model, where persistence and state fingerprints can see it.
+  return [model, Cmd.fetch({
+    url: asciiBytes("https://api.example.com/me"),
+    headers: { authorization: msg.token },
+  }, { ok: "profile_loaded", err: "profile_failed" })];
+```
+
+```zig
+.save_token => |token| fx.credentialsSet(.{
+    .key = 41,
+    .credential_key = "api-token",
+    .secret = token,
+    .on_result = Effects.credentialsMsg(.credential_result),
+}),
+.load_token => fx.credentialsGet(.{
+    .key = 42,
+    .credential_key = "api-token",
+    .on_result = Effects.credentialsMsg(.credential_result),
+}),
+```
+
+Credential results still cross the effect boundary, but recording never writes secret bytes to the journal or blob store. A successful recorded get keeps only its length, a per-session salt, and a placeholder digest that is deliberately independent of the secret (so the artifact is not a password-guessing oracle). Replay supplies deterministic placeholder bytes of the same length and never opens the live keychain. Consequently, replay is suitable for control-flow verification but cannot perform a new authenticated exchange with the original token. The core devhost also stores credentials only in process memory and prints `<redacted, N bytes>`.
 
 See also: [Builtin Commands](/docs/bridge/builtin-commands) and [Security](/docs/security).

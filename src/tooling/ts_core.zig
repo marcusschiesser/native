@@ -14,7 +14,10 @@
 //! imports are real files; the resolver hook maps only the SDK names).
 
 const std = @import("std");
+const app_dirs = @import("app_dirs");
 const buildgraph = @import("buildgraph.zig");
+const debug = @import("debug");
+const package_tool = @import("package.zig");
 const process_tree = @import("process_tree.zig");
 
 pub const Error = error{
@@ -409,6 +412,66 @@ pub const PersistRoutes = struct {
     err: []const u8,
 };
 
+/// Run the real-SQLite schema/query lane used by the build and return the
+/// generated SDK core path that exposes this app's Cmd.q/Sub.q surface.
+/// Generated outputs live under ignored .native/cache. The append-only
+/// migration authority lives beside the authored migrations so it is visible
+/// to version control and survives a clean checkout.
+pub fn generateSqliteSurface(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    base_env: *std.process.Environ.Map,
+    framework_root: []const u8,
+    install_editor_surface: bool,
+) ![]u8 {
+    const sqlite_cli = try transpilerPath(allocator, io, framework_root, "src/sqlite_cli.ts");
+    defer allocator.free(sqlite_cli);
+    const runner = try tsRunnerPath(allocator, io, framework_root);
+    defer allocator.free(runner);
+    const sdk_in = try transpilerPath(allocator, io, framework_root, "sdk/core.ts");
+    defer allocator.free(sdk_in);
+    const static_in = try transpilerPath(allocator, io, framework_root, "compile-surface/core.ts");
+    defer allocator.free(static_in);
+    try std.Io.Dir.cwd().createDirPath(io, ".native/cache/sqlite");
+    const sdk_out = try allocator.dupe(u8, ".native/cache/sqlite/core.ts");
+    errdefer allocator.free(sdk_out);
+    var child = std.process.spawn(io, .{
+        .argv = &.{
+            "node",                               runner,                                sqlite_cli,
+            "--src",                              "src",                                 "--sdk-in",
+            sdk_in,                               "--static-in",                         static_in,
+            "--sdk-out",                          sdk_out,                               "--dts-out",
+            ".native/cache/sqlite/core.d.ts",     "--static-out",                        ".native/cache/sqlite/core_static.ts",
+            "--zig-out",                          ".native/cache/sqlite/migrations.zig", "--metadata-out",
+            ".native/cache/sqlite/metadata.json", "--state",                             "src/schema/migrations.lock.json",
+        },
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .environ_map = base_env,
+    }) catch return nodeMissing();
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| if (code == 0) {
+            if (install_editor_surface) {
+                materializeSqliteEditorSurface(allocator, io, ".", sdk_out) catch {};
+            }
+            const absolute = try std.Io.Dir.cwd().realPathFileAlloc(io, ".native/cache/sqlite/core.d.ts", allocator);
+            allocator.free(sdk_out);
+            return absolute;
+        },
+        else => {},
+    }
+    std.debug.print("native check: the relational schema or declared queries failed (diagnostics above)\n", .{});
+    return error.SqliteCheckFailed;
+}
+
+pub const ServicePackage = struct {
+    name: []const u8,
+    version: []const u8,
+    content_hash: []const u8,
+};
+
 /// Run the TypeScript frontend in check-only mode on src/core.ts — and,
 /// through it, the core's whole import graph under src/ — and surface its NS
 /// diagnostics verbatim. Manifest-owned routes ride into the same typed Msg
@@ -419,8 +482,11 @@ pub fn checkCore(
     base_env: *std.process.Environ.Map,
     framework_root: []const u8,
     capabilities: []const []const u8,
+    permissions: []const []const u8,
+    service_packages: []const ServicePackage,
     persist_version: ?u64,
     persist_routes: ?PersistRoutes,
+    sdk_core_path: ?[]const u8,
 ) !void {
     const cli_path = try transpilerPath(allocator, io, framework_root, "src/cli.ts");
     defer allocator.free(cli_path);
@@ -434,6 +500,22 @@ pub fn checkCore(
     defer if (persist_version_arg) |value| allocator.free(value);
     try argv.appendSlice(allocator, &.{ "node", runner_path, cli_path, "src/core.ts" });
     for (capabilities) |capability| try argv.appendSlice(allocator, &.{ "--capability", capability });
+    for (permissions) |permission| try argv.appendSlice(allocator, &.{ "--permission", permission });
+    var service_package_args: std.ArrayList([]u8) = .empty;
+    defer {
+        for (service_package_args.items) |value| allocator.free(value);
+        service_package_args.deinit(allocator);
+    }
+    for (service_packages) |package_entry| {
+        const spelling = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ package_entry.name, package_entry.version, package_entry.content_hash });
+        try service_package_args.append(allocator, spelling);
+        try argv.appendSlice(allocator, &.{ "--service-package", spelling });
+    }
+    if (try package_tool.projectHasTypeScriptServices(allocator, io, ".")) {
+        try argv.appendSlice(allocator, &.{ "--services-editor-client", "node_modules/@native-sdk/services/index.ts" });
+    } else {
+        std.Io.Dir.cwd().deleteTree(io, "node_modules/@native-sdk/services") catch {};
+    }
     if (persist_version) |version| {
         persist_version_arg = try std.fmt.allocPrint(allocator, "{d}", .{version});
         try argv.appendSlice(allocator, &.{
@@ -453,6 +535,7 @@ pub fn checkCore(
             routes.err,
         });
     }
+    if (sdk_core_path) |sdk_core| try argv.appendSlice(allocator, &.{ "--sdk-core", sdk_core });
     var child = std.process.spawn(io, .{
         .argv = argv.items,
         .stdin = .ignore,
@@ -477,11 +560,15 @@ pub fn checkCore(
 /// build verdict come from ONE compiler. Analyzer type errors fail the
 /// check with the compiler's own diagnostics; a toolchain that cannot
 /// reach a verdict defers to the build rather than wedging check.
-pub fn compilerTypecheckCore(allocator: std.mem.Allocator, io: std.Io, base_env: *std.process.Environ.Map, framework_root: []const u8) !void {
+pub fn compilerTypecheckCore(allocator: std.mem.Allocator, io: std.Io, base_env: *std.process.Environ.Map, framework_root: []const u8, sdk_core_path: ?[]const u8) !void {
     const script_path = try transpilerPath(allocator, io, framework_root, "scripts/compiler_typecheck.mjs");
     defer allocator.free(script_path);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{ "node", script_path, "src/core.ts" });
+    if (sdk_core_path) |sdk_core| try argv.appendSlice(allocator, &.{ "--sdk-core", sdk_core });
     var child = std.process.spawn(io, .{
-        .argv = &.{ "node", script_path, "src/core.ts" },
+        .argv = argv.items,
         .stdin = .ignore,
         .stdout = .inherit,
         .stderr = .inherit,
@@ -502,12 +589,22 @@ pub fn compilerTypecheckCore(allocator: std.mem.Allocator, io: std.Io, base_env:
 
 pub const DevHostOptions = struct {
     base_env: *std.process.Environ.Map,
+    app_id: []const u8,
+    app_name: []const u8 = "app",
+    canvas_label: []const u8 = "canvas",
+    window_width: f32 = 800,
+    window_height: f32 = 600,
+    /// app.zon capabilities installed by the shipping host. The virtual host
+    /// receives the same set so capability-shed effects reject identically.
+    capabilities: []const []const u8 = &.{},
+    permissions: []const []const u8 = &.{},
     /// NDJSON message script; null = interactive stdin.
     script: ?[]const u8 = null,
     /// Re-run the harness whenever any module of the core changes.
     /// Requires a script (a re-run replays it against the edited core).
     watch: bool = false,
     persist_routes: ?PersistRoutes = null,
+    service_packages: []const ServicePackage = &.{},
 };
 
 /// `native dev --core`: the node dev-harness over src/core.ts — the
@@ -522,9 +619,41 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     defer allocator.free(devhost_path);
     const runner_path = try tsRunnerPath(allocator, io, framework_root);
     defer allocator.free(runner_path);
+    const app_root = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(app_root);
+    const core_path = try std.fs.path.join(allocator, &.{ app_root, "src/core.ts" });
+    defer allocator.free(core_path);
+    var script_path: ?[]u8 = null;
+    defer if (script_path) |value| allocator.free(value);
+    if (options.script) |script| {
+        script_path = if (std.fs.path.isAbsolute(script))
+            try allocator.dupe(u8, script)
+        else
+            try std.fs.path.join(allocator, &.{ app_root, script });
+    }
+    var app_data_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const app_data_dir = app_dirs.resolveOne(
+        .{ .name = options.app_id },
+        app_dirs.currentPlatform(),
+        debug.envFromMap(options.base_env),
+        .data,
+        &app_data_buffer,
+    ) catch "";
+    if (app_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(io, app_data_dir) catch {};
     // The harness runs the frontend tier under node, so it needs the
     // TypeScript toolchain to resolve exactly like check/build do.
     try ensureResolvedTranspiler(allocator, io, framework_root);
+
+    var sqlite_declarations: ?[]u8 = null;
+    defer if (sqlite_declarations) |path_value| allocator.free(path_value);
+    var sqlite_source: ?[]u8 = null;
+    defer if (sqlite_source) |path_value| allocator.free(path_value);
+    for (options.capabilities) |capability| {
+        if (!std.mem.eql(u8, capability, "sqlite")) continue;
+        sqlite_declarations = try generateSqliteSurface(allocator, io, options.base_env, framework_root, true);
+        sqlite_source = try std.Io.Dir.cwd().realPathFileAlloc(io, ".native/cache/sqlite/core.ts", allocator);
+        break;
+    }
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -538,9 +667,37 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
     }
     try argv.append(allocator, runner_path);
     try argv.append(allocator, devhost_path);
-    try argv.append(allocator, "src/core.ts");
-    if (options.script) |script| {
+    try argv.append(allocator, core_path);
+    const window_width_arg = try std.fmt.allocPrint(allocator, "{d}", .{options.window_width});
+    defer allocator.free(window_width_arg);
+    const window_height_arg = try std.fmt.allocPrint(allocator, "{d}", .{options.window_height});
+    defer allocator.free(window_height_arg);
+    try argv.appendSlice(allocator, &.{
+        "--app-name",
+        options.app_name,
+        "--app-id",
+        options.app_id,
+        "--canvas-label",
+        options.canvas_label,
+        "--window-width",
+        window_width_arg,
+        "--window-height",
+        window_height_arg,
+    });
+    if (script_path) |script| {
         try argv.appendSlice(allocator, &.{ "--script", script });
+    }
+    if (app_data_dir.len > 0) {
+        try argv.appendSlice(allocator, &.{ "--service-cwd", app_data_dir });
+    }
+    for (options.capabilities) |capability| {
+        try argv.appendSlice(allocator, &.{ "--capability", capability });
+    }
+    for (options.permissions) |permission| {
+        try argv.appendSlice(allocator, &.{ "--permission", permission });
+    }
+    if (sqlite_source) |sdk_core| {
+        try argv.appendSlice(allocator, &.{ "--sdk-core", sdk_core, "--sqlite-src", "src" });
     }
     if (options.persist_routes) |routes| {
         try argv.appendSlice(allocator, &.{
@@ -551,6 +708,16 @@ pub fn runDevHost(allocator: std.mem.Allocator, io: std.Io, framework_root: []co
             "--persist-err",
             routes.err,
         });
+    }
+    var service_package_args: std.ArrayList([]u8) = .empty;
+    defer {
+        for (service_package_args.items) |value| allocator.free(value);
+        service_package_args.deinit(allocator);
+    }
+    for (options.service_packages) |package_entry| {
+        const spelling = try std.fmt.allocPrint(allocator, "{s}|{s}|{s}", .{ package_entry.name, package_entry.version, package_entry.content_hash });
+        try service_package_args.append(allocator, spelling);
+        try argv.appendSlice(allocator, &.{ "--service-package", spelling });
     }
 
     std.debug.print("native dev --core: the core-logic loop under node (update/effects, virtual clock) - not a renderer; `native dev` runs the app\n", .{});
@@ -599,6 +766,7 @@ pub const editor_package_dir = "node_modules/@native-sdk/core";
 /// packages/core/test/package_manifest.test.ts pins the manifest to this
 /// shape, so copy and tarball cannot drift apart.
 const editor_package_files = [_][]const u8{ "package.json", "sdk/core.ts", "sdk/text.ts", "sdk/events.ts", "sdk/bytes_text_methods.d.ts" };
+const sqlite_editor_overlay_marker = ".native/cache/sqlite/editor-overlay";
 
 /// Extract the top-level "version" of a package.json. A targeted scan, not
 /// a JSON parse: both inputs are our own manifest and npm's byte-identical
@@ -636,6 +804,8 @@ pub const EditorPackageStatus = struct {
     /// The app copy's version, or null when the copy is missing or
     /// incomplete (owned when present).
     installed: ?[]const u8,
+    /// The package's core.ts is the current app-specific relational overlay.
+    sqlite_overlay: bool,
 
     pub fn fresh(self: EditorPackageStatus) bool {
         const installed = self.installed orelse return false;
@@ -650,10 +820,13 @@ pub const EditorPackageStatus = struct {
 
 /// Compare `<app_root>/node_modules/@native-sdk/core` against the SDK's
 /// bundled package. Cheap by design (the refresh trigger runs on every
-/// check/dev/build): two one-field manifest reads plus two stats.
+/// check/dev/build): small manifest/source reads plus file stats.
 pub fn editorPackageStatus(allocator: std.mem.Allocator, io: std.Io, framework_root: []const u8, app_root: []const u8) !EditorPackageStatus {
     const bundled = try bundledSdkVersion(allocator, io, framework_root);
     errdefer allocator.free(bundled);
+    const overlay_path = try std.fs.path.join(allocator, &.{ app_root, sqlite_editor_overlay_marker });
+    defer allocator.free(overlay_path);
+    const sqlite_overlay = buildgraph.fileExists(io, overlay_path);
 
     const installed: ?[]const u8 = read: {
         const manifest_path = try std.fs.path.join(allocator, &.{ app_root, editor_package_dir, "package.json" });
@@ -670,10 +843,10 @@ pub fn editorPackageStatus(allocator: std.mem.Allocator, io: std.Io, framework_r
         }
         break :read try allocator.dupe(u8, version);
     };
-    return .{ .bundled = bundled, .installed = installed };
+    return .{ .bundled = bundled, .installed = installed, .sqlite_overlay = sqlite_overlay };
 }
 
-pub const EnsureOutcome = enum { fresh, materialized };
+pub const EnsureOutcome = enum { fresh, materialized, restored_overlay };
 
 /// Make `<app_root>/node_modules/@native-sdk/core` a current copy of the
 /// SDK's bundled package: leave a version-matching copy alone (that is the
@@ -683,7 +856,10 @@ pub const EnsureOutcome = enum { fresh, materialized };
 pub fn ensureEditorPackage(allocator: std.mem.Allocator, io: std.Io, framework_root: []const u8, app_root: []const u8) !EnsureOutcome {
     const status = try editorPackageStatus(allocator, io, framework_root, app_root);
     defer status.deinit(allocator);
-    if (status.fresh()) return .fresh;
+    // Restore an app-specific overlay before deciding whether sqlite still
+    // applies. A sqlite verb regenerates it immediately; a non-sqlite verb
+    // leaves the ordinary package behind.
+    if (status.fresh() and !status.sqlite_overlay) return .fresh;
 
     for (editor_package_files) |sub_path| {
         const source_path = try std.fs.path.join(allocator, &.{ framework_root, "packages", "core", sub_path });
@@ -698,7 +874,30 @@ pub fn ensureEditorPackage(allocator: std.mem.Allocator, io: std.Io, framework_r
         }
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dest_path, .data = data });
     }
-    return .materialized;
+    const overlay_path = try std.fs.path.join(allocator, &.{ app_root, sqlite_editor_overlay_marker });
+    defer allocator.free(overlay_path);
+    std.Io.Dir.cwd().deleteFile(io, overlay_path) catch {};
+    return if (status.sqlite_overlay) .restored_overlay else .materialized;
+}
+
+/// Install the app-specific generated relational SDK where stock editor
+/// TypeScript resolves @native-sdk/core. Build truth continues to use the
+/// ignored cache output; this copy is only the editor overlay.
+pub fn materializeSqliteEditorSurface(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    app_root: []const u8,
+    generated_core_path: []const u8,
+) !void {
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, generated_core_path, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(source);
+    const overlay_path = try std.fs.path.join(allocator, &.{ app_root, sqlite_editor_overlay_marker });
+    defer allocator.free(overlay_path);
+    if (std.fs.path.dirname(overlay_path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = overlay_path, .data = "generated relational editor surface\n" });
+    const destination = try std.fs.path.join(allocator, &.{ app_root, editor_package_dir, "sdk/core.ts" });
+    defer allocator.free(destination);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = destination, .data = source });
 }
 
 /// The self-heal hook `native check|dev|build|test` run over a TS app (cwd
@@ -800,6 +999,25 @@ test "editor package: materialize, heal, and the npm-install handoff" {
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/text.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/events.ts"));
     try std.testing.expect(buildgraph.fileExists(io, app ++ "/node_modules/@native-sdk/core/sdk/bytes_text_methods.d.ts"));
+
+    // A generated relational surface overlays the editor-resolved core and
+    // deliberately makes the package stale. The next verb restores the base
+    // first, so removing sqlite from app.zon cannot leave q<Name> APIs behind.
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/generated-core.ts", .data = "// app-specific qNotes surface" });
+    try materializeSqliteEditorSurface(allocator, io, app, root ++ "/generated-core.ts");
+    const generated = try cwd.readFileAlloc(io, app ++ "/node_modules/@native-sdk/core/sdk/core.ts", allocator, .limited(1024));
+    defer allocator.free(generated);
+    try std.testing.expectEqualStrings("// app-specific qNotes surface", generated);
+    {
+        const overlaid = try editorPackageStatus(allocator, io, sdk, app);
+        defer overlaid.deinit(allocator);
+        try std.testing.expect(overlaid.fresh());
+        try std.testing.expect(overlaid.sqlite_overlay);
+    }
+    try std.testing.expectEqual(EnsureOutcome.restored_overlay, try ensureEditorPackage(allocator, io, sdk, app));
+    const restored = try cwd.readFileAlloc(io, app ++ "/node_modules/@native-sdk/core/sdk/core.ts", allocator, .limited(1024));
+    defer allocator.free(restored);
+    try std.testing.expectEqualStrings("// core module", restored);
 
     // Current copy: untouched (this is also the post-publish handoff — a
     // real `npm install` writes identical content at the same version, so

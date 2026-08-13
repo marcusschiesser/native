@@ -228,17 +228,6 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
-                // Credential journals are metadata-only by construction.
-                // A successful get is impossible while recording, and no
-                // operation ever writes secret bytes to payload. Refuse a
-                // hand-edited record instead of normalizing it silently.
-                if (effect.kind == .credential and credentialRecordDamaged(effect)) {
-                    std.debug.print(
-                        "replay refused after event {d}: credential record for key {d} claims .{s}/.{s} with {d} payload bytes - credential journals are metadata-only and recorded gets can never succeed, so the journal is damaged or hand-edited; re-record the session\n",
-                        .{ report.events_replayed, effect.key, @tagName(effect.credential_op), @tagName(effect.credential_outcome), effect.payload.len },
-                    );
-                    return error.ReplayDamagedRecord;
-                }
                 // Provenance consistency, gated BEFORE the regeneration
                 // skip below: a `.data` or `.closed` channel record
                 // stamped with `.rejected` provenance would be skipped
@@ -336,6 +325,20 @@ pub fn replaySession(
                     );
                     return error.ReplayDamagedRecord;
                 }
+                if (effect.kind == .db and dbRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: relational record for key {d} has a kind, outcome, payload, blob, or provenance shape the recorder never writes - the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
+                if (effect.kind == .credentials and credentialsRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: credential record for key {d} has a payload or redaction shape the recorder never writes - the journal is damaged or hand-edited; re-record the session\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 if (effectRegeneratesUnderReplay(effect)) {
                     report.effects_skipped += 1;
                     continue;
@@ -374,6 +377,16 @@ pub fn replaySession(
                         std.debug.print(
                             "replay refused after event {d}: model restore references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
                             .{ report.events_replayed, session_blobs.hexName(effect.persist_blob_hash), effect.persist_blob_len, @errorName(err) },
+                        );
+                        return error.ReplayMissingBlob;
+                    };
+                    effect.payload = bytes;
+                }
+                if (effect.kind == .db and effect.db_blob_len > 0) {
+                    const bytes = resolveBlob(effect.db_blob_hash, effect.db_blob_len, runtime_effects.max_effect_db_page_bytes, options.blobs, &blob_scratch) catch |err| {
+                        std.debug.print(
+                            "replay refused after event {d}: relational page for key {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
+                            .{ report.events_replayed, effect.key, session_blobs.hexName(effect.db_blob_hash), effect.db_blob_len, @errorName(err) },
                         );
                         return error.ReplayMissingBlob;
                     };
@@ -560,6 +573,36 @@ fn persistRecordDamaged(record: journal.EffectResultRecord) bool {
     return record.persist_outcome != .ok and record.persist_blob_len > 0;
 }
 
+fn dbRecordDamaged(record: journal.EffectResultRecord) bool {
+    const kind = runtime_effects.dbKindFromJournalCode(record.code) orelse return true;
+    const outcome = runtime_effects.dbOutcomeFromJournalCode(record.code) orelse return true;
+    if (record.code != runtime_effects.dbJournalCode(kind, outcome)) return true;
+    // `.rejected` provenance identifies an admission refusal that replay
+    // regenerates. An executor may also return the closed `.rejected`
+    // outcome (for example when a result crosses its total bound); that
+    // terminal is external truth and correctly keeps `.exited` provenance.
+    if (record.exit_reason != .exited and record.exit_reason != .rejected) return true;
+    if (record.exit_reason == .rejected and outcome != .rejected) return true;
+    if (record.db_blob_len > runtime_effects.max_effect_db_page_bytes) return true;
+    return switch (kind) {
+        .page => outcome != .ok or
+            (record.payload.len == 0) == (record.db_blob_len == 0) or
+            record.payload.len > runtime_effects.max_effect_db_page_bytes,
+        .done, .exec => record.payload.len > 0 or record.db_blob_len > 0,
+    };
+}
+
+fn credentialsRecordDamaged(record: journal.EffectResultRecord) bool {
+    if (record.payload.len != 0 or record.exit_reason != .exited) return true;
+    const redacted_get = record.credentials_operation == .get and record.credentials_outcome == .ok;
+    if (redacted_get) return record.credentials_secret_len > runtime_effects.max_effect_credentials_secret_bytes or
+        std.mem.allEqual(u8, &record.credentials_salt, 0) or
+        std.mem.allEqual(u8, &record.credentials_digest, 0);
+    if (record.credentials_secret_len != 0) return true;
+    return !std.mem.allEqual(u8, &record.credentials_salt, 0) or
+        !std.mem.allEqual(u8, &record.credentials_digest, 0);
+}
+
 /// Recorder truth for pty provenance: output records always carry
 /// `.exited` (the live drain never touches the exit reason on an
 /// output); every reason is legal on an `.exit` record (`.rejected` =
@@ -578,24 +621,6 @@ fn ptyRecordProvenanceDamaged(record: journal.EffectResultRecord) bool {
 fn channelRecordDamaged(record: journal.EffectResultRecord) bool {
     if (record.payload.len > runtime_effects.max_effect_channel_bytes) return true;
     return record.channel_kind != .data and record.payload.len > 0;
-}
-
-fn credentialRecordDamaged(record: journal.EffectResultRecord) bool {
-    if (record.payload.len != 0) return true;
-    return switch (record.credential_op) {
-        .set => switch (record.credential_outcome) {
-            .ok, .failed, .cancelled => false,
-            else => true,
-        },
-        .get => switch (record.credential_outcome) {
-            .recording_unsupported, .cancelled => false,
-            else => true,
-        },
-        .delete => switch (record.credential_outcome) {
-            .ok, .not_found, .failed, .cancelled => false,
-            else => true,
-        },
-    };
 }
 
 /// Whether a channel record's provenance stamp contradicts its event
@@ -716,9 +741,6 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         .response => record.fetch_outcome == .rejected,
         .file => record.file_outcome == .rejected,
         .clipboard => record.clipboard_outcome == .rejected,
-        // Admission rejections never journal. Every credential record
-        // that passes the shape gate above is executor truth and feeds.
-        .credential => false,
         // Audio rejections are loop-side validation (path bounds) that
         // refuses again; everything else — loaded acknowledgments,
         // position ticks, completions, platform failures — is an
@@ -737,6 +759,8 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // Host-request rejections mark themselves with the exit reason
         // (the `.host` record encoding); host answers must be fed.
         .host => record.exit_reason == .rejected,
+        .db => record.exit_reason == .rejected,
+        .credentials => false,
         // Image `.rejected` terminals journal from BOTH sides of the
         // executor seam, so the outcome alone is not provenance: only
         // loop-side validation refusals — which the replayed
@@ -857,25 +881,29 @@ test "audio records outside the exact-integer scalar window are damaged" {
     try std.testing.expect(audioScalarsDamaged(record));
 }
 
-test "credential replay accepts only metadata shapes the recorder can produce" {
+test "relational rejection provenance distinguishes admission from executor truth" {
     var record: journal.EffectResultRecord = .{
-        .kind = .credential,
+        .kind = .db,
         .key = 1,
-        .credential_op = .get,
-        .credential_outcome = .recording_unsupported,
+        .code = runtime_effects.dbJournalCode(.done, .rejected),
+        .exit_reason = .exited,
     };
-    try std.testing.expect(!credentialRecordDamaged(record));
-    record.payload = "secret";
-    try std.testing.expect(credentialRecordDamaged(record));
-    record.payload = "";
-    record.credential_outcome = .ok;
-    try std.testing.expect(credentialRecordDamaged(record));
 
-    record.credential_op = .set;
-    record.credential_outcome = .ok;
-    try std.testing.expect(!credentialRecordDamaged(record));
-    record.credential_outcome = .not_found;
-    try std.testing.expect(credentialRecordDamaged(record));
+    // A bounded executor result is a real terminal which replay must feed.
+    try std.testing.expect(!dbRecordDamaged(record));
+
+    // A deterministic admission refusal regenerates instead and uses the
+    // same outcome with explicit rejected provenance.
+    record.exit_reason = .rejected;
+    try std.testing.expect(!dbRecordDamaged(record));
+
+    // Rejected provenance cannot decorate a successful result, and DB
+    // records never carry process-only exit reasons.
+    record.code = runtime_effects.dbJournalCode(.done, .ok);
+    try std.testing.expect(dbRecordDamaged(record));
+    record.code = runtime_effects.dbJournalCode(.done, .rejected);
+    record.exit_reason = .cancelled;
+    try std.testing.expect(dbRecordDamaged(record));
 }
 
 /// Debug aid: `NATIVE_SDK_SESSION_REPLAY_DUMP=<dir>` writes each

@@ -19,6 +19,146 @@ test("clean core passes the checker", () => {
   assert.deepEqual(ruleIds(checkOnly(core)), []);
 });
 
+test("NS1069 keeps every Cmd.store factory in capability lockstep", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { bytes: asciiBytes("v") }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.store.set("doc/1", model.bytes, { key: "put", ok: "wrote", err: "failed" }),
+      Cmd.store.get("doc/1", { key: "get", ok: "loaded", err: "failed" }),
+      Cmd.store.delete("doc/1", { key: "del", ok: "wrote", err: "failed" }),
+      Cmd.store.scan("doc/", { limit: 10 }, { key: "scan", ok: "loaded", err: "failed" }),
+      Cmd.store.setMany([["doc/2", model.bytes]], { key: "many", ok: "wrote", err: "failed" }),
+    ])];
+    case "wrote":
+    case "loaded":
+    case "failed": return model;
+  }
+}
+`;
+  const enabled = check(source, { capabilities: ["store"] });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1069"), false);
+
+  const missing = check(source);
+  assert.equal(missing.warnings.filter((d) => d.id === "NS1069").length, 5);
+  const unused = check(core, { capabilities: ["store"] });
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1069").length, 1);
+});
+
+test("NS1070 keeps every Cmd.db factory in capability lockstep", () => {
+  const source = `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly count: number; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "page"; readonly bytes: Uint8Array }
+  | { readonly kind: "done" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.db.query("SELECT ?", [1], { key: "q", page: "page", done: "done", err: "failed" }),
+      Cmd.db.exec([["CREATE TABLE note(id INTEGER)", []]], { key: "x", ok: "wrote", err: "failed" }),
+    ])];
+    case "page":
+    case "done":
+    case "wrote":
+    case "failed": return model;
+  }
+}
+`;
+  const enabled = check(source, { capabilities: ["sqlite"] });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1070"), false);
+
+  const missing = check(source);
+  assert.equal(missing.warnings.filter((d) => d.id === "NS1070").length, 2);
+  const unused = check(core, { capabilities: ["sqlite"] });
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1070").length, 1);
+
+  const quit = check(`
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly done: boolean; }
+export type Msg = { readonly kind: "quit" };
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) { case "quit": return [model, Cmd.quitApp()]; }
+}
+`);
+  assert.equal(quit.warnings.some((d) => d.id === "NS1070"), false);
+});
+
+test("NS1071/NS1072 keep core credentials behind capability and permission", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly token: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly token: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { token: asciiBytes("secret") }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.credentials.set("api-token", model.token, { key: "set", ok: "wrote", err: "failed" }),
+      Cmd.credentials.get("api-token", { key: "get", ok: "loaded", err: "failed" }),
+      Cmd.credentials.delete("api-token", { key: "delete", ok: "wrote", err: "failed" }),
+    ])];
+    case "wrote":
+    case "loaded":
+    case "failed": return model;
+  }
+}
+`;
+  const enabled = check(source, { capabilities: ["credentials"], permissions: ["credentials"] });
+  assert.equal(enabled.ok, true, JSON.stringify(enabled));
+  assert.equal(enabled.warnings.some((d) => d.id === "NS1071"), false);
+
+  const missingPermission = check(source, { capabilities: ["credentials"] });
+  assert.equal(missingPermission.ok, false);
+  assert.equal(missingPermission.diagnostics.filter((d) => d.id === "NS1072").length, 3);
+
+  const missingCapability = check(source, { permissions: ["credentials"] });
+  assert.equal(missingCapability.ok, true);
+  assert.equal(missingCapability.warnings.filter((d) => d.id === "NS1071").length, 3);
+
+  const unused = check(core, { capabilities: ["credentials"], permissions: ["credentials"] });
+  assert.equal(unused.warnings.filter((d) => d.id === "NS1071").length, 1);
+});
+
+test("NS1073 reserves the core credential request namespace for typed factories", () => {
+  const result = check(`
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { bytes: new Uint8Array(0) }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.request("core.credentials.get", model.bytes, { ok: "loaded", err: "failed" })];
+    case "loaded":
+    case "failed": return model;
+  }
+}
+`, { capabilities: ["credentials"], permissions: ["credentials"] });
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics.filter((d) => d.id === "NS1073").length, 1);
+  assert.equal(result.warnings.some((d) => d.id === "NS1071"), false);
+});
+
 test("NS1033 validates app.zon persistence restore routes against Msg", () => {
   const source = `
 import { Cmd } from "@native-sdk/core";

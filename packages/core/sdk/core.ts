@@ -34,7 +34,8 @@
 //   Cmd.cancel(key)              drop the in-flight keyed effect — request,
 //                                readFile/writeFile/fetch/clipboardRead, or
 //                                delay — SILENTLY (no terminal arm dispatch).
-//                                Aimed at a live spawn or streaming fetch it
+//                                Aimed at a live spawn, streaming fetch, or
+//                                streaming service it
 //                                stays LOUD: the err arm runs with
 //                                "cancelled" — ending a stream is observable
 //   Cmd.batch([a, b, ...])       several commands from one dispatch
@@ -79,9 +80,9 @@
 //                                browser; denied/invalid URLs fail closed
 //   Cmd.revealPath(path)          reveal a path in the system file manager;
 //                                invalid/unavailable requests fail closed
-//   Cmd.credentialSet(service, account, secret, route)
-//   Cmd.credentialGet(service, account, route)
-//   Cmd.credentialDelete(service, account, route)
+//   Cmd.credentials.set(key, secret, route)
+//   Cmd.credentials.get(key, route)
+//   Cmd.credentials.delete(key, route)
 //                                routed access to Keychain / Secret Service /
 //                                Credential Manager
 //   Cmd.formatLocalTime(ms, style, route)
@@ -365,6 +366,14 @@ export function utf8Bytes(s: string): Uint8Array {
 /// Every app Msg is a discriminated union on a string `kind` tag.
 export type Msgish = { readonly kind: string };
 
+/** Cooperative cancellation capability supplied by generated service hosts. */
+export interface ServiceCancellation {
+  /** True after Cmd.cancel or the operation deadline requests cancellation. */
+  readonly cancelled: () => boolean;
+  /** Throw a boundary-tagged cancellation error when cancellation was requested. */
+  readonly throwIfCancelled: () => void;
+}
+
 /// The Msg arms `Cmd.now` may target: arms whose payload is exactly one
 /// number-typed field (the runtime dispatches the arm with the timestamp in
 /// that field). Anything else is unrepresentable — the runtime has only a
@@ -391,6 +400,38 @@ export type BytesKind<M extends Msgish> = M extends Msgish
         : never;
     }[Exclude<keyof M, "kind">]
   : never;
+
+/// The Msg arms a generated typed service client may target: exactly one
+/// payload field whose type is the operation's declared result shape.
+export type ServiceKind<M extends Msgish, P> = M extends Msgish
+  ? {
+      [K in Exclude<keyof M, "kind">]-?: M[K] extends P
+        ? P extends M[K]
+          ? [Exclude<keyof M, "kind">] extends [K]
+            ? M["kind"]
+            : never
+          : never
+        : never;
+    }[Exclude<keyof M, "kind">]
+  : never;
+
+/// Routing for a generated typed service call. Success carries the
+/// operation's declared record/value shape; failures remain UTF-8 bytes so
+/// transport, timeout, cancellation, and service `{ kind, message }` errors
+/// share one stable error channel.
+export interface ServiceRoute<M extends Msgish, P> {
+  readonly key?: string;
+  readonly ok: ServiceKind<M, P>;
+  readonly err: BytesKind<M>;
+}
+
+/// A streaming service opens an external-source channel before issuing the
+/// request. Interim chunks arrive as canonical bytes on `event`; `ok` is the
+/// one typed terminal and `err` is the loud cancellation/timeout/error arm.
+export interface ServiceStreamRoute<M extends Msgish, P> extends ServiceRoute<M, P> {
+  readonly channelKey: number;
+  readonly event: ChannelEventKind<M>;
+}
 
 /// The Msg arms a payload-less routed result may target: arms with no
 /// payload fields at all (`Cmd.writeFile`'s ok route — a successful write
@@ -809,6 +850,62 @@ export interface WriteRoute<M extends Msgish> {
   readonly err: BytesKind<M>;
 }
 
+/// Pagination controls for `Cmd.store.scan`. `limit` defaults to 100 and is
+/// bounded at 256. `after` is the opaque key cursor returned by the previous
+/// page; omit it for the first page.
+export interface StoreScanOptions {
+  readonly limit?: number;
+  readonly after?: string | Uint8Array;
+}
+
+/// Dynamic UTF-8 SQLite TEXT. App-core text is byte-honest, so generated
+/// TEXT parameters wrap model bytes with this marker; literal strings remain
+/// accepted by the raw escape hatch.
+export interface DbText {
+  readonly __dbText: true;
+  readonly bytes: ReadonlyArray<number>;
+}
+
+export function dbText(bytes: Uint8Array): DbText {
+  const out: number[] = [];
+  for (let i = 0; i < bytes.length; i++) out.push(bytes[i]!);
+  return { __dbText: true, bytes: out };
+}
+
+/// Runtime SQL parameter values. Numbers preserve integer storage when they
+/// are finite integral values; booleans bind as SQLite INTEGER 0/1.
+export type DbValue = null | number | string | Uint8Array | boolean | DbText;
+export type DbStatement = readonly [sql: string, params: ReadonlyArray<DbValue>];
+
+/// A query dispatches every encoded row page through `page`, then exactly one
+/// payload-less `done`. Any closed DbOutcome instead dispatches `err` as its
+/// UTF-8 name (`constraint`, `busy`, `io_failed`, `corrupt`, `misuse`,
+/// `rejected`, or `cancelled`).
+export interface DbRowsRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly page: BytesKind<M>;
+  readonly done: EmptyKind<M>;
+  readonly err: BytesKind<M>;
+}
+
+/// A generated declared-query route. The row parameter is intentionally
+/// phantom on the wire: generated `decode<Name>Page` turns each bounded page
+/// into this exact row shape without reflection.
+export interface TypedRowsRoute<Row, M extends Msgish> extends DbRowsRoute<M> {
+  readonly __row?: Row;
+}
+
+/// One generated, already-validated write statement. Only generated query
+/// constructors create the brand; `Cmd.qTx` therefore cannot receive a
+/// raw SQL string by accident.
+export interface TypedDbStatement {
+  readonly sql: string;
+  readonly params: ReadonlyArray<DbValue>;
+  readonly __typedDbStatement: true;
+}
+
+// @native-sqlite-generated-types
+
 /// `Cmd.fetch` routing: the ok arm carries `{ status, body }` (one number
 /// field, one bytes field — matched by type); the err arm the reason bytes.
 export interface FetchRoute<M extends Msgish> {
@@ -971,6 +1068,19 @@ export type Cmd<M extends Msgish> =
       readonly key: string;
       readonly okKind: string;
       readonly errKind: string;
+      readonly typedService: boolean;
+      readonly payload: Uint8Array;
+    }
+  | {
+      readonly op: "service_stream_request";
+      readonly name: string;
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly typedService: true;
+      readonly channelKey: number;
+      readonly eventKind: string;
+      readonly maxPending: number;
       readonly payload: Uint8Array;
     }
   | { readonly op: "cancel"; readonly key: string }
@@ -988,6 +1098,53 @@ export type Cmd<M extends Msgish> =
       readonly errKind: string;
       readonly path: Uint8Array;
       readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "store_set";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly storeKey: string;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly op: "store_get" | "store_delete";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly storeKey: string;
+    }
+  | {
+      readonly op: "store_scan";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly prefix: string;
+      readonly limit: number;
+      readonly after: string | Uint8Array;
+    }
+  | {
+      readonly op: "store_set_many";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly entries: ReadonlyArray<readonly [string, Uint8Array]>;
+    }
+  | {
+      readonly op: "db_query";
+      readonly key: string;
+      readonly pageKind: string;
+      readonly doneKind: string;
+      readonly errKind: string;
+      readonly sql: string;
+      readonly params: ReadonlyArray<DbValue>;
+    }
+  | {
+      readonly op: "db_exec";
+      readonly key: string;
+      readonly okKind: string;
+      readonly errKind: string;
+      readonly statements: ReadonlyArray<DbStatement>;
     }
   | {
       readonly op: "fetch";
@@ -1083,7 +1240,7 @@ export type Cmd<M extends Msgish> =
     }
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
-  | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string }
+  | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
   | { readonly op: "channel_close"; readonly key: number }
   | {
       readonly op: "audio_capture_start";
@@ -1142,6 +1299,74 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
     }
   }
   return out;
+}
+
+function serviceU32(value: number): Uint8Array {
+  const out = new Uint8Array(4);
+  out[0] = value & 255;
+  out[1] = (value >>> 8) & 255;
+  out[2] = (value >>> 16) & 255;
+  out[3] = (value >>> 24) & 255;
+  return out;
+}
+
+/// Canonical service-value codec primitives. Generated clients compose these
+/// in declaration order; the service host and Zig result dispatcher consume
+/// the same format as shim_rt (LE scalars, length-prefixed bytes/slices,
+/// declaration-order enum/union tags).
+export function serviceConcat(parts: readonly Uint8Array[]): Uint8Array {
+  let length = 0;
+  for (const part of parts) length += part.length;
+  const out = new Uint8Array(length);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
+export function serviceBoolBytes(value: boolean): Uint8Array {
+  return new Uint8Array([value ? 1 : 0]);
+}
+
+export function serviceF64Bytes(value: number): Uint8Array {
+  const out = new Uint8Array(8);
+  const view = new DataView(out.buffer);
+  view.setFloat64(0, Number.isNaN(value) ? Number.NaN : value, true);
+  return out;
+}
+
+export function serviceI64Bytes(value: number): Uint8Array {
+  const out = new Uint8Array(8);
+  const view = new DataView(out.buffer);
+  const base = 4294967296;
+  let low = value % base;
+  if (low < 0) low += base;
+  const high = Math.floor(value / base);
+  view.setUint32(0, low, true);
+  view.setInt32(4, high, true);
+  return out;
+}
+
+export function serviceBytes(value: Uint8Array): Uint8Array {
+  return serviceConcat([serviceU32(value.length), value]);
+}
+
+export function serviceEnumBytes(index: number): Uint8Array {
+  return serviceU32(index);
+}
+
+export function serviceUnionBytes(index: number): Uint8Array {
+  return new Uint8Array([index]);
+}
+
+export function serviceOptionalBytes(value: Uint8Array | null): Uint8Array {
+  return value === null ? new Uint8Array([0]) : serviceConcat([new Uint8Array([1]), value]);
+}
+
+export function serviceSliceBytes(values: readonly Uint8Array[]): Uint8Array {
+  return serviceConcat([serviceU32(values.length), ...values]);
 }
 
 function lowerHostPayload(payload: Uint8Array | HostRecord): Uint8Array {
@@ -1239,13 +1464,54 @@ export const Cmd = {
       key: route.key ?? "",
       okKind: route.ok,
       errKind: route.err,
+      typedService: false,
       payload: lowerHostPayload(payload),
+    };
+  },
+
+  /// Generated typed service clients use this constructor after encoding the
+  /// request shape. It lowers to the ordinary request wire record with the
+  /// typed-result bit set so the host decodes the success payload.
+  serviceRequest<M extends Msgish, P>(
+    name: string,
+    payload: Uint8Array,
+    route: ServiceRoute<M, P>,
+  ): Cmd<M> {
+    return {
+      op: "request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      typedService: true,
+      payload,
+    };
+  },
+
+  serviceStreamRequest<M extends Msgish, P>(
+    name: string,
+    channelKey: number,
+    payload: Uint8Array,
+    route: ServiceStreamRoute<M, P>,
+    maxPending: number,
+  ): Cmd<M> {
+    return {
+      op: "service_stream_request",
+      name,
+      key: route.key ?? "",
+      okKind: route.ok,
+      errKind: route.err,
+      typedService: true,
+      channelKey,
+      eventKind: route.event,
+      maxPending,
+      payload: serviceConcat([serviceF64Bytes(channelKey), payload]),
     };
   },
 
   /// Drop the in-flight keyed effect — request, named engine op, or delay —
   /// with this key, if any, SILENTLY (neither routing arm is dispatched for
-  /// it). Live spawn and streaming-fetch operations are the exceptions:
+  /// it). Live spawn, streaming-fetch, and streaming-service operations are the exceptions:
   /// cancel ends the stream and its err arm runs with "cancelled".
   cancel(key: string): Cmd<never> {
     return { op: "cancel", key };
@@ -1264,6 +1530,103 @@ export const Cmd = {
   writeFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
     return { op: "write_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path, bytes };
   },
+
+  /// Capability-gated, engine-owned per-record storage. Keys are UTF-8 text
+  /// up to 512 bytes; values are bytes up to 1 MiB. Results remain effects:
+  /// they arrive through the supplied Msg routes after update commits.
+  store: {
+    set<M extends Msgish>(storeKey: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+      return { op: "store_set", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey, bytes };
+    },
+
+    /// The ok payload is `[1][value...]` for a hit or `[0]` for a miss, so
+    /// an empty stored value remains distinguishable from absence.
+    get<M extends Msgish>(storeKey: string, route: RequestRoute<M>): Cmd<M> {
+      return { op: "store_get", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey };
+    },
+
+    /// Deleting an absent key succeeds.
+    delete<M extends Msgish>(storeKey: string, route: WriteRoute<M>): Cmd<M> {
+      return { op: "store_delete", key: route.key ?? "", okKind: route.ok, errKind: route.err, storeKey };
+    },
+
+    /// The ok payload is a length-prefixed page of `(key,value)` pairs and
+    /// a next-key cursor. Pages end at record boundaries; data is never cut.
+    scan<M extends Msgish>(prefix: string, options: StoreScanOptions, route: RequestRoute<M>): Cmd<M> {
+      return {
+        op: "store_scan",
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        prefix,
+        limit: options.limit ?? 0,
+        after: options.after ?? "",
+      };
+    },
+
+    /// Atomically upsert all entries (at most 64 entries / 8 MiB encoded).
+    setMany<M extends Msgish>(entries: ReadonlyArray<readonly [string, Uint8Array]>, route: WriteRoute<M>): Cmd<M> {
+      return { op: "store_set_many", key: route.key ?? "", okKind: route.ok, errKind: route.err, entries };
+    },
+  },
+
+  /// App-scoped OS credential storage. The app manifest id supplies the
+  /// service namespace, so authored code chooses only a UTF-8 key. Declare
+  /// both the `credentials` capability and permission in app.zon.
+  credentials: {
+    set<M extends Msgish>(credentialKey: string, secret: Uint8Array, route: WriteRoute<M>): Cmd<M> {
+      return {
+        op: "request",
+        name: "core.credentials.set",
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        typedService: false,
+        payload: hostRecordBytes({ key: utf8Bytes(credentialKey), secret }),
+      };
+    },
+
+    /// The ok arm carries secret bytes; a miss routes err with `miss`.
+    get<M extends Msgish>(credentialKey: string, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("core.credentials.get", { key: utf8Bytes(credentialKey) }, route);
+    },
+
+    /// Deleting an absent key succeeds.
+    delete<M extends Msgish>(credentialKey: string, route: WriteRoute<M>): Cmd<M> {
+      return {
+        op: "request",
+        name: "core.credentials.delete",
+        key: route.key ?? "",
+        okKind: route.ok,
+        errKind: route.err,
+        typedService: false,
+        payload: hostRecordBytes({ key: utf8Bytes(credentialKey) }),
+      };
+    },
+  },
+
+  /// Capability-gated relational SQLite. Reads remain effects: pages and the
+  /// terminal arrive as Msg values after the issuing model has committed.
+  /// Every exec statement in one command commits atomically or all roll back.
+  db: {
+    query<M extends Msgish>(sql: string, params: ReadonlyArray<DbValue>, route: DbRowsRoute<M>): Cmd<M> {
+      return {
+        op: "db_query",
+        key: route.key ?? "",
+        pageKind: route.page,
+        doneKind: route.done,
+        errKind: route.err,
+        sql,
+        params,
+      };
+    },
+
+    exec<M extends Msgish>(statements: ReadonlyArray<DbStatement>, route: WriteRoute<M>): Cmd<M> {
+      return { op: "db_exec", key: route.key ?? "", okKind: route.ok, errKind: route.err, statements };
+    },
+  },
+
+  // @native-sqlite-generated-cmds
 
   fetch: fetchCmd,
 
@@ -1304,30 +1667,6 @@ export const Cmd = {
   /// Fire-and-forget; invalid or unavailable requests fail closed.
   revealPath(path: Uint8Array): Cmd<never> {
     return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
-  },
-
-  /// Store a secret in the platform credential store. The ok arm receives
-  /// empty bytes; the err arm receives `invalid_request`, `unsupported`, or
-  /// `failed`.
-  credentialSet<M extends Msgish>(
-    service: Uint8Array,
-    account: Uint8Array,
-    secret: Uint8Array,
-    route: RequestRoute<M>,
-  ): Cmd<M> {
-    return Cmd.request("native-sdk.credentials.set", { service, account, secret }, route);
-  },
-
-  /// Read a secret from the platform credential store. The ok arm receives
-  /// the secret bytes; a missing item routes err with `not_found`.
-  credentialGet<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M> {
-    return Cmd.request("native-sdk.credentials.get", { service, account }, route);
-  },
-
-  /// Delete a secret from the platform credential store. The ok arm receives
-  /// empty bytes; a missing item routes err with `not_found`.
-  credentialDelete<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M> {
-    return Cmd.request("native-sdk.credentials.delete", { service, account }, route);
   },
 
   /// Format an epoch timestamp (milliseconds, the same unit as `Cmd.now`) in
@@ -1621,7 +1960,7 @@ export const Cmd = {
   /// one that consults the handle's live() before launching never
   /// starts, keeping replay fully offline.
   channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M> {
-    return { op: "channel_open", key, eventKind: route.event };
+    return { op: "channel_open", key, eventKind: route.event, maxPending: 64 };
   },
 
   /// Close the open channel under `key`: posts stop landing, the
@@ -1724,6 +2063,16 @@ export const Cmd = {
 export type Sub<M extends Msgish> =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | {
+      readonly op: "db_live";
+      readonly key: string;
+      readonly pageKind: string;
+      readonly doneKind: string;
+      readonly errKind: string;
+      readonly sql: string;
+      readonly params: ReadonlyArray<DbValue>;
+      readonly tables: readonly string[];
+    }
   | { readonly op: "batch"; readonly subs: readonly Sub<M>[] };
 
 export const Sub = {
@@ -1736,6 +2085,8 @@ export const Sub = {
   timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M> {
     return { op: "timer", key, everyMs, msgKind };
   },
+
+  // @native-sqlite-generated-subs
 
   /// Several subscriptions at once.
   batch<M extends Msgish>(subs: readonly Sub<M>[]): Sub<M> {

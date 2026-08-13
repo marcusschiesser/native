@@ -712,6 +712,24 @@ File rules:
 - Writes replace the file whole; `writeFile` bytes are copied at call time so the caller's buffer is immediately reusable. Reads deliver drain-scratch bytes — copy what the model keeps.
 - In the fake executor: `pendingFileAt(0)` records `key`/`op`/`path`/`bytes` for assertions; `feedFileResult(key, .ok, "{...}")` answers a read (over-bound content is cut and rewritten to `.truncated`, mirroring the real reader), `feedFileResult(key, .ok, "")` acknowledges a write; failure outcomes pass through as fed.
 
+`fx.credentialsSet` / `fx.credentialsGet` / `fx.credentialsDelete` are the only place authentication tokens, passwords, and similar app secrets belong. Declare both `.capabilities = .{ "credentials" }` and `.permissions = .{ "credentials" }` in `app.zon`; the stable app id is the OS keychain service namespace, while the supplied key is its account. Never copy a fetched secret into Model: consume the drain-scratch `result.bytes` immediately while constructing the next effect, so persistence, state fingerprints, and diagnostics cannot capture it.
+
+```zig
+pub const Msg = union(enum) {
+    load_token,
+    token_result: native_sdk.EffectCredentialsResult,
+};
+
+.load_token => fx.credentialsGet(.{
+    .key = 41,
+    .credential_key = "api-token",        // UTF-8, 1..256 bytes
+    .on_result = Effects.credentialsMsg(.token_result),
+}),
+.token_result => |result| model.useTokenNow(result), // COPY nothing into Model
+```
+
+Credential effects have their own four worker slots and file-style replacement: reissuing a key cancels the old operation silently and starts the new one. `result.outcome` is closed: `.ok`, `.miss`, `.denied`, `.locked`, `.io_failed`, `.over_bound`, or `.rejected`; get secrets are binary-safe and bounded at 2,560 bytes (the cross-platform floor set by WinCred), and delete is idempotent. Session recording elides every secret and replay delivers same-length placeholder bytes, so replay can verify control flow but cannot authenticate with the original value. Tests stay hermetic with `TestHarness(App).createWithCredentials(...)`; they never open the developer's live keychain.
+
 `fx.writeClipboard` / `fx.readClipboard` put text on (and read it from) the system clipboard through the platform pasteboard — the same seam the runtime's cmd+C copy uses. Never spawn `pbcopy`/`pbpaste`/`xclip` for this. Same discipline: key-based (shared key space and 16 slots), exactly one terminal Msg with an explicit outcome. The pasteboard call is synchronous on the loop thread (no worker), but the result still arrives as an ordinary Msg on the next drain:
 
 ```zig
@@ -733,36 +751,6 @@ Clipboard rules:
 - `result.outcome` is explicit: `.ok` (a write is on the clipboard whole; a read's content is in `result.text` — drain scratch, copy what the model keeps), `.failed` (the platform refused: no clipboard service on the host, read content over the 64 KiB `max_effect_clipboard_bytes`, pasteboard error — a read never arrives cut), `.rejected` (never ran: slots busy, duplicate key, write text over the bound), `.cancelled`.
 - Writes are text/plain and replace the clipboard whole; rich-data clipboard stays on the runtime API (`runtime.writeClipboardData`).
 - In the fake executor: `pendingClipboardAt(0)` records `key`/`op`/`text` for assertions; `feedClipboardResult(key, .ok, "pasted")` answers a read, `feedClipboardResult(key, .ok, "")` acknowledges a write; failure outcomes pass through as fed. Under the real executor the test harness's null platform records the write — assert `harness.null_platform.lastClipboardData()`.
-
-`fx.setCredential` / `fx.getCredential` / `fx.deleteCredential` expose the platform credential store directly to Zig `UiApp.update`; do not add an app-specific Keychain bridge. Each credential is addressed by a stable `(service, account)` pair and produces exactly one typed terminal:
-
-```zig
-pub const Msg = union(enum) {
-    load_token,
-    credential_result: native_sdk.EffectCredentialResult,
-};
-
-.load_token => fx.getCredential(.{
-    .key = credential_key,
-    .service = "com.example.notes.openai",
-    .account = "default",
-    .on_result = Effects.credentialMsg(.credential_result),
-}),
-.credential_result => |result| switch (result.outcome) {
-    .ok => model.useToken(result.secret), // COPY if it must outlive this update
-    .not_found => model.askForToken(),
-    .recording_unsupported => model.explainRecordingRestriction(),
-    else => model.noteCredentialFailure(result.outcome),
-},
-```
-
-Credential rules:
-
-- `service`, `account`, and set `secret` are required, NUL-free, copied at call time, and bounded by `max_effect_credential_service_bytes` (128), `max_effect_credential_account_bytes` (256), and `max_effect_credential_secret_bytes` (4096). Never truncate secrets.
-- Outcomes are `.ok`, `.not_found`, `.failed`, `.rejected`, `.recording_unsupported`, and `.cancelled`. All three operations share the 16 general effect slots and key namespace.
-- A successful get's `result.secret` is valid only during its receiving update. Set copies and delivered get buffers are securely wiped before release.
-- Session recording rejects get before touching the OS store and never puts secret bytes in credential effect records. Set/delete still run and journal metadata. This does not redact a secret the app independently places in ordinary input events or other recorded data.
-- In the fake executor: `pendingCredentialAt(0)` records `key`/`op`/`service`/`account` and a set's `secret`; `feedCredentialResult(key, .ok, "token")` answers a get, while set/delete feeds ignore the bytes.
 
 `fx.startTimer` / `fx.cancelTimer` are key-based timers on the same channel — an auto-refresh, a poll, a debounce — one-shot or repeating, each fire delivered as one `on_fire` Msg. Timers are their own fixed table (16, `max_effect_timers`) and their own key namespace: they consume none of the 16 effect slots and never collide with spawn/fetch/file keys:
 
@@ -877,7 +865,6 @@ The `.wake` platform event is how live platforms marshal worker completions onto
 > - Fetch: `pendingFetchAt(index: usize) ?FetchRequest` · `feedResponse(key: u64, status: u16, body: []const u8)` · `feedResponseOutcome(key: u64, outcome: EffectFetchOutcome, status: u16, body: []const u8)` · `feedResponseOutcomeWithMetadata(key: u64, outcome: EffectFetchOutcome, status: u16, body: []const u8, truncated: bool, dropped_before: u32)`.
 > - Files: `pendingFileAt(index: usize) ?FileRequest` · `feedFileResult(key: u64, outcome: EffectFileOutcome, bytes: []const u8)`.
 > - Clipboard: `pendingClipboardAt(index: usize) ?ClipboardRequest` · `feedClipboardResult(key: u64, outcome: EffectClipboardOutcome, text: []const u8)`.
-> - Credentials: `pendingCredentialAt(index: usize) ?CredentialRequest` · `feedCredentialResult(key: u64, outcome: EffectCredentialOutcome, secret: []const u8)`.
 > - Host commands: `pendingHostAt(index: usize) ?HostRequest` · `feedHostResult(key: u64, ok: bool, bytes: []const u8)`.
 > - Timers: `pendingTimerAt(index: usize) ?TimerRequest` · `fireTimer(key: u64)` (one-shot slots retire after the fire).
 > - Audio (one channel): `pendingAudio() ?AudioRequest` · `feedAudioEvent(kind: EffectAudioEventKind, position_ms: u64, duration_ms: u64, playing: bool)` · `feedAudioEventBuffering(kind, position_ms, duration_ms, playing, buffering: bool)` · `feedAudioSpectrum(bands: [32]u8, position_ms: u64, duration_ms: u64)` · `audioSnapshot() AudioSnapshot`.

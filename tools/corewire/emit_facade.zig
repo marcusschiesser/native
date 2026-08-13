@@ -147,6 +147,7 @@ const Codec = enum {
     w_bool,
     w_bytes,
     short_text,
+    utf8_text,
     trunc_toward_zero,
     enum_index,
     ascii_string,
@@ -203,9 +204,10 @@ const FacadeEmitter = struct {
             .w_u64 => &.{ .w_u32, .trunc_toward_zero, .trap },
             .w_bytes => &.{.w_u32},
             .short_text => &.{ .sink, .trap },
+            .utf8_text => &.{},
             .enum_index => &.{.trap},
-            .cmd_encoder => &.{ .w_u8, .w_f64, .w_bytes, .short_text, .enum_index, .trap },
-            .sub_encoder => &.{ .w_u8, .w_f64, .short_text },
+            .cmd_encoder => &.{ .w_u8, .w_f64, .w_bytes, .short_text, .utf8_text, .enum_index, .trap },
+            .sub_encoder => &.{ .w_u8, .w_u32, .w_f64, .w_bytes, .short_text, .utf8_text, .trap },
             else => &.{},
         };
         for (deps) |dep| self.use(dep);
@@ -808,11 +810,11 @@ const FacadeEmitter = struct {
         const needs_cmd = body.used_codec.contains(.cmd_encoder);
         const needs_sub = body.used_codec.contains(.sub_encoder);
         if (needs_cmd and needs_sub) {
-            try self.raw("import type { Cmd as nscfCmd, Sub as nscfSub } from \"./sdk/core.ts\";\n");
+            try self.raw("import type { Cmd as nscfCmd, Sub as nscfSub, DbText as nscfDbText } from \"./sdk/core.ts\";\n");
         } else if (needs_cmd) {
-            try self.raw("import type { Cmd as nscfCmd } from \"./sdk/core.ts\";\n");
+            try self.raw("import type { Cmd as nscfCmd, DbText as nscfDbText } from \"./sdk/core.ts\";\n");
         } else if (needs_sub) {
-            try self.raw("import type { Sub as nscfSub } from \"./sdk/core.ts\";\n");
+            try self.raw("import type { Sub as nscfSub, DbText as nscfDbText } from \"./sdk/core.ts\";\n");
         }
         // The pinch channel's SDK vocabulary (declared in the SDK's
         // events module, outside the contract tables).
@@ -2565,6 +2567,62 @@ const FacadeEmitter = struct {
                 \\
             );
         }
+        if (self.used_codec.contains(.utf8_text)) {
+            try self.raw(
+                \\
+                \\// Store keys are ordinary UTF-8 text, not the ASCII-only
+                \\// short names used by command routing. This mirrors the SDK's
+                \\// utf8Bytes intrinsic, including U+FFFD for lone surrogates.
+                \\function nscfUtf8TextBytes(text: string): Uint8Array {
+                \\  let byteLength = 0;
+                \\  for (let i = 0; i < text.length; i++) {
+                \\    const code = text.charCodeAt(i);
+                \\    if (code <= 0x7f) byteLength += 1;
+                \\    else if (code <= 0x7ff) byteLength += 2;
+                \\    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+                \\      const next = text.charCodeAt(i + 1);
+                \\      if (next >= 0xdc00 && next <= 0xdfff) {
+                \\        byteLength += 4;
+                \\        i += 1;
+                \\      } else byteLength += 3;
+                \\    } else byteLength += 3;
+                \\  }
+                \\  const out = new Uint8Array(byteLength);
+                \\  let at = 0;
+                \\  for (let i = 0; i < text.length; i++) {
+                \\    let code = text.charCodeAt(i);
+                \\    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+                \\      const next = text.charCodeAt(i + 1);
+                \\      if (next >= 0xdc00 && next <= 0xdfff) {
+                \\        code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
+                \\        i += 1;
+                \\      } else code = 0xfffd;
+                \\    } else if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;
+                \\    if (code <= 0x7f) {
+                \\      out[at] = code;
+                \\      at += 1;
+                \\    } else if (code <= 0x7ff) {
+                \\      out[at] = 0xc0 | (code >> 6);
+                \\      out[at + 1] = 0x80 | (code & 0x3f);
+                \\      at += 2;
+                \\    } else if (code <= 0xffff) {
+                \\      out[at] = 0xe0 | (code >> 12);
+                \\      out[at + 1] = 0x80 | ((code >> 6) & 0x3f);
+                \\      out[at + 2] = 0x80 | (code & 0x3f);
+                \\      at += 3;
+                \\    } else {
+                \\      out[at] = 0xf0 | (code >> 18);
+                \\      out[at + 1] = 0x80 | ((code >> 12) & 0x3f);
+                \\      out[at + 2] = 0x80 | ((code >> 6) & 0x3f);
+                \\      out[at + 3] = 0x80 | (code & 0x3f);
+                \\      at += 4;
+                \\    }
+                \\  }
+                \\  return out;
+                \\}
+                \\
+            );
+        }
         if (self.used_codec.contains(.ascii_string)) {
             try self.raw(
                 \\
@@ -2605,13 +2663,44 @@ const FacadeEmitter = struct {
             \\// ---------------------------------------------------- the cmd wire
             \\// Encoder for the inert Cmd data the author's update returns —
             \\// byte-for-byte the layouts the host's command decoder expects
-            \\// (cmd_format_version 3). nscfTagOf maps a Msg arm name onto its
+            \\// (cmd_format_version 4). nscfTagOf maps a Msg arm name onto its
             \\// declaration-order wire tag.
             \\
             \\const nscfFetchMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
             \\const nscfAudioVerbs = ["pause", "resume", "stop", "seek", "volume"];
             \\const nscfAudioCaptureSources = ["microphone", "system"];
             \\const nscfVideoVerbs = ["play", "pause", "stop", "seek", "volume", "muted", "loop"];
+            \\
+            \\// Preserve the store err route for dynamic invalid limits. Writing a
+            \\// fractional or out-of-u32 number directly into the byte sink would
+            \\// truncate/wrap it into a different, potentially valid request. 257
+            \\// is the host's stable over-bound sentinel (the public maximum is 256).
+            \\function nscfStoreScanLimit(value: number): number {{
+            \\  return Number.isInteger(value) && value >= 0 && value <= 256 ? value : 257;
+            \\}}
+            \\
+            \\function nscfWDbValue(sink: nscfSink, value: unknown): void {{
+            \\  if (value === null) {{
+            \\    nscfWU8(sink, 0);
+            \\  }} else if (typeof value === "number") {{
+            \\    nscfWU8(sink, 1);
+            \\    nscfWF64(sink, value);
+            \\  }} else if (typeof value === "string") {{
+            \\    nscfWU8(sink, 2);
+            \\    nscfWBytes(sink, nscfUtf8TextBytes(value));
+            \\  }} else if (typeof value === "boolean") {{
+            \\    nscfWU8(sink, 4);
+            \\    nscfWU8(sink, value ? 1 : 0);
+            \\  }} else if (value instanceof Uint8Array) {{
+            \\    nscfWU8(sink, 3);
+            \\    nscfWBytes(sink, value);
+            \\  }} else {{
+            \\    nscfWU8(sink, 2);
+            \\    const bytes = (value as nscfDbText).bytes;
+            \\    nscfWU32(sink, bytes.length);
+            \\    for (let i = 0; i < bytes.length; i++) sink.push(bytes[i]!);
+            \\  }}
+            \\}}
             \\
             \\function nscfEncodeCmd(sink: nscfSink, cmd: nscfCmd<{s}>): void {{
             \\
@@ -2646,6 +2735,18 @@ const FacadeEmitter = struct {
             \\      return;
             \\    case "request":
             \\      nscfWU8(sink, 0x05);
+            \\      nscfWShortText(sink, cmd.name);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU8(sink, cmd.typedService ? 1 : 0);
+            \\      nscfWBytes(sink, cmd.payload);
+            \\      return;
+            \\    case "service_stream_request":
+            \\      nscfWU8(sink, 0x28);
+            \\      nscfWF64(sink, cmd.channelKey);
+            \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
+            \\      nscfWU8(sink, cmd.maxPending);
             \\      nscfWShortText(sink, cmd.name);
             \\      nscfWShortText(sink, cmd.key);
             \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
@@ -2752,6 +2853,69 @@ const FacadeEmitter = struct {
             \\      nscfWU8(sink, 0x22);
             \\      nscfWU8(sink, cmd.visible ? 1 : 0);
             \\      return;
+            \\    case "store_set":
+            \\      nscfWU8(sink, 0x23);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU32(sink, 0);
+            \\      nscfWBytes(sink, nscfUtf8TextBytes(cmd.storeKey));
+            \\      nscfWBytes(sink, cmd.bytes);
+            \\      return;
+            \\    case "store_get":
+            \\    case "store_delete":
+            \\      nscfWU8(sink, cmd.op === "store_get" ? 0x24 : 0x25);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU32(sink, 0);
+            \\      nscfWBytes(sink, nscfUtf8TextBytes(cmd.storeKey));
+            \\      return;
+            \\    case "store_scan":
+            \\      nscfWU8(sink, 0x26);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU32(sink, 0);
+            \\      nscfWBytes(sink, nscfUtf8TextBytes(cmd.prefix));
+            \\      nscfWU32(sink, nscfStoreScanLimit(cmd.limit));
+            \\      nscfWBytes(sink, typeof cmd.after === "string" ? nscfUtf8TextBytes(cmd.after) : cmd.after);
+            \\      return;
+            \\    case "store_set_many":
+            \\      nscfWU8(sink, 0x27);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU32(sink, 0);
+            \\      nscfWU32(sink, cmd.entries.length);
+            \\      for (let i = 0; i < cmd.entries.length; i++) {
+            \\        nscfWBytes(sink, nscfUtf8TextBytes(cmd.entries[i]![0]));
+            \\        nscfWBytes(sink, cmd.entries[i]![1]);
+            \\      }
+            \\      return;
+            \\    case "db_query":
+            \\      nscfWU8(sink, 0x29);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.pageKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.doneKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWBytes(sink, nscfUtf8TextBytes(cmd.sql));
+            \\      nscfWU32(sink, cmd.params.length);
+            \\      for (let i = 0; i < cmd.params.length; i++) nscfWDbValue(sink, cmd.params[i]!);
+            \\      return;
+            \\    case "db_exec":
+            \\      nscfWU8(sink, 0x2a);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWU32(sink, cmd.statements.length);
+            \\      for (let i = 0; i < cmd.statements.length; i++) {
+            \\        const statement = cmd.statements[i]!;
+            \\        nscfWBytes(sink, nscfUtf8TextBytes(statement[0]));
+            \\        nscfWU32(sink, statement[1].length);
+            \\        for (let j = 0; j < statement[1].length; j++) nscfWDbValue(sink, statement[1][j]!);
+            \\      }
+            \\      return;
             \\    case "quit_app":
             \\      nscfWU8(sink, 0x11);
             \\      return;
@@ -2776,6 +2940,7 @@ const FacadeEmitter = struct {
             \\      nscfWU8(sink, 0x15);
             \\      nscfWF64(sink, cmd.key);
             \\      nscfWU8(sink, nscfTagOf(cmd.eventKind));
+            \\      nscfWU8(sink, cmd.maxPending);
             \\      return;
             \\    case "channel_close":
             \\      nscfWU8(sink, 0x16);
@@ -2898,7 +3063,31 @@ const FacadeEmitter = struct {
         const msg = self.sidecar.msg.name;
         try self.print(
             \\
-            \\// The v3 subscription wire (timer subscriptions).
+            \\// The v3 subscription wire: repeating timers and build-time
+            \\// checked live relational queries.
+            \\function nscfWSubDbValue(sink: nscfSink, value: unknown): void {{
+            \\  if (value === null) {{
+            \\    nscfWU8(sink, 0);
+            \\  }} else if (typeof value === "number") {{
+            \\    nscfWU8(sink, 1);
+            \\    nscfWF64(sink, value);
+            \\  }} else if (typeof value === "string") {{
+            \\    nscfWU8(sink, 2);
+            \\    nscfWBytes(sink, nscfUtf8TextBytes(value));
+            \\  }} else if (typeof value === "boolean") {{
+            \\    nscfWU8(sink, 4);
+            \\    nscfWU8(sink, value ? 1 : 0);
+            \\  }} else if (value instanceof Uint8Array) {{
+            \\    nscfWU8(sink, 3);
+            \\    nscfWBytes(sink, value);
+            \\  }} else {{
+            \\    nscfWU8(sink, 2);
+            \\    const bytes = (value as nscfDbText).bytes;
+            \\    nscfWU32(sink, bytes.length);
+            \\    for (let i = 0; i < bytes.length; i++) sink.push(bytes[i]!);
+            \\  }}
+            \\}}
+            \\
             \\function nscfEncodeSub(sink: nscfSink, sub: nscfSub<{s}>): void {{
             \\  switch (sub.op) {{
             \\    case "none":
@@ -2908,6 +3097,18 @@ const FacadeEmitter = struct {
             \\      nscfWShortText(sink, sub.key);
             \\      nscfWF64(sink, sub.everyMs);
             \\      nscfWU8(sink, nscfTagOf(sub.msgKind));
+            \\      return;
+            \\    case "db_live":
+            \\      nscfWU8(sink, 0x02);
+            \\      nscfWShortText(sink, sub.key);
+            \\      nscfWU8(sink, nscfTagOf(sub.pageKind));
+            \\      nscfWU8(sink, nscfTagOf(sub.doneKind));
+            \\      nscfWU8(sink, nscfTagOf(sub.errKind));
+            \\      nscfWBytes(sink, nscfUtf8TextBytes(sub.sql));
+            \\      nscfWU32(sink, sub.params.length);
+            \\      for (let i = 0; i < sub.params.length; i++) nscfWSubDbValue(sink, sub.params[i]!);
+            \\      nscfWU32(sink, sub.tables.length);
+            \\      for (let i = 0; i < sub.tables.length; i++) nscfWShortText(sink, sub.tables[i]!);
             \\      return;
             \\    case "batch":
             \\      for (let i = 0; i < sub.subs.length; i++) {{
@@ -3584,7 +3785,9 @@ test "facade emission is deterministic and carries the adapter surface" {
     // the lowercase reserved namespace, so authored capitalized names cannot
     // collide with them.
     try testing.expect(std.mem.indexOf(u8, first, "type nscfSink = number[];") != null);
-    try testing.expect(std.mem.indexOf(u8, first, "import type { Cmd as nscfCmd }") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "import type { Cmd as nscfCmd, DbText as nscfDbText }") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "Number.isInteger(value) && value >= 0 && value <= 256 ? value : 257") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "nscfWU32(sink, nscfStoreScanLimit(cmd.limit));") != null);
     try testing.expect(std.mem.indexOf(u8, first, "NscfSink") == null);
     try testing.expect(std.mem.indexOf(u8, first, "NSCF_TAG_") == null);
 }
@@ -3929,7 +4132,7 @@ test "capitalized authored names no longer collide with facade internals" {
     );
     const generated = try facadeFromJson(arena, source);
     try testing.expect(std.mem.indexOf(u8, generated, "import type { Model, Msg, NscfSink, Cmd } from \"./core.ts\";") != null);
-    try testing.expect(std.mem.indexOf(u8, generated, "import type { Cmd as nscfCmd } from \"./sdk/core.ts\";") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "import type { Cmd as nscfCmd, DbText as nscfDbText } from \"./sdk/core.ts\";") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "export function NSCF_TAG_bump(model: Model): Uint8Array {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "const nscfTag_bump = 0;") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "type nscfSink = number[];") != null);

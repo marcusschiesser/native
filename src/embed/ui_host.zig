@@ -28,6 +28,7 @@ const app_manifest = @import("app_manifest");
 const canvas = @import("canvas");
 const runtime = @import("../runtime/root.zig");
 const platform = @import("../platform/root.zig");
+const security = @import("../security/root.zig");
 const types = @import("types.zig");
 const host = @import("host.zig");
 const conversions = @import("conversions.zig");
@@ -57,7 +58,49 @@ pub const mobile_shell_windows = [_]app_manifest.ShellWindow{.{
 pub const mobile_shell_scene: app_manifest.ShellConfig = .{ .windows = &mobile_shell_windows };
 
 pub fn UiAppHost(comptime AppDef: type) type {
+    return UiAppHostWithStorage(AppDef, false, false, &.{});
+}
+
+/// Capability-specialized mobile host. The boolean is comptime so a mobile
+/// artifact without `store` never analyzes SQLite open/deinit and carries no
+/// database symbols; `build/app.zig` supplies the manifest-inferred value.
+pub fn UiAppHostWithRecordStore(comptime AppDef: type, comptime record_store_enabled: bool) type {
+    return UiAppHostWithStorage(AppDef, record_store_enabled, false, &.{});
+}
+
+/// Capability-specialized mobile host for the two SQLite-backed storage
+/// tiers. Both databases use the OS-owned data root but remain separate files.
+pub fn UiAppHostWithStorage(
+    comptime AppDef: type,
+    comptime record_store_enabled: bool,
+    comptime relational_store_enabled: bool,
+    comptime relational_migrations: []const runtime.relational_store.Migration,
+) type {
+    return UiAppHostWithStorageAndCredentials(
+        AppDef,
+        record_store_enabled,
+        relational_store_enabled,
+        relational_migrations,
+        false,
+        false,
+        "dev.native_sdk.app",
+    );
+}
+
+/// Capability-specialized mobile host including the OS credential-store
+/// gate and the app identity used as its service namespace.
+pub fn UiAppHostWithStorageAndCredentials(
+    comptime AppDef: type,
+    comptime record_store_enabled: bool,
+    comptime relational_store_enabled: bool,
+    comptime relational_migrations: []const runtime.relational_store.Migration,
+    comptime credentials_enabled: bool,
+    comptime credentials_permitted: bool,
+    comptime credentials_service: []const u8,
+) type {
     const features: runtime.UiAppFeatures = if (@hasDecl(AppDef, "features")) AppDef.features else .{};
+    const RecordStoreType = if (record_store_enabled) runtime.RecordStore else void;
+    const RelationalStoreType = if (relational_store_enabled) runtime.RelationalStore else void;
     return struct {
         const Self = @This();
 
@@ -69,6 +112,10 @@ pub fn UiAppHost(comptime AppDef: type) type {
         /// the host wraps it so ABI-facing counters observe every event.
         inner_app: runtime.App,
         embedded: EmbeddedApp,
+        record_store: RecordStoreType = undefined,
+        record_store_open: bool = false,
+        relational_store: RelationalStoreType = undefined,
+        relational_store_open: bool = false,
         started: bool = false,
         frame_index: u64 = 0,
         last_error: ?anyerror = null,
@@ -83,6 +130,7 @@ pub fn UiAppHost(comptime AppDef: type) type {
         automation_io: ?*std.Io.Threaded = null,
         text_measure: host.MobileTextMeasure = .{},
         audio: host.MobileAudio = .{},
+        credentials: host.MobileCredentials = .{},
         // Image decode stays declined until the shim registers a real
         // codec (`native_sdk_app_set_image_service`): the null platform's
         // strict test decoder is opt-in (`image_decode`, default off), so
@@ -113,7 +161,10 @@ pub fn UiAppHost(comptime AppDef: type) type {
             const options = AppDef.mobileOptions();
             if (!std.mem.eql(u8, options.canvas_label, mobile_gpu_surface_label)) return error.InvalidViewOptions;
             if (!sceneHasMobileSurface(options.scene)) return error.ViewNotFound;
-            self.null_platform = platform.NullPlatform.init(.{});
+            self.null_platform = platform.NullPlatform.initWithOptions(.{}, .system, .{
+                .app_name = options.name,
+                .bundle_id = credentials_service,
+            });
             self.null_platform.gpu_surfaces = true;
             // Audio is declined until the shim registers a real service
             // (`native_sdk_app_set_audio_service`): without one,
@@ -130,6 +181,8 @@ pub fn UiAppHost(comptime AppDef: type) type {
             // produce real pixels (the buffer M2's surface blit consumes).
             self.null_platform.gpu_surface_packets = false;
             self.started = false;
+            self.record_store_open = false;
+            self.relational_store_open = false;
             self.frame_index = 0;
             self.last_error = null;
             self.command_count = 0;
@@ -143,6 +196,7 @@ pub fn UiAppHost(comptime AppDef: type) type {
             self.automation_io = null;
             self.text_measure = .{};
             self.audio = .{};
+            self.credentials = .{};
             self.image = .{};
             self.form_factor = .unknown;
             self.chrome_tabs_projected = false;
@@ -162,6 +216,15 @@ pub fn UiAppHost(comptime AppDef: type) type {
                 .event_fn = hostEvent,
                 .stop_fn = hostStop,
             }, self.null_platform.platform());
+            // The NullPlatform map is for native test only. Installed mobile
+            // apps start with no backing until the UIKit/Android shim
+            // registers its OS credential service.
+            try host.setCredentialService(self, .{}, null);
+            self.embedded.runtime.options.credentials_enabled = credentials_enabled;
+            self.embedded.runtime.options.security.permissions = if (credentials_permitted)
+                &.{security.permission_credentials}
+            else
+                &.{};
             // The damage seam: capture pixel presents (chained through
             // the null platform's recording present, so nonblank
             // sampling keeps working), drop the packet presenters no
@@ -172,7 +235,11 @@ pub fn UiAppHost(comptime AppDef: type) type {
             return self;
         }
 
-        pub fn destroy(self: *Self) void {
+        /// Returns true when teardown deliberately preserves the host because
+        /// an abandoned platform callback may still enter it. Mobile shims
+        /// use the companion C ABI result to preserve their callback context
+        /// under the same condition.
+        pub fn destroy(self: *Self) bool {
             host.disableAutomation(self);
             self.render_memo.deinit();
             self.ui.deinit();
@@ -180,9 +247,15 @@ pub fn UiAppHost(comptime AppDef: type) type {
             // its heap-owned registrations (registered canvas font
             // bytes) before the host storage goes.
             self.embedded.deinit();
+            if (comptime record_store_enabled) {
+                if (self.record_store_open) self.record_store.deinit();
+            }
+            if (comptime relational_store_enabled) {
+                if (self.relational_store_open) self.relational_store.deinit();
+            }
             // The embedded null platform lives inside `self`, so freeing
             // `self` IS this path's platform destruction — and an
-            // abandoned channel wake call may still enter that platform
+            // abandoned platform call may still enter that platform
             // at any later time (see
             // `PlatformServices.note_channel_wake_abandoned_fn`; the
             // null platform's own enqueue-only wake never triggers it,
@@ -190,15 +263,56 @@ pub fn UiAppHost(comptime AppDef: type) type {
             // like every first-party destroy path: skip the free and
             // leak the host storage, process-lived, with one loud line.
             if (self.null_platform.channel_wake_abandoned.load(.seq_cst)) {
-                std.debug.print("mobile ui host teardown: an abandoned channel wake call may still enter the embedded platform; skipping the host free and leaking it, process-lived, so the stale call stays safe\n", .{});
-                return;
+                std.debug.print("mobile ui host teardown: an abandoned platform call may still enter the embedded platform; skipping the host free and leaking it, process-lived, so the stale call stays safe\n", .{});
+                return true;
             }
             std.heap.page_allocator.destroy(self);
+            return false;
         }
 
         pub fn start(self: *Self) anyerror!void {
+            if (comptime record_store_enabled) {
+                if (!self.record_store_open) return error.StoreDataDirUnavailable;
+            }
+            if (comptime relational_store_enabled) {
+                if (!self.relational_store_open) return error.SqliteDataDirUnavailable;
+            }
             self.started = true;
             try self.embedded.start();
+        }
+
+        /// Install the OS-owned app-data directory before start. iOS passes
+        /// Library/Application Support and Android passes files/, exactly the
+        /// `.data` directories resolved by `app_dirs` on those platforms.
+        pub fn setDataRoot(self: *Self, data_root: []const u8) !void {
+            if (comptime !record_store_enabled and !relational_store_enabled) return;
+            if (self.started) return error.AppAlreadyStarted;
+            if (data_root.len == 0 or data_root.len > max_mobile_asset_root_bytes) return error.InvalidStoreDataDir;
+            if (comptime record_store_enabled) {
+                if (self.record_store_open) {
+                    self.record_store.deinit();
+                    self.record_store_open = false;
+                    self.embedded.runtime.options.record_store = null;
+                }
+                self.record_store = try runtime.RecordStore.open(std.heap.page_allocator, data_root);
+                self.record_store_open = true;
+                self.embedded.runtime.options.record_store = self.record_store.binding();
+            }
+            if (comptime relational_store_enabled) {
+                if (self.relational_store_open) {
+                    self.relational_store.deinit();
+                    self.relational_store_open = false;
+                    self.embedded.runtime.options.relational_store = null;
+                }
+                const opened = try runtime.RelationalStore.openMigrated(std.heap.page_allocator, data_root, relational_migrations);
+                self.relational_store = switch (opened.outcome) {
+                    .ok => opened.database.?,
+                    .migrate_failed => return error.SqliteMigrationFailed,
+                    .version_unknown => return error.SqliteVersionUnknown,
+                };
+                self.relational_store_open = true;
+                self.embedded.runtime.options.relational_store = self.relational_store.binding();
+            }
         }
 
         /// Host-pumped frame step: the shim's display-link (or test) tick.

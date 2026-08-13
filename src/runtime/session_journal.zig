@@ -1037,8 +1037,6 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeEnum(record.file_outcome);
     try cursor.writeEnum(record.clipboard_op);
     try cursor.writeEnum(record.clipboard_outcome);
-    try cursor.writeEnum(record.credential_op);
-    try cursor.writeEnum(record.credential_outcome);
     try cursor.writeInt(u64, record.timer_timestamp_ns);
     try cursor.writeEnum(record.timer_outcome);
     try cursor.writeInt(i64, record.clock_wall_ms);
@@ -1092,6 +1090,17 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
         try cursor.writeBytes(&record.persist_blob_hash);
         try cursor.writeInt(u64, record.persist_blob_len);
     }
+    if (record.kind == .db) {
+        try cursor.writeBytes(&record.db_blob_hash);
+        try cursor.writeInt(u64, record.db_blob_len);
+    }
+    if (record.kind == .credentials) {
+        try cursor.writeEnum(record.credentials_operation);
+        try cursor.writeEnum(record.credentials_outcome);
+        try cursor.writeInt(u64, record.credentials_secret_len);
+        try cursor.writeBytes(&record.credentials_salt);
+        try cursor.writeBytes(&record.credentials_digest);
+    }
     return buffer[0..cursor.len];
 }
 
@@ -1114,8 +1123,6 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .file_outcome = try cursor.readEnum(runtime_effects.EffectFileOutcome),
         .clipboard_op = try cursor.readEnum(runtime_effects.EffectClipboardOp),
         .clipboard_outcome = try cursor.readEnum(runtime_effects.EffectClipboardOutcome),
-        .credential_op = try cursor.readEnum(runtime_effects.EffectCredentialOp),
-        .credential_outcome = try cursor.readEnum(runtime_effects.EffectCredentialOutcome),
         .timer_timestamp_ns = try cursor.readInt(u64),
         .timer_outcome = try cursor.readEnum(runtime_effects.EffectTimerOutcome),
         .clock_wall_ms = try cursor.readInt(i64),
@@ -1156,6 +1163,17 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         record.persist_outcome = try cursor.readEnum(runtime_effects.EffectPersistOutcome);
         @memcpy(&record.persist_blob_hash, try cursor.readBytes(record.persist_blob_hash.len));
         record.persist_blob_len = try cursor.readInt(u64);
+    }
+    if (record.kind == .db) {
+        @memcpy(&record.db_blob_hash, try cursor.readBytes(record.db_blob_hash.len));
+        record.db_blob_len = try cursor.readInt(u64);
+    }
+    if (record.kind == .credentials) {
+        record.credentials_operation = try cursor.readEnum(runtime_effects.EffectCredentialsOperation);
+        record.credentials_outcome = try cursor.readEnum(runtime_effects.EffectCredentialsOutcome);
+        record.credentials_secret_len = try cursor.readInt(u64);
+        @memcpy(&record.credentials_salt, try cursor.readBytes(record.credentials_salt.len));
+        @memcpy(&record.credentials_digest, try cursor.readBytes(record.credentials_digest.len));
     }
     if (!cursor.done()) return error.JournalCorrupt;
     return record;
@@ -1776,6 +1794,38 @@ test "effect codec round-trips payloads and outcomes" {
     try testing.expectEqual(runtime_effects.EffectPersistOutcome.ok, persist_decoded.persist_outcome);
     try testing.expectEqualSlices(u8, &persist_hash, &persist_decoded.persist_blob_hash);
     try testing.expectEqual(@as(u64, 4096), persist_decoded.persist_blob_len);
+
+    const db_hash: [runtime_effects.effect_image_blob_hash_len]u8 = @splat(0x5a);
+    const db_encoded = try encodeEffect(.{
+        .kind = .db,
+        .key = 73,
+        .code = runtime_effects.dbJournalCode(.page, .ok),
+        .db_blob_hash = db_hash,
+        .db_blob_len = 96 * 1024,
+    }, &buffer);
+    const db_decoded = try decodeEffect(db_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.db, db_decoded.kind);
+    try testing.expectEqualSlices(u8, &db_hash, &db_decoded.db_blob_hash);
+    try testing.expectEqual(@as(u64, 96 * 1024), db_decoded.db_blob_len);
+
+    const credential_digest: [32]u8 = @splat(0x39);
+    const credential_salt: [16]u8 = @splat(0x17);
+    const credential_encoded = try encodeEffect(.{
+        .kind = .credentials,
+        .key = 81,
+        .credentials_operation = .get,
+        .credentials_outcome = .ok,
+        .credentials_secret_len = 27,
+        .credentials_salt = credential_salt,
+        .credentials_digest = credential_digest,
+    }, &buffer);
+    const credential_decoded = try decodeEffect(credential_encoded);
+    try testing.expectEqual(runtime_effects.EffectResultKind.credentials, credential_decoded.kind);
+    try testing.expectEqual(runtime_effects.EffectCredentialsOperation.get, credential_decoded.credentials_operation);
+    try testing.expectEqual(runtime_effects.EffectCredentialsOutcome.ok, credential_decoded.credentials_outcome);
+    try testing.expectEqual(@as(u64, 27), credential_decoded.credentials_secret_len);
+    try testing.expectEqualSlices(u8, &credential_salt, &credential_decoded.credentials_salt);
+    try testing.expectEqualSlices(u8, &credential_digest, &credential_decoded.credentials_digest);
 }
 
 test "header, checkpoint, screenshot, and end codecs round-trip" {
