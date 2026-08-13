@@ -141,8 +141,27 @@ pub fn build(b: *std.Build) void {
     desktop_mod.addImport("json", json_mod);
     desktop_mod.addImport("canvas", canvas_mod);
     desktop_mod.addImport("terminal_vt", terminalVtModule(b, target, optimize));
+    desktop_mod.addIncludePath(b.path("third_party/sqlite"));
+    desktop_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    desktop_mod.link_libc = true;
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
+
+    // SQLite is capability-shed from ordinary app artifacts. Its focused
+    // engine/store suite gets a dedicated module that explicitly compiles the
+    // vendored amalgamation, so framework tests cover it without making every
+    // unrelated example carry the database object.
+    const record_store_mod = module(b, target, optimize, "src/runtime/record_store.zig");
+    record_store_mod.addIncludePath(b.path("third_party/sqlite"));
+    record_store_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    record_store_mod.link_libc = true;
+    const record_store_tests = testArtifact(b, record_store_mod);
 
     // The embeddable static library's root module carries only the C ABI
     // exports (fixed WebView shell host); user-app canvas libraries are
@@ -188,6 +207,13 @@ pub fn build(b: *std.Build) void {
     tooling_mod.addImport("app_icon", app_icon_mod);
     tooling_mod.addImport("ios_host", ios_host_mod);
     tooling_mod.addImport("android_host", android_host_mod);
+    tooling_mod.addImport("sqlite_engine", module(b, target, optimize, "src/runtime/sqlite_engine.zig"));
+    tooling_mod.addIncludePath(b.path("third_party/sqlite"));
+    tooling_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    tooling_mod.link_libc = true;
     const tooling_tests = testArtifact(b, tooling_mod);
 
     // Ejected-component identity proofs: a separate test module because
@@ -300,6 +326,13 @@ pub fn build(b: *std.Build) void {
     host_tooling_mod.addImport("app_icon", host_app_icon_mod);
     host_tooling_mod.addImport("ios_host", host_ios_host_mod);
     host_tooling_mod.addImport("android_host", host_android_host_mod);
+    host_tooling_mod.addImport("sqlite_engine", module(b, host_target, optimize, "src/runtime/sqlite_engine.zig"));
+    host_tooling_mod.addIncludePath(b.path("third_party/sqlite"));
+    host_tooling_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/sqlite3.c"),
+        .flags = sqliteCompileFlags(),
+    });
+    host_tooling_mod.link_libc = true;
     const host_ui_markup_mod = module(b, host_target, optimize, "src/primitives/canvas/ui_markup.zig");
     const host_markup_lsp_mod = module(b, host_target, optimize, "tools/native-sdk/markup_lsp.zig");
     host_markup_lsp_mod.addImport("ui_markup", host_ui_markup_mod);
@@ -474,6 +507,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
+    test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
     }
@@ -487,7 +521,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(corewire_service_contract_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_service_emit_tests).step);
     test_step.dependOn(&b.addRunArtifact(corewire_shim_rt_tests).step);
-    const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run the real out-of-process TypeScript service carrier, crash recovery, timeout, and replay suites");
+    const ts_services_e2e_step = b.step("test-ts-services-e2e", "Run both TypeScript service carriers end to end: the out-of-process child (crash recovery, timeout, replay) and the in-process pool (parallel keys, FIFO, trap isolation, replay)");
     if (ts_core_e2e_tests) |ts_core_artifacts| {
         const ts_core_e2e_step = b.step("test-ts-core-e2e", "Run the TypeScript-core end-to-end suites over externally compiled fixture cores (requires node and `npm ci` in packages/core)");
         const host_e2e_run = b.addRunArtifact(ts_core_artifacts.host);
@@ -503,6 +537,28 @@ pub fn build(b: *std.Build) void {
         const ai_chat_e2e_run = b.addRunArtifact(ts_core_artifacts.ai_chat);
         const services_e2e_run = b.addRunArtifact(ts_core_artifacts.services);
         ts_services_e2e_step.dependOn(&services_e2e_run.step);
+        // The same fixture through the in-process carrier (ServicePool over
+        // the linked service archive): parallel keys, per-key FIFO,
+        // cooperative cancellation/deadlines, trap isolation, streaming,
+        // and replay without initializing the archive.
+        const services_pool_e2e_run: ?*std.Build.Step.Run = if (ts_core_artifacts.services_pool) |pool_tests| pool: {
+            const run = b.addRunArtifact(pool_tests);
+            ts_services_e2e_step.dependOn(&run.step);
+            break :pool run;
+        } else null;
+        // Service carrier benchmark: cold start, warm round-trip latency
+        // for small and large payloads, and queued throughput, through the
+        // production carrier bindings of BOTH carriers — the out-of-process
+        // child and the in-process pool — against one bytes-echo service
+        // (see tools/bench_service_host.zig).
+        const bench_service_host_run = b.addRunArtifact(ts_core_artifacts.service_host_bench);
+        bench_service_host_run.has_side_effects = true;
+        // Repo root as cwd so the generated service executable path and the
+        // benchmark's scratch directory resolve regardless of where
+        // `zig build` ran from.
+        bench_service_host_run.setCwd(b.path("."));
+        const bench_service_host_step = b.step("bench-service-host", "Run the service carrier benchmark over both carriers (cold start, round-trip latency, queued throughput; requires node and `npm ci` in packages/core; pass -Doptimize=ReleaseFast for baselines)");
+        bench_service_host_step.dependOn(&bench_service_host_run.step);
         const sidecar_conformance_run = b.addRunArtifact(ts_core_artifacts.sidecar_conformance);
         const sidecar_conformance_step = b.step("sidecar-conformance", "Validate corewire-generated mirrors over every fixture's frontend-emitted contract (requires node)");
         sidecar_conformance_step.dependOn(&sidecar_conformance_run.step);
@@ -533,6 +589,7 @@ pub fn build(b: *std.Build) void {
         ts_core_e2e_step.dependOn(&scaffold_ide_e2e_run.step);
         ts_core_e2e_step.dependOn(&ai_chat_e2e_run.step);
         ts_core_e2e_step.dependOn(&services_e2e_run.step);
+        if (services_pool_e2e_run) |run| ts_core_e2e_step.dependOn(&run.step);
         test_step.dependOn(&host_e2e_run.step);
         test_step.dependOn(&persist_e2e_run.step);
         test_step.dependOn(&markup_e2e_run.step);
@@ -542,6 +599,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&scaffold_ide_e2e_run.step);
         test_step.dependOn(&ai_chat_e2e_run.step);
         test_step.dependOn(&services_e2e_run.step);
+        if (services_pool_e2e_run) |run| test_step.dependOn(&run.step);
         test_step.dependOn(&sidecar_conformance_run.step);
     }
     test_step.dependOn(&b.addRunArtifact(markup_lsp_tests).step);
@@ -616,6 +674,15 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "npm ci --include=dev" },
         .{ .path = "build/app.zig", .pattern = "cannot resolve its TypeScript toolchain" },
         .{ .path = "build/app.zig", .pattern = "std.process.exit(1);" },
+        // SQLite schema generation shares node/toolchain resolution but
+        // never the TS-core-only src/app.native shape assertion: Zig cores
+        // may own their view in code while still embedding migrations.
+        .{ .path = "build/app.zig", .pattern = "return tsToolingPreflight(b, dep, .app_core);" },
+        .{ .path = "build/app.zig", .pattern = "const node = tsToolingPreflight(b, dep, .sqlite_schema);" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-pin-cache-inputs", "Verify both TypeScript service build graphs invalidate frontend contracts when the exact scriptc pin changes", &.{
+        .{ .path = "build.zig", .pattern = "if (spec.emit_services) check.addFileInput(b.path(\"packages/core/package.json\"));" },
+        .{ .path = "build/app.zig", .pattern = "if (has_services) check.addFileInput(dep.path(\"packages/core/package.json\"));" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-app-test-entry-analysis", "Verify the managed app test step force-analyzes the entry point (UiApp.create's Model-defaults rule must teach at `native test`, not ambush at `native build`)", &.{
         .{ .path = "build/app.zig", .pattern = "app_analysis.zig" },
@@ -1427,6 +1494,8 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-surface", "Run GPU surface example tests", "examples/gpu-surface", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-dashboard", "Run GPU dashboard example tests", "examples/gpu-dashboard", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-gpu-components", "Run GPU components example tests", "examples/gpu-components", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-record-store", "Run record-store example tests", "examples/record-store", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-relational-notes", "Run relational notes example tests", "examples/relational-notes", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-ui-inbox", "Run ui builder inbox example tests", "examples/ui-inbox", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-kanban", "Run ui builder kanban example tests", "examples/kanban", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-habits", "Run markup habits example tests", "examples/habits", .managed),
@@ -1635,13 +1704,62 @@ pub fn build(b: *std.Build) void {
     mobile_canvas_lib_step.dependOn(&build_mobile_canvas_lib.step);
     mobile_examples_step.dependOn(&build_mobile_canvas_lib.step);
 
-    // Android cross-compile proof: pure Zig (no NDK sysroot — the static
-    // lib links no libc), PIC so the objects can land in the shim's .so.
+    const build_mobile_canvas_store_lib = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dstore=true" });
+    build_mobile_canvas_store_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_store_lib_step = b.step("test-example-mobile-canvas-lib-store", "Build a record-store-capable mobile embed static library");
+    mobile_canvas_store_lib_step.dependOn(&build_mobile_canvas_store_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_store_lib.step);
+
+    const build_mobile_canvas_relational_lib = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dsqlite=true", "--prefix", "zig-out/test-relational" });
+    build_mobile_canvas_relational_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_relational_lib_step = b.step("test-example-mobile-canvas-lib-sqlite", "Build a relational-SQLite-capable mobile embed static library");
+    mobile_canvas_relational_lib_step.dependOn(&build_mobile_canvas_relational_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_relational_lib.step);
+
+    const build_mobile_canvas_both_storage_lib = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dstore=true", "-Dsqlite=true", "--prefix", "zig-out/test-both-storage" });
+    build_mobile_canvas_both_storage_lib.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_both_storage_lib_step = b.step("test-example-mobile-canvas-lib-storage", "Build both SQLite-backed mobile tiers with one vendored engine object");
+    mobile_canvas_both_storage_lib_step.dependOn(&build_mobile_canvas_both_storage_lib.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_both_storage_lib.step);
+
+    // Android cross-compile proofs: the capability-free archive remains pure
+    // Zig, while the store variant must discover the NDK sysroot and compile
+    // the vendored SQLite amalgamation for bionic. Keeping both catches a
+    // capability branch that a host-only store build cannot exercise.
     const build_mobile_canvas_lib_android = b.addSystemCommand(&.{ "zig", "build", "lib", "-Dtarget=aarch64-linux-android" });
     build_mobile_canvas_lib_android.setCwd(b.path("examples/mobile-canvas"));
     const mobile_canvas_lib_android_step = b.step("test-example-mobile-canvas-lib-android", "Cross-compile the mobile-canvas embed static library for aarch64-linux-android");
     mobile_canvas_lib_android_step.dependOn(&build_mobile_canvas_lib_android.step);
     mobile_examples_step.dependOn(&build_mobile_canvas_lib_android.step);
+
+    const build_mobile_canvas_store_lib_android = b.addSystemCommand(&.{
+        "zig",      "build",                      "lib", "-Dstore=true", "-Dtarget=aarch64-linux-android",
+        "--prefix", "zig-out/test-android-store",
+    });
+    build_mobile_canvas_store_lib_android.setCwd(b.path("examples/mobile-canvas"));
+    const mobile_canvas_store_lib_android_step = b.step("test-example-mobile-canvas-lib-android-store", "Cross-compile SQLite-backed mobile storage for aarch64-linux-android");
+    mobile_canvas_store_lib_android_step.dependOn(&build_mobile_canvas_store_lib_android.step);
+    mobile_examples_step.dependOn(&build_mobile_canvas_store_lib_android.step);
+
+    // Apple SDK headers only exist on macOS. This is still part of the local
+    // mobile aggregate there, and CI invokes the named step on its macOS tier.
+    if (b.graph.host.result.os.tag == .macos) {
+        const build_mobile_canvas_store_lib_ios = b.addSystemCommand(&.{
+            "zig",      "build",                  "lib", "-Dstore=true", "-Dtarget=aarch64-ios-simulator",
+            "--prefix", "zig-out/test-ios-store",
+        });
+        build_mobile_canvas_store_lib_ios.setCwd(b.path("examples/mobile-canvas"));
+        const build_mobile_canvas_store_lib_ios_device = b.addSystemCommand(&.{
+            "zig",      "build",                         "lib", "-Dstore=true", "-Dtarget=aarch64-ios",
+            "--prefix", "zig-out/test-ios-device-store",
+        });
+        build_mobile_canvas_store_lib_ios_device.setCwd(b.path("examples/mobile-canvas"));
+        const mobile_canvas_store_lib_ios_step = b.step("test-example-mobile-canvas-lib-ios-store", "Cross-compile SQLite-backed mobile storage for iOS simulator and device");
+        mobile_canvas_store_lib_ios_step.dependOn(&build_mobile_canvas_store_lib_ios.step);
+        mobile_canvas_store_lib_ios_step.dependOn(&build_mobile_canvas_store_lib_ios_device.step);
+        mobile_examples_step.dependOn(&build_mobile_canvas_store_lib_ios.step);
+        mobile_examples_step.dependOn(&build_mobile_canvas_store_lib_ios_device.step);
+    }
 
     const examples_step = b.step("test-examples", "Run all example tests and layout checks");
     examples_step.dependOn(frontend_examples_step);
@@ -2719,6 +2837,19 @@ pub fn build(b: *std.Build) void {
     cef_bundle_step.dependOn(&cef_bundle_script.step);
 }
 
+fn sqliteCompileFlags() []const []const u8 {
+    return &.{
+        "-DSQLITE_THREADSAFE=2",
+        "-DSQLITE_OMIT_LOAD_EXTENSION",
+        "-DSQLITE_DQS=0",
+        "-DSQLITE_ENABLE_FTS5",
+        "-DSQLITE_ENABLE_JSON1",
+        "-DSQLITE_ENABLE_UPDATE_HOOK",
+        "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+        "-DSQLITE_DEFAULT_MEMSTATUS=0",
+    };
+}
+
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, path: []const u8) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path(path),
@@ -2782,6 +2913,17 @@ const TsCoreE2eArtifacts = struct {
     /// The phase-1 service seam: a real compiled core plus a real plain-scriptc
     /// service executable driven through the out-of-process carrier.
     services: *std.Build.Step.Compile,
+    /// The in-process service carrier: the same fixture compiled as a
+    /// thread-instanced library archive, linked into this battery and driven
+    /// through ServicePool (parallel keys, per-key FIFO, cooperative
+    /// cancellation/deadlines, trap isolation, streaming, replay). Null when
+    /// the target cannot carry the archive (cross or non-desktop builds).
+    services_pool: ?*std.Build.Step.Compile,
+    /// The service-host carrier benchmark: a bytes-echo service compiled
+    /// through the same lane, driven directly through the production
+    /// carrier bindings of BOTH carriers (cold start, round-trip latency,
+    /// queued throughput).
+    service_host_bench: *std.Build.Step.Compile,
     /// Sidecar-shim conformance (tests/sidecar): every fixture's
     /// generated mirror validated over its frontend-emitted contract
     /// (plus the hand-written ground-truth sidecars), and every shim
@@ -2857,6 +2999,9 @@ fn tsCoreE2eArtifact(
         .entry = "tests/ts-core/fixture.ts",
         .src_dir = host_src.getDirectory(),
         .name = "host_fixture_core",
+        .store_capability = true,
+        .relational_capability = true,
+        .credentials_capability = true,
         // The fixture drives pastBytes to the f64-exact boundary (2^53):
         // no honest i64 declaration exists there, so the compiled
         // projection carries the slot as f64.
@@ -2993,6 +3138,7 @@ fn tsCoreE2eArtifact(
         .src_dir = b.path("tests/ts-services/ok/src"),
         .name = "services_fixture_core",
         .emit_services = true,
+        .service_packages = &.{"escape-string-regexp|5.0.0|705f4bb4b92fd3469e264a93f2a2e4b24cf7e663d73a5318abaf29ee72674f6d"},
     });
     const service_host_fixture = externalServiceFixture(
         b,
@@ -3010,7 +3156,62 @@ fn tsCoreE2eArtifact(
     services_e2e_mod.addImport("ts_services_registry", service_host_fixture.registry);
     const service_test_options = b.addOptions();
     service_test_options.addOptionPath("service_executable", service_host_fixture.executable);
+    service_test_options.addOption([]const u8, "node_executable", node);
     services_e2e_mod.addOptions("ts_services_options", service_test_options);
+
+    // The same fixture against the in-process carrier: the service archive
+    // links into the battery beside the fixture core's archive (distinct
+    // symbol prefixes), and ServicePool drives it through the identical
+    // TsUiApp/Effects seam.
+    const services_pool_mod: ?*std.Build.Module = if (service_host_fixture.archive) |service_archive| pool: {
+        const pool_mod = module(b, target, optimize, "tests/ts-services/service_pool_e2e_tests.zig");
+        pool_mod.addImport("native_sdk", desktop_mod);
+        pool_mod.addImport("ts_services_core", services_fixture.module);
+        pool_mod.addImport("ts_services_registry", service_host_fixture.registry);
+        pool_mod.link_libc = true;
+        pool_mod.addObjectFile(service_archive);
+        break :pool pool_mod;
+    } else null;
+
+    // Service-host carrier benchmark: the same production service lane
+    // (frontend contract -> corewire host/registry -> exact-pinned
+    // plain-scriptc executable) over a bytes-echo operation that returns
+    // its request unchanged, so tools/bench_service_host.zig measures the
+    // carrier — lazy spawn, framing, pipes, worker queueing — and never a
+    // workload.
+    const service_bench_core = externalCoreFixtureModule(b, target, optimize, node, corewire_exe, .{
+        .entry = "tools/service-host-bench/src/core.ts",
+        .src_dir = b.path("tools/service-host-bench/src"),
+        .name = "service_host_bench_core",
+        .emit_services = true,
+    });
+    const service_bench_fixture = externalServiceFixture(
+        b,
+        target,
+        optimize,
+        node,
+        corewire_exe,
+        b.path("tools/service-host-bench/src"),
+        service_bench_core.services_contract.?,
+        "service_host_bench_services",
+    );
+    const service_bench_mod = module(b, target, optimize, "tools/bench_service_host.zig");
+    service_bench_mod.addImport("native_sdk", desktop_mod);
+    service_bench_mod.addImport("service_registry", service_bench_fixture.registry);
+    const service_bench_options = b.addOptions();
+    service_bench_options.addOptionPath("service_executable", service_bench_fixture.executable);
+    service_bench_options.addOption(bool, "has_archive", service_bench_fixture.archive != null);
+    service_bench_mod.addOptions("bench_options", service_bench_options);
+    if (service_bench_fixture.archive) |bench_archive| {
+        // The in-process carrier's half of the benchmark: the same echo
+        // service as a linked archive, driven through ServicePool.
+        service_bench_mod.link_libc = true;
+        service_bench_mod.addObjectFile(bench_archive);
+    }
+    const service_bench_exe = b.addExecutable(.{
+        .name = "bench-service-host",
+        .root_module = service_bench_mod,
+    });
 
     // Sidecar-shim conformance: a corewire-generated mirror per corpus
     // fixture. The markup fixture's sidecar is the committed
@@ -3092,6 +3293,8 @@ fn tsCoreE2eArtifact(
         .scaffold_ide = filteredTestArtifact(b, scaffold_ide_mod, "ts-scaffold-ide-e2e-tests", &.{}),
         .ai_chat = filteredTestArtifact(b, ai_chat_mod, "ts-ai-chat-e2e-tests", &.{}),
         .services = filteredTestArtifact(b, services_e2e_mod, "ts-services-e2e-tests", &.{}),
+        .services_pool = if (services_pool_mod) |pool_mod| filteredTestArtifact(b, pool_mod, "ts-services-pool-e2e-tests", &.{}) else null,
+        .service_host_bench = service_bench_exe,
         .sidecar_conformance = filteredTestArtifact(b, conformance_mod, "sidecar-conformance-tests", &.{}),
         .external_core_abi_laws = filteredTestArtifact(b, abi_laws_mod, "external-core-abi-tests", &.{}),
         .core_contracts = core_contracts.toOwnedSlice(b.allocator) catch @panic("OOM"),
@@ -3100,14 +3303,20 @@ fn tsCoreE2eArtifact(
 
 const ExternalServiceFixture = struct {
     executable: std.Build.LazyPath,
+    /// The in-process carrier's library archive (thread-instanced,
+    /// runtime-localized), compiled from the same staged tree. Host-native
+    /// darwin/linux builds only; null elsewhere (runtime localization
+    /// refuses cross targets, and the pool is a desktop host-native carrier).
+    archive: ?std.Build.LazyPath,
     registry: *std.Build.Module,
 };
 
 /// Compile one fixture's service class through the production phase-1 lane:
 /// service sidecar -> corewire host/registry -> ordinary source stage (plus
 /// the pinned compiler's tagged-throw compatibility lowering) -> exact pinned
-/// plain-scriptc executable. No author source is re-read for dispatch facts
-/// after the sidecar emission.
+/// scriptc outputs (the child executable, plus the in-process library archive
+/// on host-native darwin/linux). No author source is re-read for dispatch
+/// facts after the sidecar emission.
 fn externalServiceFixture(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -3118,6 +3327,9 @@ fn externalServiceFixture(
     contract: std.Build.LazyPath,
     name: []const u8,
 ) ExternalServiceFixture {
+    const emit_archive = target.result.os.tag == b.graph.host.result.os.tag and
+        target.result.cpu.arch == b.graph.host.result.cpu.arch and
+        (target.result.os.tag == .macos or target.result.os.tag == .linux);
     const project = b.addRunArtifact(corewire_exe);
     project.addArg("--services-sidecar");
     project.addFileArg(contract);
@@ -3125,6 +3337,10 @@ fn externalServiceFixture(
     const host_main = project.addOutputFileArg("service_host_main.ts");
     project.addArg("--service-registry");
     const registry_source = project.addOutputFileArg("services.zig");
+    project.addArg("--service-inproc-main");
+    const inproc_main = project.addOutputFileArg("service_inproc_main.ts");
+    project.addArg("--service-inproc-profile");
+    const inproc_profile = project.addOutputFileArg("service_profile.json");
 
     const stage = b.addSystemCommand(&.{node});
     stage.addFileArg(b.path("packages/core/scripts/stage_external_services.mjs"));
@@ -3132,6 +3348,12 @@ fn externalServiceFixture(
     stage.addDirectoryArg(src_dir);
     stage.addArg("--host-main");
     stage.addFileArg(host_main);
+    stage.addArg("--inproc-main");
+    stage.addFileArg(inproc_main);
+    stage.addArg("--inproc-profile");
+    stage.addFileArg(inproc_profile);
+    stage.addArg("--contract");
+    stage.addFileArg(contract);
     stage.addArg("--out");
     const stage_dir = stage.addOutputDirectoryArg("services-stage");
     // A LazyPath directory records only its producer dependency; source-tree
@@ -3152,6 +3374,10 @@ fn externalServiceFixture(
     compile.addArg("--out-exe");
     const suffix = if (b.graph.host.result.os.tag == .windows) ".exe" else "";
     const executable = compile.addOutputFileArg(b.fmt("{s}{s}", .{ name, suffix }));
+    const archive: ?std.Build.LazyPath = if (emit_archive) archive: {
+        compile.addArg("--out-archive");
+        break :archive compile.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
+    } else null;
     const host_platform = b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi });
     compile.addArgs(&.{ "--host-platform", host_platform, "--target-platform", host_platform });
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
@@ -3163,6 +3389,7 @@ fn externalServiceFixture(
 
     return .{
         .executable = executable,
+        .archive = archive,
         .registry = b.createModule(.{
             .root_source_file = registry_source,
             .target = target,
@@ -3263,12 +3490,20 @@ const ExternalCoreFixtureSpec = struct {
     name: []const u8,
     /// The fixture stands in for an app whose manifest declares Tier 1.
     persist_capability: bool = false,
+    /// The fixture stands in for an app whose manifest declares Tier 2.
+    store_capability: bool = false,
+    /// The fixture stands in for an app whose manifest declares Tier 3.
+    relational_capability: bool = false,
+    /// The fixture stands in for an app whose manifest declares the Tier-4
+    /// build capability and its matching core-effect permission.
+    credentials_capability: bool = false,
     /// Attested integer slots the compiled projection carries as f64
     /// (values that reach the f64-exact boundary have no honest i64
     /// declaration on that side) — corewire's --f64-slot demotions,
     /// applied to the compile profile and every downstream projection.
     f64_slots: []const []const u8 = &.{},
     emit_services: bool = false,
+    service_packages: []const []const u8 = &.{},
 };
 
 /// Compile one TS fixture core through the external core compiler at
@@ -3302,15 +3537,30 @@ fn externalCoreFixtureModule(
         check.addArg("--services-contract");
         break :services check.addOutputFileArg("services.contract.json");
     } else null;
+    for (spec.service_packages) |package_entry| check.addArgs(&.{ "--service-package", package_entry });
+    const services_client: ?std.Build.LazyPath = if (services_contract) |service_contract| client: {
+        const service_project = b.addRunArtifact(corewire_exe);
+        service_project.addArg("--services-sidecar");
+        service_project.addFileArg(service_contract);
+        service_project.addArg("--service-client");
+        break :client service_project.addOutputFileArg("services.gen.ts");
+    } else null;
     if (spec.persist_capability) check.addArgs(&.{ "--capability", "persist" });
+    if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
+    if (spec.relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
+    if (spec.credentials_capability) check.addArgs(&.{ "--capability", "credentials", "--permission", "credentials" });
     tsCoreAddDirInputs(b, check, "packages/core/sdk");
     tsCoreAddDirInputs(b, check, std.fs.path.dirname(spec.entry) orelse ".");
     const frontend_sources = [_][]const u8{
-        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "service_contract.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
+        "checker.ts", "cli.ts", "contract.ts", "diagnostics.ts", "frontend.ts", "infer.ts", "modules.ts", "service_contract.ts", "sqlite_codegen.ts", "sqlite_cli.ts", "sqlite_runtime_policy.ts", "typed_ast.ts", "types.ts", "wyhash.ts",
     };
     for (frontend_sources) |source| {
         check.addFileInput(b.path(b.fmt("packages/core/src/{s}", .{source})));
     }
+    // Service contracts echo the exact scriptc pin read from this manifest.
+    // Declare that runtime read explicitly so a compiler bump invalidates a
+    // warm build cache before the compile lane checks the echoed version.
+    if (spec.emit_services) check.addFileInput(b.path("packages/core/package.json"));
 
     // corewire projects the generated compile entry and its profile in
     // one invocation, so the profile's entry spelling and the facade
@@ -3341,6 +3591,10 @@ fn externalCoreFixtureModule(
     stage_run.addFileArg(facade);
     stage_run.addArg("--profile");
     stage_run.addFileArg(profile);
+    if (services_client) |client| {
+        stage_run.addArg("--services-client");
+        stage_run.addFileArg(client);
+    }
     stage_run.addArg("--out");
     const stage_dir = stage_run.addOutputDirectoryArg("stage");
 
@@ -3396,16 +3650,19 @@ fn externalCoreFixtureModule(
     };
 }
 
-/// Declare every .ts file in `dir_path` (relative to the build root) as a
-/// file input of the transpile step — the multi-file staleness set.
+/// Declare every .ts file under `dir_path` (relative to the build root) as a
+/// file input of the transpile step — the recursive multi-file staleness set.
+/// Service modules live below src/services/, so a flat scan would let their
+/// generated contract stay stale in a warm fixture build.
 fn tsCoreAddDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, dir_path: []const u8) void {
     var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(b.graph.io);
-    var it = dir.iterate();
-    while (it.next(b.graph.io) catch null) |entry| {
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".ts")) continue;
-        transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.name })));
+        if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
+        transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.path })));
     }
 }
 

@@ -75,6 +75,9 @@ export interface Model {
   // it must carry through exactly.
   readonly fracBytes: number;
   readonly wholeBytes: number;
+  // Dynamic invalid store limit: the facade must keep it on the host's
+  // rejection path instead of truncating it into the default limit.
+  readonly fracStoreLimit: number;
   // The expectedBytes wire boundary, model-owned like topId: 2^53 - 1
   // is the last exactly-carried count, and 2^53 (which 2^53 + 1
   // aliases on the f64 wire) must map to "unknown size" — there is no
@@ -152,8 +155,19 @@ export type Msg =
   | { readonly kind: "mix_reject_flip" }
   | { readonly kind: "chan_evt"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number }
   | { readonly kind: "notify" }
+  | { readonly kind: "store_put" }
+  | { readonly kind: "store_get" }
+  | { readonly kind: "store_delete" }
+  | { readonly kind: "store_scan" }
+  | { readonly kind: "store_many" }
+  | { readonly kind: "db_exec" }
+  | { readonly kind: "db_query" }
+  | { readonly kind: "credential_set" }
+  | { readonly kind: "credential_get" }
+  | { readonly kind: "credential_delete" }
   | { readonly kind: "open_pty" }
-  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number };
+  | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number }
+  | { readonly kind: "store_scan_invalid" };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -195,6 +209,7 @@ export function initialModel(): [Model, Cmd<Msg>] {
       topId: 9007199254740991, // 2^53 - 1, the last exactly-carried id
       fracBytes: 1.5,
       wholeBytes: 4096,
+      fracStoreLimit: 0.5,
       topBytes: 9007199254740991, // 2^53 - 1, the last exactly-carried count
       pastBytes: 9007199254740992, // 2^53 — 2^53 + 1 is this same wire value
       chanState: "closed",
@@ -451,6 +466,41 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
         subtitle: asciiBytes("native-sdk"),
         body: asciiBytes("TS core notification"),
       })];
+    case "store_put":
+      return [model, Cmd.store.set("fixture/one", model.status, { key: "store", ok: "wrote", err: "failed" })];
+    case "store_get":
+      return [model, Cmd.store.get("fixture/one", { key: "store", ok: "loaded", err: "failed" })];
+    case "store_delete":
+      return [model, Cmd.store.delete("fixture/one", { key: "store", ok: "wrote", err: "failed" })];
+    case "store_scan":
+      return [model, Cmd.store.scan("fixture/café/", { limit: 7, after: utf8Bytes("fixture/café/🚀") }, { key: "store", ok: "loaded", err: "failed" })];
+    case "store_scan_invalid":
+      // Keep this value model-derived so the facade must preserve a dynamic
+      // invalid number for the host's over_bound rejection path.
+      return [model, Cmd.store.scan("", { limit: model.fracStoreLimit }, { key: "store", ok: "loaded", err: "failed" })];
+    case "store_many":
+      return [model, Cmd.store.setMany([
+        ["fixture/one", asciiBytes("one")],
+        ["fixture/two", model.status],
+        ["fixture/café/🚀/next", asciiBytes("page")],
+      ], { key: "store", ok: "wrote", err: "failed" })];
+    case "db_exec":
+      return [model, Cmd.db.exec([
+        ["CREATE TABLE relational_fixture(id INTEGER PRIMARY KEY, label TEXT NOT NULL, score REAL, body BLOB, enabled INTEGER NOT NULL, absent TEXT)", []],
+        ["INSERT INTO relational_fixture(id,label,score,body,enabled,absent) VALUES(?,?,?,?,?,?)", [7, "café", 1.5, model.status, true, null]],
+      ], { key: "relational", ok: "wrote", err: "failed" })];
+    case "db_query":
+      return [model, Cmd.db.query(
+        "SELECT id,label,score,body,enabled,absent FROM relational_fixture WHERE id=? AND enabled=?",
+        [7, true],
+        { key: "relational", page: "loaded", done: "wrote", err: "failed" },
+      )];
+    case "credential_set":
+      return [model, Cmd.credentials.set("api-token", model.status, { key: "credential", ok: "wrote", err: "failed" })];
+    case "credential_get":
+      return [model, Cmd.credentials.get("api-token", { key: "credential", ok: "loaded", err: "failed" })];
+    case "credential_delete":
+      return [model, Cmd.credentials.delete("api-token", { key: "credential", ok: "wrote", err: "failed" })];
     case "open_pty":
       return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "fixture-pty", event: "pty_evt" })];
     case "pty_evt":

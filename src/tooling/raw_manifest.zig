@@ -11,6 +11,13 @@ pub const RawManifest = struct {
     permissions: []const []const u8 = &.{},
     capabilities: []const []const u8 = &.{},
     persist: ?RawPersist = null,
+    service_packages: []const RawServicePackage = &.{},
+    /// Which carrier runs src/services operations: "auto" (the default child
+    /// carrier), "in_process", or "child".
+    service_carrier: []const u8 = "auto",
+    /// In-process service pool width (1-16); 0 keeps the runtime default
+    /// (min(4, cores)).
+    service_pool_size: u8 = 0,
     bridge: RawBridge = .{},
     web_engine: []const u8 = @tagName(web_engine.default_engine),
     webview_layer: []const u8 = "auto",
@@ -32,6 +39,12 @@ pub const RawManifest = struct {
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
     dmg: RawDmg = .{},
+};
+
+pub const RawServicePackage = struct {
+    name: []const u8,
+    version: []const u8,
+    content_hash: []const u8,
 };
 
 pub const RawPersist = struct {

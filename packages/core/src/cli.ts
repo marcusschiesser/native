@@ -16,25 +16,45 @@
 // errors (teaching diagnostics on stderr); 2 usage.
 
 import { checkFile, formatDiagnostic, type FrontendOptions } from "./frontend.ts";
+import type { ServicePackage } from "./service_contract.ts";
 import fs from "node:fs";
+import path from "node:path";
+import ts from "@typescript/old";
 
 function main(argv: string[]): number {
   const args = argv.slice(2);
   let entry: string | null = null;
   let contractOut: string | null = null;
   let servicesContractOut: string | null = null;
+  let servicesClientOut: string | null = null;
+  let servicesEditorClientOut: string | null = null;
   let contractEntry: string | null = null;
   let persistVersion: number | null = null;
   let persistStatePath: string | null = null;
   let persistOk: string | null = null;
   let persistNone: string | null = null;
   let persistErr: string | null = null;
+  let sdkCorePath: string | null = null;
   const capabilities: string[] = [];
+  const permissions: string[] = [];
+  const servicePackages: ServicePackage[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--contract") {
       contractOut = args[++i] ?? null;
     } else if (args[i] === "--services-contract") {
       servicesContractOut = args[++i] ?? null;
+    } else if (args[i] === "--services-client") {
+      servicesClientOut = args[++i] ?? null;
+    } else if (args[i] === "--services-editor-client") {
+      servicesEditorClientOut = args[++i] ?? null;
+    } else if (args[i] === "--service-package") {
+      const spelling = args[++i] ?? "";
+      const [name, version, content_hash, extra] = spelling.split("|");
+      if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(name ?? "") || !/^\d+\.\d+\.\d+$/.test(version ?? "") || !/^[0-9a-f]{64}$/.test(content_hash ?? "") || extra !== undefined) {
+        console.error("--service-package requires name|exact-version|64-hex-content-hash");
+        return 2;
+      }
+      servicePackages.push({ name, version, content_hash });
     } else if (args[i] === "--contract-entry") {
       contractEntry = args[++i] ?? null;
     } else if (args[i] === "--capability") {
@@ -44,6 +64,13 @@ function main(argv: string[]): number {
         return 2;
       }
       capabilities.push(capability);
+    } else if (args[i] === "--permission") {
+      const permission = args[++i] ?? null;
+      if (permission === null) {
+        console.error("--permission requires a name");
+        return 2;
+      }
+      permissions.push(permission);
     } else if (args[i] === "--persist-version") {
       const spelling = args[++i] ?? "";
       const version = Number(spelling);
@@ -74,6 +101,12 @@ function main(argv: string[]): number {
       persistErr = args[++i] ?? null;
       if (persistErr === null) {
         console.error("--persist-err requires a Msg arm name");
+        return 2;
+      }
+    } else if (args[i] === "--sdk-core") {
+      sdkCorePath = args[++i] ?? null;
+      if (sdkCorePath === null) {
+        console.error("--sdk-core requires a generated core.ts path");
         return 2;
       }
     } else if (args[i] === "-o" || args[i] === "--out") {
@@ -108,10 +141,13 @@ function main(argv: string[]): number {
     // POSIX separators (the sidecar/facade contract is platform-free).
     contractEntry: contractOut !== null ? (contractEntry ?? entry.split("\\").join("/")) : undefined,
     servicesContract: servicesContractOut !== null,
+    servicePackages,
     capabilities,
+    permissions,
     persistVersion: persistVersion ?? undefined,
     persistStatePath: persistStatePath ?? undefined,
     persistRoutes,
+    sdkCorePath: sdkCorePath ?? undefined,
   };
   const result = checkFile(entry, options);
   for (const e of result.typeErrors) console.error(e);
@@ -132,6 +168,41 @@ function main(argv: string[]): number {
       return 1;
     }
     fs.writeFileSync(servicesContractOut, result.servicesContract);
+  }
+  if (servicesClientOut !== null) {
+    if (result.servicesClient === null) {
+      console.error("the app has no src/services/**/*.ts modules, so there is no typed service client to emit");
+      return 1;
+    }
+    fs.writeFileSync(servicesClientOut, result.servicesClient);
+  }
+  if (servicesEditorClientOut !== null) {
+    if (result.servicesClient === null) {
+      console.error("the app has no src/services/**/*.ts modules, so there is no typed service client to emit");
+      return 1;
+    }
+    const editorDir = path.dirname(servicesEditorClientOut);
+    fs.mkdirSync(editorDir, { recursive: true });
+    const sourcePrefix = path.relative(path.resolve(editorDir), path.dirname(path.resolve(entry))).split(path.sep).join("/");
+    const editorSource = result.servicesClient.replaceAll('from "./', `from "${sourcePrefix}/`);
+    fs.writeFileSync(servicesEditorClientOut, editorSource);
+    const declaration = ts.transpileDeclaration(editorSource, {
+      fileName: "index.ts",
+      compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
+      reportDiagnostics: true,
+    });
+    if (declaration.diagnostics?.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)) {
+      console.error("internal: the generated editor service client could not emit declarations");
+      return 1;
+    }
+    fs.writeFileSync(`${editorDir}/index.d.ts`, declaration.outputText);
+    fs.writeFileSync(`${editorDir}/package.json`, `${JSON.stringify({
+      name: "@native-sdk/services",
+      private: true,
+      type: "module",
+      types: "./index.d.ts",
+      exports: { ".": { types: "./index.d.ts", default: "./index.ts" } },
+    }, null, 2)}\n`);
   }
   return 0;
 }

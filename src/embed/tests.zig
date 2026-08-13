@@ -29,6 +29,7 @@ const mobileWidgetActions = conversions.mobileWidgetActions;
 const mobileWidgetActionKindFromInt = conversions.mobileWidgetActionKindFromInt;
 const native_sdk_app_create = c_api.native_sdk_app_create;
 const native_sdk_app_destroy = c_api.native_sdk_app_destroy;
+const native_sdk_app_destroy_with_status = c_api.native_sdk_app_destroy_with_status;
 const native_sdk_app_start = c_api.native_sdk_app_start;
 const native_sdk_app_activate = c_api.native_sdk_app_activate;
 const native_sdk_app_deactivate = c_api.native_sdk_app_deactivate;
@@ -264,6 +265,17 @@ test "mobile C ABI destroy returns registered font bytes through the embedded de
     // through `EmbeddedApp.deinit` (one lifecycle owner), so the
     // leak-checked font bytes must come back here.
     native_sdk_app_destroy(app);
+}
+
+test "mobile C ABI destroy status reports whether callback context must survive" {
+    const normal = native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(c_int, 0), native_sdk_app_destroy_with_status(normal));
+
+    const preserved = native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    mobileApp(preserved).?.null_platform.channel_wake_abandoned.store(true, .seq_cst);
+    // The host is deliberately process-lived after this call, exactly like a
+    // real detached callback's context. Do not touch or destroy it again.
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_app_destroy_with_status(preserved));
 }
 
 test "mobile C ABI can load packaged asset source" {
@@ -1019,6 +1031,136 @@ const MobileCounterDef = struct {
 
 const MobileCounterHost = ui_host.UiAppHost(MobileCounterDef);
 const MobileCounterApi = c_api.MobileCApi(MobileCounterHost);
+const MobileStoreHost = ui_host.UiAppHostWithRecordStore(MobileCounterDef, true);
+const MobileStoreApi = c_api.MobileCApi(MobileStoreHost);
+const MobileRelationalHost = ui_host.UiAppHostWithStorage(MobileCounterDef, false, true, &.{});
+const MobileRelationalApi = c_api.MobileCApi(MobileRelationalHost);
+const MobileBothStorageHost = ui_host.UiAppHostWithStorage(MobileCounterDef, true, true, &.{});
+const MobileBothStorageApi = c_api.MobileCApi(MobileBothStorageHost);
+const MobileCredentialHost = ui_host.UiAppHostWithStorageAndCredentials(
+    MobileCounterDef,
+    false,
+    false,
+    &.{},
+    true,
+    true,
+    "dev.native-sdk.mobile-credentials",
+);
+const MobileCredentialApi = c_api.MobileCApi(MobileCredentialHost);
+
+const MobileCredentialRecorder = struct {
+    secret: [64]u8 = undefined,
+    secret_len: usize = 0,
+    present: bool = false,
+};
+
+fn mobileCredentialRecorder(context: ?*anyopaque) *MobileCredentialRecorder {
+    return @ptrCast(@alignCast(context.?));
+}
+
+fn mobileCredentialSet(
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+    secret: ?[*]const u8,
+    secret_len: usize,
+) callconv(.c) c_int {
+    _ = service;
+    _ = service_len;
+    _ = account;
+    _ = account_len;
+    const recorder = mobileCredentialRecorder(context);
+    if (secret_len > recorder.secret.len) return -5;
+    if (secret_len > 0) @memcpy(recorder.secret[0..secret_len], secret.?[0..secret_len]);
+    recorder.secret_len = secret_len;
+    recorder.present = true;
+    return 1;
+}
+
+fn mobileCredentialGet(
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+    output: ?[*]u8,
+    output_len: usize,
+) callconv(.c) i64 {
+    _ = service;
+    _ = service_len;
+    _ = account;
+    _ = account_len;
+    const recorder = mobileCredentialRecorder(context);
+    if (!recorder.present) return -1;
+    if (recorder.secret_len > output_len) return -4;
+    if (recorder.secret_len > 0) @memcpy(output.?[0..recorder.secret_len], recorder.secret[0..recorder.secret_len]);
+    return @intCast(recorder.secret_len);
+}
+
+fn mobileCredentialDelete(
+    context: ?*anyopaque,
+    service: ?[*]const u8,
+    service_len: usize,
+    account: ?[*]const u8,
+    account_len: usize,
+) callconv(.c) c_int {
+    _ = service;
+    _ = service_len;
+    _ = account;
+    _ = account_len;
+    const recorder = mobileCredentialRecorder(context);
+    if (!recorder.present) return 0;
+    recorder.present = false;
+    recorder.secret_len = 0;
+    return 1;
+}
+
+test "mobile credential service uses app identity and preserves misses" {
+    const app = MobileCredentialApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileCredentialApi.native_sdk_app_destroy(app);
+    const self: *MobileCredentialHost = @ptrCast(@alignCast(app));
+
+    try std.testing.expect(self.embedded.runtime.options.credentials_enabled);
+    try std.testing.expectEqualStrings(
+        "dev.native-sdk.mobile-credentials",
+        self.embedded.runtime.options.platform.app_info.bundle_id,
+    );
+    try std.testing.expect(self.embedded.runtime.options.platform.services.set_credential_fn == null);
+
+    var recorder = MobileCredentialRecorder{};
+    const service: types.MobileCredentialService = .{
+        .set = mobileCredentialSet,
+        .get = mobileCredentialGet,
+        .delete = mobileCredentialDelete,
+    };
+    try std.testing.expectEqual(
+        @as(c_int, 1),
+        MobileCredentialApi.native_sdk_app_set_credential_service(app, &service, &recorder),
+    );
+
+    const services = self.embedded.runtime.options.platform.services;
+    try services.setCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+        .secret = "secret-bytes",
+    });
+    var output: [64]u8 = undefined;
+    const secret = try services.getCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+    }, &output);
+    try std.testing.expectEqualStrings("secret-bytes", secret);
+    try services.deleteCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+    });
+    try std.testing.expectError(error.CredentialNotFound, services.getCredential(.{
+        .service = "dev.native-sdk.mobile-credentials",
+        .account = "token",
+    }, &output));
+}
 
 fn expectNoUiHostError(app: ?*anyopaque) !void {
     try std.testing.expectEqualStrings("", std.mem.span(MobileCounterApi.native_sdk_app_last_error_name(app)));
@@ -1050,6 +1192,77 @@ fn tapMobileWidget(app: ?*anyopaque, node: MobileWidgetSemantics) !void {
     try expectNoUiHostError(app);
     MobileCounterApi.native_sdk_app_touch(app, 1, 1, x, y, 0);
     try expectNoUiHostError(app);
+}
+
+test "mobile store capability requires and binds the OS app-data root before start" {
+    const app = MobileStoreApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileStoreApi.native_sdk_app_destroy(app);
+    const self: *MobileStoreHost = @ptrCast(@alignCast(app));
+
+    MobileStoreApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("StoreDataDirUnavailable", std.mem.span(MobileStoreApi.native_sdk_app_last_error_name(app)));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/mobile-store", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    try std.testing.expectEqual(@as(c_int, 1), MobileStoreApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
+    try std.testing.expect(self.record_store_open);
+    try std.testing.expect(self.embedded.runtime.options.record_store != null);
+
+    MobileStoreApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("", std.mem.span(MobileStoreApi.native_sdk_app_last_error_name(app)));
+    var surface_token: u8 = 0;
+    MobileStoreApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileStoreApi.native_sdk_app_frame(app);
+    try self.ui.dispatch(&self.embedded.runtime, 1, .increment);
+    try std.testing.expect(self.ui.effects.record_store_binding != null);
+    MobileStoreApi.native_sdk_app_stop(app);
+}
+
+test "mobile relational capability opens app.db from the OS app-data root" {
+    const app = MobileRelationalApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileRelationalApi.native_sdk_app_destroy(app);
+    const self: *MobileRelationalHost = @ptrCast(@alignCast(app));
+
+    MobileRelationalApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("SqliteDataDirUnavailable", std.mem.span(MobileRelationalApi.native_sdk_app_last_error_name(app)));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/mobile-relational", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    try std.testing.expectEqual(@as(c_int, 1), MobileRelationalApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
+    try std.testing.expect(self.relational_store_open);
+    try std.testing.expect(self.embedded.runtime.options.relational_store != null);
+
+    MobileRelationalApi.native_sdk_app_start(app);
+    try std.testing.expectEqualStrings("", std.mem.span(MobileRelationalApi.native_sdk_app_last_error_name(app)));
+    var surface_token: u8 = 0;
+    MobileRelationalApi.native_sdk_app_viewport(app, 390, 844, 1, &surface_token, 0, 0, 0, 0, 0, 0, 0, 0);
+    MobileRelationalApi.native_sdk_app_frame(app);
+    try self.ui.dispatch(&self.embedded.runtime, 1, .increment);
+    try std.testing.expect(self.ui.effects.relational_store_binding != null);
+    MobileRelationalApi.native_sdk_app_stop(app);
+}
+
+test "mobile host binds record and relational databases together" {
+    const app = MobileBothStorageApi.native_sdk_app_create() orelse return error.TestUnexpectedResult;
+    defer MobileBothStorageApi.native_sdk_app_destroy(app);
+    const self: *MobileBothStorageHost = @ptrCast(@alignCast(app));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/mobile-both-storage", .{tmp.sub_path[0..]});
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, path);
+    try std.testing.expectEqual(@as(c_int, 1), MobileBothStorageApi.native_sdk_app_set_data_root(app, path.ptr, path.len));
+    try std.testing.expect(self.record_store_open);
+    try std.testing.expect(self.relational_store_open);
+    try std.testing.expect(self.embedded.runtime.options.record_store != null);
+    try std.testing.expect(self.embedded.runtime.options.relational_store != null);
 }
 
 test "mobile C ABI drives a user UiApp canvas scene end to end" {
