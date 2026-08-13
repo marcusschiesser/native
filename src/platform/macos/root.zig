@@ -579,9 +579,8 @@ pub const MacPlatform = struct {
     app_info: platform_mod.AppInfo,
     surface_value: platform_mod.Surface,
     state: RunState = .{},
-    /// Latched when the runtime's effects teardown abandons an
-    /// in-flight channel `wake_fn` call (see
-    /// `PlatformServices.note_channel_wake_abandoned_fn`): the stale
+    /// Latched when effects teardown abandons an in-flight platform call
+    /// (a channel wake or blocking credential operation): the stale
     /// call still holds this platform as its context and may execute
     /// into it at any later time, so `deinit` must skip destruction
     /// and leak the host, process-lived — and the wrapper struct the
@@ -681,13 +680,13 @@ pub const MacPlatform = struct {
     }
 
     pub fn deinit(self: *MacPlatform) void {
-        // An abandoned channel wake call may still enter this host at
+        // An abandoned platform call may still enter this host at
         // any later time (see `channel_wake_abandoned`): destroying it
         // would turn that stale call into a use-after-free, so the
         // host is deliberately leaked, process-lived — the
         // abandoned-worker idiom, applied to the platform itself.
         if (self.channel_wake_abandoned.load(.seq_cst)) {
-            std.debug.print("macos platform teardown: an abandoned channel wake call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
+            std.debug.print("macos platform teardown: an abandoned platform call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
             return;
         }
         native_sdk_appkit_destroy(self.host);
@@ -745,6 +744,7 @@ pub const MacPlatform = struct {
                 .set_credential_fn = setCredential,
                 .get_credential_fn = getCredential,
                 .delete_credential_fn = deleteCredential,
+                .note_blocking_call_abandoned_fn = noteChannelWakeAbandoned,
                 .format_local_time_fn = formatLocalTime,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
@@ -2114,7 +2114,7 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
 
 fn setCredential(context: ?*anyopaque, credential: platform_mod.Credential) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    if (native_sdk_appkit_set_credential(
+    const result = native_sdk_appkit_set_credential(
         self.host,
         credential.service.ptr,
         credential.service.len,
@@ -2122,7 +2122,10 @@ fn setCredential(context: ?*anyopaque, credential: platform_mod.Credential) anye
         credential.account.len,
         credential.secret.ptr,
         credential.secret.len,
-    ) == 0) return error.UnsupportedService;
+    );
+    if (result == -2) return error.CredentialStoreLocked;
+    if (result == -3) return error.AccessDenied;
+    if (result <= 0) return error.CredentialStoreFailed;
 }
 
 fn getCredential(context: ?*anyopaque, key: platform_mod.CredentialKey, buffer: []u8) anyerror![]const u8 {
@@ -2136,20 +2139,27 @@ fn getCredential(context: ?*anyopaque, key: platform_mod.CredentialKey, buffer: 
         buffer.ptr,
         buffer.len,
     );
-    if (len == 0) return error.CredentialNotFound;
+    if (len == std.math.maxInt(usize)) return error.CredentialNotFound;
+    if (len == std.math.maxInt(usize) - 2) return error.CredentialStoreLocked;
+    if (len == std.math.maxInt(usize) - 3) return error.AccessDenied;
+    if (len == std.math.maxInt(usize) - 1) return error.CredentialStoreFailed;
     if (len > buffer.len) return error.NoSpaceLeft;
     return buffer[0..len];
 }
 
 fn deleteCredential(context: ?*anyopaque, key: platform_mod.CredentialKey) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    if (native_sdk_appkit_delete_credential(
+    const result = native_sdk_appkit_delete_credential(
         self.host,
         key.service.ptr,
         key.service.len,
         key.account.ptr,
         key.account.len,
-    ) == 0) return error.CredentialNotFound;
+    );
+    if (result == -2) return error.CredentialStoreLocked;
+    if (result == -3) return error.AccessDenied;
+    if (result < 0) return error.CredentialStoreFailed;
+    if (result == 0) return error.CredentialNotFound;
 }
 
 fn formatLocalTime(context: ?*anyopaque, timestamp_ms: i64, style: platform_mod.LocalTimeStyle, buffer: []u8) anyerror![]const u8 {

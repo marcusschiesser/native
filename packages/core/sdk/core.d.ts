@@ -3,12 +3,31 @@ export declare function utf8Bytes(s: string): Uint8Array;
 export type Msgish = {
     readonly kind: string;
 };
+/** Cooperative cancellation capability supplied by generated service hosts. */
+export interface ServiceCancellation {
+    /** True after Cmd.cancel or the operation deadline requests cancellation. */
+    readonly cancelled: () => boolean;
+    /** Throw a boundary-tagged cancellation error when cancellation was requested. */
+    readonly throwIfCancelled: () => void;
+}
 export type TimestampKind<M extends Msgish> = M extends Msgish ? {
     [K in Exclude<keyof M, "kind">]-?: M[K] extends number ? [Exclude<keyof M, "kind">] extends [K] ? M["kind"] : never : never;
 }[Exclude<keyof M, "kind">] : never;
 export type BytesKind<M extends Msgish> = M extends Msgish ? {
     [K in Exclude<keyof M, "kind">]-?: M[K] extends Uint8Array ? [Exclude<keyof M, "kind">] extends [K] ? M["kind"] : never : never;
 }[Exclude<keyof M, "kind">] : never;
+export type ServiceKind<M extends Msgish, P> = M extends Msgish ? {
+    [K in Exclude<keyof M, "kind">]-?: M[K] extends P ? P extends M[K] ? [Exclude<keyof M, "kind">] extends [K] ? M["kind"] : never : never : never;
+}[Exclude<keyof M, "kind">] : never;
+export interface ServiceRoute<M extends Msgish, P> {
+    readonly key?: string;
+    readonly ok: ServiceKind<M, P>;
+    readonly err: BytesKind<M>;
+}
+export interface ServiceStreamRoute<M extends Msgish, P> extends ServiceRoute<M, P> {
+    readonly channelKey: number;
+    readonly event: ChannelEventKind<M>;
+}
 export type EmptyKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [never] ? M["kind"] : never : never;
 export type FetchedKind<M extends Msgish> = M extends Msgish ? {
     [K in Exclude<keyof M, "kind">]-?: M[K] extends Uint8Array ? Exclude<keyof M, "kind" | K> extends infer O ? O extends keyof M ? M[O] extends number ? [Exclude<keyof M, "kind" | K | O>] extends [never] ? M["kind"] : never : never : never : never : never;
@@ -117,6 +136,31 @@ export interface WriteRoute<M extends Msgish> {
     readonly ok: EmptyKind<M>;
     readonly err: BytesKind<M>;
 }
+export interface StoreScanOptions {
+    readonly limit?: number;
+    readonly after?: string | Uint8Array;
+}
+export interface DbText {
+    readonly __dbText: true;
+    readonly bytes: ReadonlyArray<number>;
+}
+export declare function dbText(bytes: Uint8Array): DbText;
+export type DbValue = null | number | string | Uint8Array | boolean | DbText;
+export type DbStatement = readonly [sql: string, params: ReadonlyArray<DbValue>];
+export interface DbRowsRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly page: BytesKind<M>;
+    readonly done: EmptyKind<M>;
+    readonly err: BytesKind<M>;
+}
+export interface TypedRowsRoute<Row, M extends Msgish> extends DbRowsRoute<M> {
+    readonly __row?: Row;
+}
+export interface TypedDbStatement {
+    readonly sql: string;
+    readonly params: ReadonlyArray<DbValue>;
+    readonly __typedDbStatement: true;
+}
 export interface FetchRoute<M extends Msgish> {
     readonly key?: string;
     readonly ok: FetchedKind<M>;
@@ -211,6 +255,18 @@ export type Cmd<M extends Msgish> = {
     readonly key: string;
     readonly okKind: string;
     readonly errKind: string;
+    readonly typedService: boolean;
+    readonly payload: Uint8Array;
+} | {
+    readonly op: "service_stream_request";
+    readonly name: string;
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly typedService: true;
+    readonly channelKey: number;
+    readonly eventKind: string;
+    readonly maxPending: number;
     readonly payload: Uint8Array;
 } | {
     readonly op: "cancel";
@@ -228,6 +284,47 @@ export type Cmd<M extends Msgish> = {
     readonly errKind: string;
     readonly path: Uint8Array;
     readonly bytes: Uint8Array;
+} | {
+    readonly op: "store_set";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly storeKey: string;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "store_get" | "store_delete";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly storeKey: string;
+} | {
+    readonly op: "store_scan";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly prefix: string;
+    readonly limit: number;
+    readonly after: string | Uint8Array;
+} | {
+    readonly op: "store_set_many";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly entries: ReadonlyArray<readonly [string, Uint8Array]>;
+} | {
+    readonly op: "db_query";
+    readonly key: string;
+    readonly pageKind: string;
+    readonly doneKind: string;
+    readonly errKind: string;
+    readonly sql: string;
+    readonly params: ReadonlyArray<DbValue>;
+} | {
+    readonly op: "db_exec";
+    readonly key: string;
+    readonly okKind: string;
+    readonly errKind: string;
+    readonly statements: ReadonlyArray<DbStatement>;
 } | {
     readonly op: "fetch";
     readonly key: string;
@@ -340,6 +437,7 @@ export type Cmd<M extends Msgish> = {
     readonly op: "channel_open";
     readonly key: number;
     readonly eventKind: string;
+    readonly maxPending: number;
 } | {
     readonly op: "channel_close";
     readonly key: number;
@@ -378,6 +476,15 @@ export type Cmd<M extends Msgish> = {
     readonly cmds: readonly Cmd<M>[];
 };
 export declare function hostRecordBytes(payload: HostRecord): Uint8Array;
+export declare function serviceConcat(parts: readonly Uint8Array[]): Uint8Array;
+export declare function serviceBoolBytes(value: boolean): Uint8Array;
+export declare function serviceF64Bytes(value: number): Uint8Array;
+export declare function serviceI64Bytes(value: number): Uint8Array;
+export declare function serviceBytes(value: Uint8Array): Uint8Array;
+export declare function serviceEnumBytes(index: number): Uint8Array;
+export declare function serviceUnionBytes(index: number): Uint8Array;
+export declare function serviceOptionalBytes(value: Uint8Array | null): Uint8Array;
+export declare function serviceSliceBytes(values: readonly Uint8Array[]): Uint8Array;
 declare function hostCmd(name: string, payload: Uint8Array | HostRecord): Cmd<never>;
 declare function hostCmd(name: string, ...args: readonly number[]): Cmd<never>;
 declare function fetchCmd<M extends Msgish>(spec: FetchSpec, route: FetchRoute<M>): Cmd<M>;
@@ -388,18 +495,33 @@ export declare const Cmd: {
     now<M extends Msgish>(msgKind: TimestampKind<M>): Cmd<M>;
     host: typeof hostCmd;
     request<M extends Msgish>(name: string, payload: Uint8Array | HostRecord, route: RequestRoute<M>): Cmd<M>;
+    serviceRequest<M extends Msgish, P>(name: string, payload: Uint8Array, route: ServiceRoute<M, P>): Cmd<M>;
+    serviceStreamRequest<M extends Msgish, P>(name: string, channelKey: number, payload: Uint8Array, route: ServiceStreamRoute<M, P>, maxPending: number): Cmd<M>;
     cancel(key: string): Cmd<never>;
     readFile<M extends Msgish>(path: Uint8Array, route: RequestRoute<M>): Cmd<M>;
     writeFile<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+    store: {
+        set<M extends Msgish>(storeKey: string, bytes: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+        get<M extends Msgish>(storeKey: string, route: RequestRoute<M>): Cmd<M>;
+        delete<M extends Msgish>(storeKey: string, route: WriteRoute<M>): Cmd<M>;
+        scan<M extends Msgish>(prefix: string, options: StoreScanOptions, route: RequestRoute<M>): Cmd<M>;
+        setMany<M extends Msgish>(entries: ReadonlyArray<readonly [string, Uint8Array]>, route: WriteRoute<M>): Cmd<M>;
+    };
+    credentials: {
+        set<M extends Msgish>(credentialKey: string, secret: Uint8Array, route: WriteRoute<M>): Cmd<M>;
+        get<M extends Msgish>(credentialKey: string, route: RequestRoute<M>): Cmd<M>;
+        delete<M extends Msgish>(credentialKey: string, route: WriteRoute<M>): Cmd<M>;
+    };
+    db: {
+        query<M extends Msgish>(sql: string, params: ReadonlyArray<DbValue>, route: DbRowsRoute<M>): Cmd<M>;
+        exec<M extends Msgish>(statements: ReadonlyArray<DbStatement>, route: WriteRoute<M>): Cmd<M>;
+    };
     fetch: typeof fetchCmd;
     clipboardWrite(bytes: Uint8Array): Cmd<never>;
     clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
     showNotification(spec: NotificationSpec): Cmd<never>;
     openExternalUrl(url: Uint8Array): Cmd<never>;
     revealPath(path: Uint8Array): Cmd<never>;
-    credentialSet<M extends Msgish>(service: Uint8Array, account: Uint8Array, secret: Uint8Array, route: RequestRoute<M>): Cmd<M>;
-    credentialGet<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M>;
-    credentialDelete<M extends Msgish>(service: Uint8Array, account: Uint8Array, route: RequestRoute<M>): Cmd<M>;
     formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M>;
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;
@@ -443,6 +565,15 @@ export type Sub<M extends Msgish> = {
     readonly key: string;
     readonly everyMs: number;
     readonly msgKind: string;
+} | {
+    readonly op: "db_live";
+    readonly key: string;
+    readonly pageKind: string;
+    readonly doneKind: string;
+    readonly errKind: string;
+    readonly sql: string;
+    readonly params: ReadonlyArray<DbValue>;
+    readonly tables: readonly string[];
 } | {
     readonly op: "batch";
     readonly subs: readonly Sub<M>[];

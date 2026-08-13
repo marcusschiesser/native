@@ -2910,6 +2910,7 @@ test "mobile package templates ship the toolkit hosts" {
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_text_input_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_set_text_measure") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_set_asset_root") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_set_data_root") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "native_sdk_app_widget_semantics_by_id") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "view.safeAreaInsets") != null);
     try std.testing.expect(std.mem.indexOf(u8, ios_host, "_dyld_get_image_header_containing_address") != null);
@@ -2935,6 +2936,7 @@ test "mobile package templates ship the toolkit hosts" {
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "native_sdk_app_text_input_state") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "native_sdk_app_set_text_measure") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "native_sdk_app_set_asset_root") != null);
+    try std.testing.expect(std.mem.indexOf(u8, android_bridge, "native_sdk_app_set_data_root") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "ANativeWindow_fromSurface") != null);
     try std.testing.expect(std.mem.indexOf(u8, android_bridge, "WINDOW_FORMAT_RGBA_8888") != null);
 }
@@ -3397,11 +3399,14 @@ test "normal build service host is discovered only for a service-bearing app" {
     const root = ".zig-cache/test-package-service-discovery";
     try cwd.deleteTree(std.testing.io, root);
     defer cwd.deleteTree(std.testing.io, root) catch {};
-    try cwd.createDirPath(std.testing.io, root ++ "/src/services");
+    try cwd.createDirPath(std.testing.io, root ++ "/src/services/nested");
     try cwd.createDirPath(std.testing.io, root ++ "/zig-out/bin");
-    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/src/services/feeds.ts", .data = "export function parse(): Uint8Array { return new Uint8Array(0); }" });
     try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/zig-out/bin/service-demo_services", .data = "service" });
 
+    try std.testing.expect(!try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/src/services/types.d.ts", .data = "export interface Ignored {}" });
+    try std.testing.expect(!try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
+    try cwd.writeFile(std.testing.io, .{ .sub_path = root ++ "/src/services/nested/feeds.ts", .data = "export function parse(): Uint8Array { return new Uint8Array(0); }" });
     try std.testing.expect(try projectHasTypeScriptServices(std.testing.allocator, std.testing.io, root));
     const discovered = (try discoverInstalledServiceBinary(std.testing.allocator, std.testing.io, root, "service-demo", .linux)).?;
     defer std.testing.allocator.free(discovered);
