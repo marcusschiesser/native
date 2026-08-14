@@ -681,7 +681,7 @@ Streaming responses (`.response = .stream`) frame the body into `on_line` Msgs a
 
 Stream rules: each body line is one `on_line` Msg (same payload type and copy rule as spawn lines; `max_line_bytes` mirrors the spawn override with the same 256 KiB ceiling); the terminal `on_response` Msg carries the real HTTP status with an empty body; `fx.cancel(key)` mid-stream stops the lines and delivers exactly one `.cancelled` terminal; the whole-exchange `timeout_ms` covers the stream's full lifetime, so raise it for long-running commands; lines dropped on a full queue that no later line reported ride the terminal's `response.dropped_before`. In the fake executor, `feedLine` feeds a stream fetch's lines and `feedResponse(key, status, "")` delivers its terminal.
 
-`fx.writeFile` / `fx.readFile` are TEA-friendly file persistence — session snapshots, app state — without smuggling an `Io` handle from `main` into `update`. Same discipline as spawn and fetch: bounded, key-based (shared key space and 16 slots), exactly one terminal Msg with an explicit outcome:
+`fx.writeFile` / `fx.readFile` are TEA-friendly raw file effects for user-visible files, exports, and blobs — app state belongs in the engine-owned storage tiers. Same discipline as spawn and fetch: bounded, key-based, and explicit outcomes:
 
 ```zig
 pub const Msg = union(enum) {
@@ -708,8 +708,10 @@ pub const Msg = union(enum) {
 
 File rules:
 
-- `result.outcome` is explicit: `.ok` (a read's whole content in `result.bytes`; a write fully on disk), `.not_found` (reads only — writes create the path, parent directories included), `.io_failed` (permissions, path is a directory, disk), `.truncated` (the file exceeds the 1 MiB `max_effect_file_bytes`; `result.bytes` is the first bound bytes — its own outcome, not a flag, because a cut JSON snapshot must not parse as whole), `.rejected` (never ran: slots busy, duplicate key, empty/over-long path, write bytes over the bound — an over-bound WRITE is rejected outright since a partial write would corrupt the file), `.cancelled`.
+- `result.outcome` is explicit: `.ok`, `.not_found`, `.io_failed`, `.truncated`, `.rejected`, `.cancelled`, `.sink_missing`, `.out_of_order`, or `.disk_full`.
 - Writes replace the file whole; `writeFile` bytes are copied at call time so the caller's buffer is immediately reusable. Reads deliver drain-scratch bytes — copy what the model keeps.
+- `appendFile` appends one payload up to 1 MiB; `statFile` returns existence, size, and mtime. `readFileStream` emits 256-KiB chunks then `.done(total)`. `writeFileStream` opens an atomic sink; acknowledge each `writeFileChunk` before sending the next, then `writeFileClose` syncs and atomically installs the destination. Streaming owns four slots separate from the general sixteen.
+- Raw paths under this app's resolved data/config/cache/state/logs/temp roots need no grant. Every external path requires the `filesystem` permission. The runtime resolves existing parents and symlinks before checking, so an in-root symlink pointing out is external.
 - In the fake executor: `pendingFileAt(0)` records `key`/`op`/`path`/`bytes` for assertions; `feedFileResult(key, .ok, "{...}")` answers a read (over-bound content is cut and rewritten to `.truncated`, mirroring the real reader), `feedFileResult(key, .ok, "")` acknowledges a write; failure outcomes pass through as fed.
 
 `fx.credentialsSet` / `fx.credentialsGet` / `fx.credentialsDelete` are the only place authentication tokens, passwords, and similar app secrets belong. Declare both `.capabilities = .{ "credentials" }` and `.permissions = .{ "credentials" }` in `app.zon`; the stable app id is the OS keychain service namespace, while the supplied key is its account. Never copy a fetched secret into Model: consume the drain-scratch `result.bytes` immediately while constructing the next effect, so persistence, state fingerprints, and diagnostics cannot capture it.
@@ -874,7 +876,7 @@ The `.wake` platform event is how live platforms marshal worker completions onto
 
 ## Secondary windows in Zig cores: model-declared (`windows_fn` + `window_view`)
 
-Windows are model state, like an anchored surface's open flag. `Options.windows_fn` returns the descriptors that should exist RIGHT NOW (presence is visibility — no `visible` flag; the platform window channel has no hide); `Options.window_view` builds each declared window's whole canvas tree by window label. The runtime reconciles after every dispatch: create the newly declared, close the no-longer-declared, rebuild every open window's view from the same model.
+Windows are model state, like an anchored surface's open flag. `Options.windows_fn` returns the descriptors that should exist RIGHT NOW (presence is liveness); `Options.window_view` builds each declared window's whole canvas tree by window label. The runtime reconciles after every dispatch: create the newly declared, close the no-longer-declared, rebuild every open window's view from the same model. There is no `visible` flag: transient visibility is host state changed through `hideWindow`/`showWindow` or a `.hide` close policy; stop declaring the window to really close it and release its retained views.
 
 ```zig
 fn windows(model: *const Model, scratch: *App.WindowsScratch) []const App.WindowDescriptor {
@@ -896,7 +898,7 @@ fn windowView(ui: *App.Ui, model: *const Model, window_label: []const u8) App.Ui
 
 Rules that matter:
 - **Every canvas label must be unique across the app** (main + declared windows); input routes back by it, and automation verbs (`widget-click <canvas-label> <id>`, `screenshot`) address any window's canvas the same way.
-- **A user close dispatches `on_close`** (the dismissal precedent): the window is already gone as the optimistic echo; clear the open flag in `update` — or keep declaring the window and the next rebuild brings it back (source wins). A close the model itself initiated never echoes a Msg.
+- **Close policy**: `WindowDescriptor.close_policy` is `.quit` by default; a user close really closes and dispatches `on_close` (the dismissal precedent), so clear the open flag in `update` — or keep declaring the window and the next rebuild brings it back (source wins). `.hide` keeps the same window, slot, and views alive, dispatches no `on_close`, and `showWindow(label)` reveals it. A close the model itself initiated never echoes a Msg. Existing platform safeguards still apply: unsupported hosts refuse `.hide` rather than strand an unreachable window.
 - **Budget**: at most `UiApp.max_ui_windows` (4) declared windows; excess warns and is ignored. Every dispatched Msg rebuilds every open window's view.
 - **Present-before-show**: canvas windows (any `gpu_surface` view — startup, scene, and declared windows alike) are created ordered-out and become visible only after their first canvas frame presents, so opening one never flashes blank. Automatic (`WindowOptions.show = .on_first_present`, derived from the views); webview windows show immediately. The null platform records `window_show`, `window_visible`, and present/shown sequence numbers for ordering assertions; `NATIVE_SDK_WINDOW_TIMING=1` logs create→show latency on macOS.
 - **Markup binds ONE window's content** — there is no `window` element in the closed grammar. A markup-authored secondary window is a `canvas.CompiledMarkupView` whose `build` `window_view` calls for that label.

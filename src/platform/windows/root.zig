@@ -41,6 +41,7 @@ const WindowsEventKind = enum(c_int) {
     context_menu_action = 19,
     view_focused = 20,
     tray_command = 21,
+    notification_command = 22,
 };
 
 const WindowsEvent = extern struct {
@@ -188,7 +189,7 @@ extern fn native_sdk_windows_reveal_path(host: *WindowsHost, path: [*]const u8, 
 extern fn native_sdk_windows_show_open_dialog(host: *WindowsHost, opts: *const WindowsOpenDialogOpts, buffer: [*]u8, buffer_len: usize) WindowsOpenDialogResult;
 extern fn native_sdk_windows_show_save_dialog(host: *WindowsHost, opts: *const WindowsSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_windows_show_message_dialog(host: *WindowsHost, opts: *const WindowsMessageDialogOpts) c_int;
-extern fn native_sdk_windows_show_notification(host: *WindowsHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize) c_int;
+extern fn native_sdk_windows_show_notification(host: *WindowsHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, action_command: [*]const u8, action_command_len: usize) c_int;
 extern fn native_sdk_windows_create_tray(host: *WindowsHost, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) c_int;
 extern fn native_sdk_windows_update_tray_menu(host: *WindowsHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) c_int;
 extern fn native_sdk_windows_remove_tray(host: *WindowsHost) void;
@@ -675,8 +676,12 @@ fn windowsCallback(context: ?*anyopaque, event: *const WindowsEvent) callconv(.c
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
         } }),
-        .tray_action => state.emit(.{ .tray_action = event.tray_item_id }),
+        .tray_action => state.emit(.{ .tray_action = .{ .item_id = event.tray_item_id } }),
         .tray_command => state.emit(.{ .tray_command = .{
+            .name = event.command_name[0..event.command_name_len],
+            .window_id = event.window_id,
+        } }),
+        .notification_command => state.emit(.{ .notification_command = .{
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
         } }),
@@ -1488,13 +1493,20 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
         options.subtitle.len,
         options.body.ptr,
         options.body.len,
+        options.id.ptr,
+        options.id.len,
+        options.action_label.ptr,
+        options.action_label.len,
+        options.action_command.ptr,
+        options.action_command.len,
     ) == 0) return error.UnsupportedService;
 }
 
 const max_tray_items: usize = 32;
 
-fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
+fn createTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, options: platform_mod.TrayOptions) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (status_item_id != platform_mod.primary_status_item_id) return error.UnsupportedService;
     if (self.web_engine != .system) return error.UnsupportedService;
     if (native_sdk_windows_create_tray(
         self.host,
@@ -1510,12 +1522,13 @@ fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!
         options.open_command.len,
     ) == 0) return error.UnsupportedService;
     if (options.items.len > 0) {
-        try updateTrayMenu(context, options.items);
+        try updateTrayMenu(context, status_item_id, options.items);
     }
 }
 
-fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem) anyerror!void {
+fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, items: []const platform_mod.TrayMenuItem) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (status_item_id != platform_mod.primary_status_item_id) return error.UnsupportedService;
     if (self.web_engine != .system) return error.UnsupportedService;
     const count = @min(items.len, max_tray_items);
     var ids: [max_tray_items]u32 = undefined;
@@ -1556,8 +1569,9 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
     if (native_sdk_windows_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, &details, &detail_lens, &roles, &keys, &key_lens, &modifiers, count) == 0) return error.UnsupportedService;
 }
 
-fn removeTray(context: ?*anyopaque) anyerror!void {
+fn removeTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    if (status_item_id != platform_mod.primary_status_item_id) return error.UnsupportedService;
     if (self.web_engine != .system) return error.UnsupportedService;
     native_sdk_windows_remove_tray(self.host);
 }

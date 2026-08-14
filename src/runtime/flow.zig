@@ -45,7 +45,7 @@ const parseAutomationWidgetKey = automation_commands.parseAutomationWidgetKey;
 const parseAutomationWidgetPinch = automation_commands.parseAutomationWidgetPinch;
 const parseAutomationWidgetPointerDrag = automation_commands.parseAutomationWidgetPointerDrag;
 const parseAutomationResizeCommand = automation_commands.parseAutomationResizeCommand;
-const parseAutomationTrayItemId = automation_commands.parseAutomationTrayItemId;
+const parseAutomationTrayTarget = automation_commands.parseAutomationTrayTarget;
 const parseAutomationScreenshotCommand = automation_commands.parseAutomationScreenshotCommand;
 const canvas = @import("canvas");
 
@@ -362,12 +362,13 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 },
                 .frame_requested => try frame(self, app),
                 .bridge_message => |message| try handleBridgeMessage(self, app, message),
-                .tray_action => |item_id| {
-                    log(self, "tray.action", "tray item selected", &.{trace.uint("item_id", item_id)});
+                .tray_action => |action| {
+                    log(self, "tray.action", "tray item selected", &.{ trace.uint("status_item_id", action.status_item_id), trace.uint("item_id", action.item_id) });
                     try dispatchCommand(self, app, .{
-                        .name = SystemServiceMethods().trayCommandNameForItem(self, item_id),
+                        .name = SystemServiceMethods().statusItemCommandNameForItem(self, action.status_item_id, action.item_id),
                         .source = .tray,
-                        .tray_item_id = item_id,
+                        .status_item_id = action.status_item_id,
+                        .tray_item_id = action.item_id,
                     });
                 },
                 .shortcut => |shortcut| {
@@ -449,6 +450,14 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     try dispatchCommand(self, app, .{
                         .name = command.name,
                         .source = .tray,
+                        .window_id = command.window_id,
+                        .status_item_id = command.status_item_id,
+                    });
+                },
+                .notification_command => |command| {
+                    try dispatchCommand(self, app, .{
+                        .name = command.name,
+                        .source = .notification,
                         .window_id = command.window_id,
                     });
                 },
@@ -1002,9 +1011,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     // UiApp's window fallback are all the real path. A
                     // stale or unknown item id is loud driver misuse,
                     // like widget-click on an unmounted widget.
-                    const item_id = try parseAutomationTrayItemId(command.value);
-                    if (!self.tray_created or !SystemServiceMethods().trayItemExists(self, item_id)) return error.InvalidCommand;
-                    try dispatchPlatformEvent(self, app, .{ .tray_action = item_id });
+                    const target = try parseAutomationTrayTarget(command.value);
+                    if (!SystemServiceMethods().statusItemMenuItemExists(self, target.status_item_id, target.item_id)) return error.InvalidCommand;
+                    try dispatchPlatformEvent(self, app, .{ .tray_action = .{
+                        .status_item_id = target.status_item_id,
+                        .item_id = target.item_id,
+                    } });
                 },
                 .focus_view => {
                     try WindowViewMethods().focusView(self, 1, try parseAutomationViewLabel(command.value));
@@ -1186,7 +1198,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             else if (is_credentials)
                 dispatchCredentialBridgeCommand(self, request, &result_buffer, &response_buffer)
             else
-                dispatchOsBridgeCommand(self, request, &result_buffer, &response_buffer);
+                dispatchOsBridgeCommand(self, request, message.origin, &result_buffer, &response_buffer);
 
             try completeBridgeResponse(self, message.window_id, message.webview_label, result);
             self.invalidateFor(.command, null);

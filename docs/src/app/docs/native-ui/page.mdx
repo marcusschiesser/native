@@ -437,7 +437,7 @@ case "fetched":
 
 Response bodies are binary-safe and bounded (256 KiB; longer arrives cut with `truncated = true`), the whole exchange honors a per-fetch timeout (default 30 s), and cancelling a fetch delivers exactly one `cancelled` Msg with nothing after it.
 
-Files ride the same channel: `fx.writeFile` / `fx.readFile` persist app state — session snapshots, transcripts — without smuggling an `Io` handle from `main` into `update`. Bounded (1 KiB paths, 1 MiB files), key-based, one terminal Msg per operation with an explicit outcome (`ok`, `not_found`, `io_failed`, `truncated` — an over-bound read's own outcome, so a cut JSON snapshot cannot parse as whole — `rejected`, `cancelled`); writes create missing parent directories and replace the file whole:
+Files ride the same channel without smuggling an `Io` handle from `main` into `update`. Whole-file reads and writes remain bounded at 1 MiB; `appendFile` and `statFile` handle logs and planning, while the dedicated streaming family carries large imports and atomic exports. External paths require the `filesystem` permission; app-owned directories are exempt after symlink-safe normalization. See [Files & Streaming](/docs/files).
 
 ```zig
 .save => fx.writeFile(.{
@@ -449,24 +449,30 @@ Files ride the same channel: `fx.writeFile` / `fx.readFile` persist app state �
 .saved => |result| model.noteSaved(result.outcome),
 ```
 
-Desktop notifications use the same bounded platform-services facade but are intentionally fire-and-forget: once the host accepts a request, the OS can still suppress it through Focus / Do Not Disturb or the user's notification settings, so a success Msg would over-promise. Return `Cmd.showNotification` from a TypeScript core or call `fx.showNotification` from a Zig `update_fx` arm; invalid or over-bound fields and unavailable services fail closed. The fake executor and session replay never display one.
+Desktop notifications use the same bounded platform-services facade but are intentionally fire-and-forget: once the host accepts a request, the OS can still suppress it through Focus / Do Not Disturb or the user's notification settings, so a success Msg would over-promise. A nonempty `id` replaces an earlier notification with that id. Paired `actionLabel` / `actionCommand` fields add an action whose activation returns through the ordinary application command path while the process is running. Return `Cmd.showNotification` from a TypeScript core or call `fx.showNotification` from a Zig `update_fx` arm; invalid or over-bound fields, unpaired action fields, invalid command names, and unavailable services fail closed. The fake executor and session replay never display one; the null test platform records and can activate one deterministically.
 
 <CodeToggle>
 
 ```ts
 case "build_finished":
   return [model, Cmd.showNotification({
+    id: asciiBytes("build-status"),
     title: asciiBytes("Build finished"),
     subtitle: asciiBytes("native-sdk"),
     body: asciiBytes("All checks passed."),
+    actionLabel: asciiBytes("Open results"),
+    actionCommand: asciiBytes("build.open-results"),
   })];
 ```
 
 ```zig
 .build_finished => fx.showNotification(.{
+    .id = "build-status",
     .title = "Build finished",
     .subtitle = "native-sdk",
     .body = "All checks passed.",
+    .action_label = "Open results",
+    .action_command = "build.open-results",
 }),
 ```
 
@@ -478,7 +484,7 @@ For timestamps, the facade owns the clocks (Zig 0.16 puts `std.time` behind `std
 
 ## Secondary windows
 
-Windows are model-declared, exactly like the tray: `Options.windows_fn` returns the window descriptors that should exist right now (presence IS visibility — there is no `visible` flag because the platform window channel is create/focus/close with no hide), and `Options.window_view` builds each declared window's whole canvas tree, keyed by the descriptor's window label. After every dispatched Msg the runtime reconciles: windows the model started declaring are created (a source-less native window wearing one `gpu_surface` view with the descriptor's `canvas_label`, inheriting the main canvas's gpu options), windows it stopped declaring close, and every open window's view rebuilds from the same model — a theme picked in the settings window restyles the main window on the same dispatch.
+Windows are model-declared, exactly like the tray: `Options.windows_fn` returns the window descriptors that should exist right now (presence IS liveness), and `Options.window_view` builds each declared window's whole canvas tree, keyed by the descriptor's window label. After every dispatched Msg the runtime reconciles: windows the model started declaring are created (a source-less native window wearing one `gpu_surface` view with the descriptor's `canvas_label`, inheriting the main canvas's gpu options), windows it stopped declaring close, and every open window's view rebuilds from the same model — a theme picked in the settings window restyles the main window on the same dispatch. There is no `visible` flag: transient visibility is host state changed through `hideWindow`/`showWindow` or a `.hide` close policy; stop declaring a window to really close it and release its retained views.
 
 ```zig
 fn windows(model: *const Model, scratch: *App.WindowsScratch) []const App.WindowDescriptor {
@@ -507,7 +513,7 @@ fn windowView(ui: *App.Ui, model: *const Model, window_label: []const u8) App.Ui
 // options: .windows_fn = windows, .window_view = windowView,
 ```
 
-Input from any window dispatches Msgs through that window's own tree with its window identity, and a USER close (the titlebar close button) dispatches the descriptor's `on_close` Msg — the dismissal precedent applied to windows: the window is already gone as an optimistic echo, the model clears its open flag in `update` (or keeps declaring the window and the next rebuild brings it back — source wins). A close the model itself initiated (it stopped declaring the window) never echoes a Msg. At most `UiApp.max_ui_windows` (4) secondary windows may be declared; the excess warns and is ignored. `min_width`/`min_height` declare a content min-size floor the window itself enforces (macOS `contentMinSize`): the user's resize stops at the floor instead of the layout clamping and clipping panes below their declared minimums — the same fields exist on app.zon windows and `ShellWindow`, and the startup window applies its declaration at the host create like `titlebar`. 0 (the default) leaves the axis at the platform's own minimum.
+Input from any window dispatches Msgs through that window's own tree with its window identity. `WindowDescriptor.close_policy` accepts `.quit` (the default) or `.hide`, with the same behavior and platform safeguards as manifest windows. A USER close under `.quit` dispatches the descriptor's `on_close` Msg — the dismissal precedent applied to windows: the window is already gone as an optimistic echo, the model clears its open flag in `update` (or keeps declaring the window and the next rebuild brings it back — source wins). Under `.hide`, the window stays alive with its views, `on_close` does not fire, and `showWindow(label)` brings it back. A close the model itself initiated (it stopped declaring the window) never echoes a Msg. At most `UiApp.max_ui_windows` (4) secondary windows may be declared; the excess warns and is ignored. `min_width`/`min_height` declare a content min-size floor the window itself enforces (macOS `contentMinSize`): the user's resize stops at the floor instead of the layout clamping and clipping panes below their declared minimums — the same fields exist on app.zon windows and `ShellWindow`, and the startup window applies its declaration at the host create like `titlebar`. 0 (the default) leaves the axis at the platform's own minimum.
 
 Markup deliberately binds ONE window's content: there is no `window` element in the closed grammar, because windows are app-shell concerns, not view-tree concerns. A markup-authored secondary window is a `canvas.CompiledMarkupView` whose `build` the `window_view` fn calls for the matching label.
 

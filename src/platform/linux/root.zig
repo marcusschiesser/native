@@ -35,6 +35,7 @@ const GtkEventKind = enum(c_int) {
     audio = 17,
     context_menu_action = 18,
     view_focused = 19,
+    notification_command = 20,
 };
 
 const GtkEvent = extern struct {
@@ -156,7 +157,7 @@ extern fn native_sdk_gtk_set_webview_layer(host: *GtkHost, window_id: u64, label
 extern fn native_sdk_gtk_close_webview(host: *GtkHost, window_id: u64, label: [*]const u8, label_len: usize) c_int;
 extern fn native_sdk_gtk_open_external_url(host: *GtkHost, url: [*]const u8, url_len: usize) c_int;
 extern fn native_sdk_gtk_reveal_path(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
-extern fn native_sdk_gtk_show_notification(host: *GtkHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize) c_int;
+extern fn native_sdk_gtk_show_notification(host: *GtkHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, action_command: [*]const u8, action_command_len: usize) c_int;
 extern fn native_sdk_gtk_add_recent_document(host: *GtkHost, path: [*]const u8, path_len: usize) c_int;
 extern fn native_sdk_gtk_clear_recent_documents(host: *GtkHost) c_int;
 extern fn native_sdk_gtk_credentials_available(host: *GtkHost) c_int;
@@ -596,6 +597,10 @@ fn gtkCallback(context: ?*anyopaque, event: *const GtkEvent) callconv(.c) void {
             .view_label = event.view_label[0..event.view_label_len],
         } }),
         .menu_command => state.emit(.{ .menu_command = .{
+            .name = event.command_name[0..event.command_name_len],
+            .window_id = event.window_id,
+        } }),
+        .notification_command => state.emit(.{ .notification_command = .{
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
         } }),
@@ -1330,6 +1335,12 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
         options.subtitle.len,
         options.body.ptr,
         options.body.len,
+        options.id.ptr,
+        options.id.len,
+        options.action_label.ptr,
+        options.action_label.len,
+        options.action_command.ptr,
+        options.action_command.len,
     ) == 0) return error.UnsupportedService;
 }
 
@@ -1480,20 +1491,23 @@ fn videoLoadUrl(context: ?*anyopaque, url: []const u8, token: u64, sink: platfor
     return videoLoad(context, url, token, sink);
 }
 
-fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
+fn createTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, options: platform_mod.TrayOptions) anyerror!void {
     _ = context;
+    _ = status_item_id;
     _ = options;
     return error.UnsupportedService;
 }
 
-fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem) anyerror!void {
+fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, items: []const platform_mod.TrayMenuItem) anyerror!void {
     _ = context;
+    _ = status_item_id;
     _ = items;
     return error.UnsupportedService;
 }
 
-fn removeTray(context: ?*anyopaque) anyerror!void {
+fn removeTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId) anyerror!void {
     _ = context;
+    _ = status_item_id;
     return error.UnsupportedService;
 }
 
@@ -1876,6 +1890,40 @@ fn viewKindInt(kind: platform_mod.ViewKind) c_int {
 
 test "linux platform module exports type" {
     _ = LinuxPlatform;
+}
+
+test "linux notification actions use process-scoped opaque tokens" {
+    const host_source = @embedFile("gtk_host.c");
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "char *action_token = native_sdk_random_notification_action_token();",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "open(\"/dev/urandom\", O_RDONLY | O_CLOEXEC)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "g_variant_new_string(action_token)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "native_sdk_take_notification_action_command(host, token, token_len)",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "g_hash_table_remove(host->notification_actions, token);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "g_variant_new_string(command_copy)",
+    ) == null);
 }
 
 test "linux transparent windows clear the main webview background" {
