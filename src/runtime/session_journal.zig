@@ -185,6 +185,7 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "native_command=" ++ layout_fingerprint.describe(platform.NativeCommandEvent) ++ "\n" ++
             "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
             "tray_command=" ++ layout_fingerprint.describe(platform.TrayCommandEvent) ++ "\n" ++
+            "notification_command=" ++ layout_fingerprint.describe(platform.NotificationCommandEvent) ++ "\n" ++
             "timer=" ++ layout_fingerprint.describe(platform.TimerEvent) ++ "\n" ++
             "audio=" ++ layout_fingerprint.describe(platform.AudioEvent) ++ "\n" ++
             "video=" ++ layout_fingerprint.describe(platform.VideoEvent) ++ "\n" ++
@@ -466,6 +467,7 @@ const EventTag = enum(u8) {
     video = 25,
     view_focused = 26,
     tray_command = 27,
+    notification_command = 28,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -585,9 +587,10 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeInt(u64, message.window_id);
             try cursor.writeStr(message.webview_label);
         },
-        .tray_action => |item_id| {
+        .tray_action => |action| {
             try cursor.writeEnum(EventTag.tray_action);
-            try cursor.writeInt(u32, item_id);
+            try cursor.writeInt(u32, action.status_item_id);
+            try cursor.writeInt(u32, action.item_id);
         },
         .shortcut => |shortcut| {
             try cursor.writeEnum(EventTag.shortcut);
@@ -609,6 +612,12 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
         },
         .tray_command => |command| {
             try cursor.writeEnum(EventTag.tray_command);
+            try cursor.writeStr(command.name);
+            try cursor.writeInt(u64, command.window_id);
+            try cursor.writeInt(u32, command.status_item_id);
+        },
+        .notification_command => |command| {
+            try cursor.writeEnum(EventTag.notification_command);
             try cursor.writeStr(command.name);
             try cursor.writeInt(u64, command.window_id);
         },
@@ -809,7 +818,10 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
                 .webview_label = webview_label,
             } };
         },
-        .tray_action => .{ .tray_action = try cursor.readInt(u32) },
+        .tray_action => .{ .tray_action = .{
+            .status_item_id = try cursor.readInt(u32),
+            .item_id = try cursor.readInt(u32),
+        } },
         .shortcut => blk: {
             const id = try cursor.readStr();
             const key = try cursor.readStr();
@@ -840,6 +852,14 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
         .tray_command => blk: {
             const name = try cursor.readStr();
             break :blk .{ .tray_command = .{
+                .name = name,
+                .window_id = try cursor.readInt(u64),
+                .status_item_id = try cursor.readInt(u32),
+            } };
+        },
+        .notification_command => blk: {
+            const name = try cursor.readStr();
+            break :blk .{ .notification_command = .{
                 .name = name,
                 .window_id = try cursor.readInt(u64),
             } };
@@ -1034,7 +1054,12 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u16, record.status);
     try cursor.writeEnum(record.fetch_outcome);
     try cursor.writeEnum(record.file_op);
+    try cursor.writeEnum(record.file_event);
     try cursor.writeEnum(record.file_outcome);
+    try cursor.writeInt(u64, record.file_total);
+    try cursor.writeInt(i64, record.file_mtime_ms);
+    try cursor.writeBool(record.file_exists);
+    try cursor.writeBool(record.file_rejected_admission);
     try cursor.writeEnum(record.clipboard_op);
     try cursor.writeEnum(record.clipboard_outcome);
     try cursor.writeInt(u64, record.timer_timestamp_ns);
@@ -1045,6 +1070,8 @@ pub fn encodeEffect(record: EffectResultRecord, buffer: []u8) JournalError![]con
     try cursor.writeInt(u64, record.audio_duration_ms);
     try cursor.writeBool(record.audio_playing);
     try cursor.writeBool(record.audio_buffering);
+    try cursor.writeBytes(&record.file_blob_hash);
+    try cursor.writeInt(u64, record.file_blob_len);
     try cursor.writeBytes(&record.audio_bands);
     // v7: image terminals — outcome, decoded dimensions, and the blob
     // store content address of the journaled source bytes.
@@ -1120,7 +1147,12 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .status = try cursor.readInt(u16),
         .fetch_outcome = try cursor.readEnum(runtime_effects.EffectFetchOutcome),
         .file_op = try cursor.readEnum(runtime_effects.EffectFileOp),
+        .file_event = try cursor.readEnum(runtime_effects.EffectFileEvent),
         .file_outcome = try cursor.readEnum(runtime_effects.EffectFileOutcome),
+        .file_total = try cursor.readInt(u64),
+        .file_mtime_ms = try cursor.readInt(i64),
+        .file_exists = try cursor.readBool(),
+        .file_rejected_admission = try cursor.readBool(),
         .clipboard_op = try cursor.readEnum(runtime_effects.EffectClipboardOp),
         .clipboard_outcome = try cursor.readEnum(runtime_effects.EffectClipboardOutcome),
         .timer_timestamp_ns = try cursor.readInt(u64),
@@ -1132,6 +1164,8 @@ pub fn decodeEffect(bytes: []const u8) JournalError!EffectResultRecord {
         .audio_playing = try cursor.readBool(),
         .audio_buffering = try cursor.readBool(),
     };
+    @memcpy(&record.file_blob_hash, try cursor.readBytes(record.file_blob_hash.len));
+    record.file_blob_len = try cursor.readInt(u64);
     @memcpy(&record.audio_bands, try cursor.readBytes(record.audio_bands.len));
     // v7: image terminals.
     record.image_outcome = try cursor.readEnum(runtime_effects.EffectImageOutcome);
@@ -1636,8 +1670,14 @@ test "event codec round-trips every payload variant" {
         try testing.expectEqual(@as(platform.WindowId, 3), decoded.tray_command.window_id);
     }
     {
-        const decoded = try roundTripEvent(.{ .tray_action = 9 });
-        try testing.expectEqual(@as(platform.TrayItemId, 9), decoded.tray_action);
+        const decoded = try roundTripEvent(.{ .notification_command = .{ .name = "build.open", .window_id = 2 } });
+        try testing.expectEqualStrings("build.open", decoded.notification_command.name);
+        try testing.expectEqual(@as(platform.WindowId, 2), decoded.notification_command.window_id);
+    }
+    {
+        const decoded = try roundTripEvent(.{ .tray_action = .{ .status_item_id = 3, .item_id = 9 } });
+        try testing.expectEqual(@as(platform.StatusItemId, 3), decoded.tray_action.status_item_id);
+        try testing.expectEqual(@as(platform.TrayItemId, 9), decoded.tray_action.item_id);
     }
     {
         const decoded = try roundTripEvent(.{ .window_focused = 4 });

@@ -96,6 +96,10 @@ const core_compiler_teaching =
 /// and test modules.
 const TsCoreStage = struct {
     main_root: std.Build.LazyPath,
+    /// The staged mobile wiring (ts_core_mobile.zig beside the same
+    /// mirror/markup/registry files): the embed static library's `app`
+    /// module roots here on iOS/Android targets.
+    mobile_root: std.Build.LazyPath,
     /// The compiled-core archive: the app module links it (with libc,
     /// for the toolchain's runtime) beside the staged mirror.
     archive: std.Build.LazyPath,
@@ -112,12 +116,130 @@ const TsCoreStage = struct {
 };
 
 /// Which carrier runs src/services/ operations. Auto preserves the isolated,
-/// single-instance child carrier; host-native macOS/Linux apps can explicitly
-/// opt into the parallel in-process pool. `.service_carrier` in app.zon and
-/// the `-Dservice-carrier` flag state the choice.
+/// single-instance child carrier; apps can explicitly opt into the parallel
+/// in-process pool wherever the pinned service compiler can build the
+/// runtime-localized service archive for the target (see
+/// serviceArchiveSupported). `.service_carrier` in app.zon and the
+/// `-Dservice-carrier` flag state the choice.
 const ServiceCarrierOption = enum { auto, in_process, child };
 
 const ServiceCarrier = enum { none, child, in_process };
+
+/// Whether the pinned compiler can build TypeScript archives/executables for
+/// this host/target pairing. Native desktop targets use their host toolchain,
+/// including native Windows/MSVC. Cross-Windows builds use Zig's bundled GNU
+/// sysroot; an MSVC cross target has no CRT headers or libraries to compile
+/// the ScriptC runtime against. Mobile targets are aarch64 only and
+/// archive-only (library mode — the app links the archive; no standalone
+/// executable exists there): iOS device/simulator archives build on a macOS
+/// host against the selected Apple SDK, Android archives build on any
+/// desktop host against a discovered NDK sysroot.
+pub fn scriptcCompileSupported(host: std.Target, target: std.Build.ResolvedTarget) bool {
+    const desktop_host = switch (host.os.tag) {
+        .macos, .linux, .windows => true,
+        else => false,
+    };
+    if (!desktop_host) return false;
+    const cross = scriptcTargetIsCross(host, target);
+    return switch (target.result.os.tag) {
+        .linux => if (target.result.abi.isAndroid()) target.result.cpu.arch == .aarch64 else true,
+        .windows => !cross or target.result.abi == .gnu,
+        .macos => host.os.tag == .macos,
+        .ios => host.os.tag == .macos and target.result.cpu.arch == .aarch64,
+        else => false,
+    };
+}
+
+/// Whether the pinned service compiler can build the in-process carrier's
+/// archive (runtime-localized, thread-instanced) on this build host for
+/// this target. Its object localizers are deliberately architecture-aware:
+/// native Linux uses host binutils, cross-ELF accepts x86_64/aarch64
+/// (Android's aarch64 archives ride this lane), COFF accepts x86_64 (GNU
+/// when cross-compiled; the host ABI when native), and Mach-O — macOS, iOS
+/// device, and iOS simulator — needs a macOS host (Apple linking rides the
+/// host toolchain's SDK).
+pub fn serviceArchiveSupported(host: std.Target, target: std.Build.ResolvedTarget) bool {
+    if (!scriptcCompileSupported(host, target)) return false;
+    const cross = scriptcTargetIsCross(host, target);
+    return switch (target.result.os.tag) {
+        .linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64,
+        .windows => target.result.cpu.arch == .x86_64,
+        .macos, .ios => host.os.tag == .macos,
+        else => false,
+    };
+}
+
+/// Whether a Linux target's spelling lands on Zig's default glibc floor,
+/// which predates `arc4random_buf` — a symbol the compiled service
+/// runtime references, so the link fails late and opaquely without the
+/// configure-time teaching. A native target (no `-Dtarget` os) resolves
+/// the system's own glibc and is exempt; an explicitly spelled `-gnu`
+/// target needs a stated glibc of 2.36 or later (or `-musl`, whose libc
+/// always has the symbol).
+pub fn linuxGlibcSpellingHitsDefaultFloor(target: std.Build.ResolvedTarget) bool {
+    if (target.result.os.tag != .linux or !target.result.abi.isGnu()) return false;
+    if (target.query.os_tag == null) return false;
+    const glibc = target.query.glibc_version orelse return true;
+    return glibc.order(.{ .major = 2, .minor = 36, .patch = 0 }) == .lt;
+}
+
+/// Whether ScriptC needs its zig-cc target lane rather than the native host
+/// compiler. Keep this identical to the driver scripts' platform-triple
+/// comparison: a stated glibc version makes an otherwise same-triple Linux
+/// target cross because that floor must reach Zig's `-target` argument.
+pub fn scriptcTargetIsCross(host: std.Target, target: std.Build.ResolvedTarget) bool {
+    if (target.result.os.tag != host.os.tag or target.result.cpu.arch != host.cpu.arch) return true;
+    // Zig's Windows host triple defaults to GNU even when native clang uses
+    // the installed Windows toolchain. A same-architecture MSVC target is
+    // therefore still native compiler work. Preserve an exact native GNU
+    // triple too; every other ABI change needs the zig-cc cross lane.
+    if (target.result.os.tag == .windows) {
+        return target.result.abi != host.abi and target.result.abi != .msvc;
+    }
+    return target.result.abi != host.abi or target.query.glibc_version != null;
+}
+
+/// The glibc-floor teaching for explicitly targeted ScriptC builds. Both the
+/// core archive and either service carrier carry the compiled TypeScript
+/// runtime, so all of them hit the same missing symbol. This is independent of
+/// whether the target triple happens to match the build host.
+pub fn scriptcLinuxGlibcSpellingTeaching(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
+    return b.fmt(
+        "\nTypeScript target {t}-linux-gnu uses Zig's default glibc floor, which" ++
+            " predates arc4random_buf — a symbol the compiled runtime needs (glibc" ++
+            " 2.36+).\nSpell the target as \"{t}-linux-gnu.2.36\" (or later), or" ++
+            " \"{t}-linux-musl\".\n",
+        .{ target.result.cpu.arch, target.result.cpu.arch, target.result.cpu.arch },
+    );
+}
+
+pub fn panicScriptcLinuxGlibcSpelling(b: *std.Build, target: std.Build.ResolvedTarget) noreturn {
+    @panic(scriptcLinuxGlibcSpellingTeaching(b, target));
+}
+
+pub fn panicUnsupportedScriptcTarget(b: *std.Build, host: std.Target, target: std.Build.ResolvedTarget) noreturn {
+    if (target.result.os.tag == .windows and scriptcTargetIsCross(host, target) and target.result.abi != .gnu) {
+        @panic(b.fmt(
+            "\nTypeScript cross-target Windows builds require the GNU ABI: Zig supplies" ++
+                " that target's CRT and system libraries, while an MSVC target needs a native" ++
+                " Windows toolchain.\nBuild {t}-windows-msvc on a matching Windows host, or" ++
+                " cross-compile as \"{t}-windows-gnu\".\n",
+            .{ target.result.cpu.arch, target.result.cpu.arch },
+        ));
+    }
+    if (target.result.os.tag == .ios and host.os.tag != .macos) {
+        @panic(
+            "\nTypeScript iOS builds run on a macOS build host only: the Apple SDK sysroot" ++
+                " and Mach-O symbol localization live there.\nBuild iOS apps on a Mac.\n",
+        );
+    }
+    @panic(
+        "\nTypeScript builds support native host targets, Linux and Windows GNU cross" ++
+            " targets from macOS/Linux/Windows, macOS targets from macOS, and the mobile" ++
+            " targets aarch64 iOS/iOS-simulator (from macOS) and aarch64 Android." ++
+            "\nChoose a supported target/host pairing.\n",
+    );
+}
 
 fn resolveServiceCarrier(
     choice: ServiceCarrierOption,
@@ -127,19 +249,46 @@ fn resolveServiceCarrier(
 ) ServiceCarrier {
     if (!has_services) return .none;
     const host = b.graph.host.result;
-    const supported = target.result.os.tag == host.os.tag and
-        target.result.cpu.arch == host.cpu.arch and
-        (target.result.os.tag == .macos or target.result.os.tag == .linux);
-    return switch (choice) {
-        .auto => .child,
+    const supported = serviceArchiveSupported(host, target);
+    // Mobile has no child processes, so the in-process pool is the only
+    // carrier there: auto resolves to it, and an explicit "child" is a
+    // stated impossibility, taught rather than quietly rewritten.
+    if (target.result.os.tag == .ios or target.result.abi.isAndroid()) {
+        return switch (choice) {
+            .auto, .in_process => if (supported) .in_process else panicUnsupportedScriptcTarget(b, host, target),
+            .child => @panic(
+                "\nservice_carrier = \"child\" is unavailable on mobile targets: iOS and Android" ++
+                    " apps cannot spawn a sibling service process, so src/services operations run" ++
+                    " on the in-process pool there.\nUse \"auto\" or \"in_process\" (desktop" ++
+                    " builds of the same app keep the child carrier under auto).\n",
+            ),
+        };
+    }
+    const carrier: ServiceCarrier = switch (choice) {
+        .auto, .child => .child,
         .in_process => if (supported) .in_process else @panic(
-            "\nservice_carrier = \"in_process\" requires a host-native macOS or Linux build:" ++
-                " the service archive compiles with runtime localization, which is host-native" ++
-                " on those platforms only.\nUse \"child\" (or drop the setting — auto selects" ++
-                " the child carrier) for this target.\n",
+            "\nservice_carrier = \"in_process\" requires a target the pinned service compiler" ++
+                " can produce a runtime-localized archive for: native Linux, cross-Linux" ++
+                " x86_64/aarch64, native Windows x86_64, cross-Windows x86_64 GNU," ++
+                " macOS from a macOS build host, or a mobile target." ++
+                "\nUse \"child\" (or drop the setting — auto selects the child carrier)" ++
+                " for this target.\n",
         ),
-        .child => .child,
     };
+    return carrier;
+}
+
+/// The `arch-os-abi` platform spelling every ScriptC compile lane receives.
+/// A stated glibc version rides the abi (`gnu.2.36`) so the compiler's
+/// cross lane builds at the spelled floor rather than the default one.
+pub fn scriptcPlatformTriple(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
+    const triple = b.fmt("{t}-{t}-{t}", .{ target.result.cpu.arch, target.result.os.tag, target.result.abi });
+    if (target.result.os.tag != .linux or !target.result.abi.isGnu()) return triple;
+    const glibc = target.query.glibc_version orelse return triple;
+    return if (glibc.patch == 0)
+        b.fmt("{s}.{d}.{d}", .{ triple, glibc.major, glibc.minor })
+    else
+        b.fmt("{s}.{d}.{d}.{d}", .{ triple, glibc.major, glibc.minor, glibc.patch });
 }
 
 fn parseServiceCarrierOption(raw: []const u8) ServiceCarrierOption {
@@ -458,6 +607,16 @@ fn tsCoreStage(
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const has_services = appHasServiceFiles(b, app_root);
+    if (!scriptcCompileSupported(b.graph.host.result, target)) {
+        panicUnsupportedScriptcTarget(b, b.graph.host.result, target);
+    }
+    // Every TypeScript app compiles its core archive for the target. Any
+    // explicitly spelled Linux GNU target without a sufficient glibc version
+    // lands on Zig's too-old default floor, even when its triple matches the
+    // build host; reject it before either compile lane reaches the linker.
+    if (linuxGlibcSpellingHitsDefaultFloor(target)) {
+        panicScriptcLinuxGlibcSpelling(b, target);
+    }
     const service_carrier = resolveServiceCarrier(service_carrier_choice, has_services, b, target);
 
     // Relational schema analysis runs the real SQLite parser in memory before
@@ -590,7 +749,7 @@ fn tsCoreStage(
 
         // Ordinary service TypeScript is staged without core-subset rewrites.
         // The one service-boundary lowering turns NS1067's `{ kind, message }`
-        // throw into the tagged Error shape scriptc 0.0.28 can catch from an
+        // throw into the tagged Error shape scriptc 0.0.29 can catch from an
         // imported op; no deterministic profile fences participate here.
         const service_stage_run = b.addSystemCommand(&.{node});
         service_stage_run.addFileArg(dep.path("packages/core/scripts/stage_external_services.mjs"));
@@ -636,8 +795,14 @@ fn tsCoreStage(
             "--host-platform",
             b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
             "--target-platform",
-            b.fmt("{t}-{t}-{t}", .{ target.result.cpu.arch, target.result.os.tag, target.result.abi }),
+            scriptcPlatformTriple(b, target),
+            // Cross service compiles run the pinned compiler's zig-cc
+            // lane; hand over this build's own zig so the lane never
+            // depends on a PATH zig (native compiles ignore it).
+            "--zig-exe",
+            b.graph.zig_exe,
         });
+        addScriptcAndroidNdk(b, service_compile, target);
         if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
             service_compile.addArgs(&.{ "--compiler", override });
         } else {
@@ -684,6 +849,17 @@ fn tsCoreStage(
     const archive = compile.addOutputFileArg(b.fmt("lib{s}.a", .{symbol_name}));
     compile.addArg("--out-sidecar");
     const compiled_sidecar = compile.addOutputFileArg("core.contract.json");
+    compile.addArgs(&.{
+        "--host-platform",
+        b.fmt("{t}-{t}-{t}", .{ b.graph.host.result.cpu.arch, b.graph.host.result.os.tag, b.graph.host.result.abi }),
+        "--target-platform",
+        scriptcPlatformTriple(b, target),
+        // Keep the core and service archives on the same cross compiler and
+        // target. Native compiles ignore the supplied Zig path.
+        "--zig-exe",
+        b.graph.zig_exe,
+    });
+    addScriptcAndroidNdk(b, compile, target);
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         // The development override: point at any toolchain command; the
         // driver still refuses a release other than the SDK's pin.
@@ -722,8 +898,13 @@ fn tsCoreStage(
     _ = staged.addCopyFile(migrations_zig, "migrations.zig");
     _ = staged.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
     const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
+    // The mobile wiring stages beside the desktop entry: same mirror, same
+    // registry, same carrier constant — only the shell differs (the embed
+    // host's AppDef contract instead of a process `main`).
+    const mobile_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_mobile.zig"), "mobile.zig");
     return .{
         .main_root = main_root,
+        .mobile_root = mobile_root,
         .archive = archive,
         .service_exe = service_exe,
         .service_archive = service_archive,
@@ -910,8 +1091,30 @@ pub const MobileLibOptions = struct {
     credentials_capability: bool = false,
     /// Grant those effects access to the registered OS credential service.
     credentials_permission: bool = false,
+    /// Grant raw file effects access outside the OS-owned app data root.
+    filesystem_permission: bool = false,
     /// Stable app identity used as the Keychain/Keystore service namespace.
     credentials_service: []const u8 = "dev.native_sdk.app",
+    /// A TypeScript core's staged mobile wiring: set by `addAppArtifacts`
+    /// when the tree carries src/core.ts. The `app` module roots at the
+    /// staged mobile entry instead of `main`, and the compiled core (and
+    /// in-process service) archives merge into the embed static library —
+    /// the host tiers keep linking exactly one archive.
+    ts_core: ?MobileTsCore = null,
+};
+
+/// The TypeScript pieces a mobile embed library consumes (see
+/// `MobileLibOptions.ts_core`).
+pub const MobileTsCore = struct {
+    /// The staged mobile wiring (mobile.zig beside the generated mirror).
+    main_root: std.Build.LazyPath,
+    /// The compiled-core archive; merged into the embed library.
+    archive: std.Build.LazyPath,
+    /// The in-process service archive, when src/services exists.
+    service_archive: ?std.Build.LazyPath,
+    /// The app.zon module the mobile wiring reads scene chrome, identity,
+    /// and theme from (`app_manifest_zon`).
+    manifest_mod: *std.Build.Module,
 };
 
 /// Mobile counterpart of `addApp`: produce the embed static library
@@ -954,15 +1157,39 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         mobile_options.addOption(bool, "relational_capability", options.relational_capability);
         mobile_options.addOption(bool, "credentials_capability", options.credentials_capability);
         mobile_options.addOption(bool, "credentials_permission", options.credentials_permission);
+        mobile_options.addOption(bool, "filesystem_permission", options.filesystem_permission);
         mobile_options.addOption([]const u8, "credentials_service", options.credentials_service);
         exports_mod.addImport("mobile_build_options", mobile_options.createModule());
         const migration_path = options.relational_migrations orelse dep.path("src/app_runner/no_migrations.zig");
         const migration_mod = b.createModule(.{ .root_source_file = migration_path, .target = target, .optimize = optimize });
         migration_mod.addImport("native_sdk", native_sdk_mod);
         exports_mod.addImport("relational_migrations", migration_mod);
-        const app_mod = localModule(b, target, optimize, options.main);
+        // A TypeScript core's app module roots at the staged mobile wiring;
+        // a Zig core's at the app's own mobile entry. Either way the embed
+        // host sees the same AppDef contract (Model/Msg/initModel/
+        // mobileOptions).
+        const app_mod = if (options.ts_core) |ts| ts_app: {
+            const mod = b.createModule(.{
+                .root_source_file = ts.main_root,
+                .target = target,
+                .optimize = optimize,
+            });
+            mod.addImport("app_manifest_zon", ts.manifest_mod);
+            break :ts_app mod;
+        } else localModule(b, target, optimize, options.main);
         app_mod.addImport("native_sdk", native_sdk_mod);
         exports_mod.addImport("app", app_mod);
+    }
+    if (options.ts_core) |ts| {
+        // The compiled TypeScript archives merge into the embed static
+        // library (Zig's static-lib emission bundles archive inputs), so
+        // the iOS/Android host tiers keep linking the one archive they
+        // already stage. The toolchain's runtime needs libc; the host
+        // link supplies it (plus -lm/-ldl on Android, which the Android
+        // host link already passes).
+        exports_mod.link_libc = true;
+        exports_mod.addObjectFile(ts.archive);
+        if (ts.service_archive) |service_archive| exports_mod.addObjectFile(service_archive);
     }
     if (options.store_capability or options.relational_capability) {
         exports_mod.addIncludePath(dep.path("third_party/sqlite"));
@@ -986,10 +1213,39 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         // Intel simulators). Force LLVM there; Release already uses it.
         .use_llvm = useLlvmWorkaround(target),
     });
-    b.installArtifact(lib);
 
     const lib_step = b.step("lib", "Build the mobile embed static library");
-    lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+    if (options.ts_core != null and target.result.abi.isAndroid()) {
+        // Zig's ELF static-library emission stores the compiled TypeScript
+        // archives as nested members instead of merging their objects (the
+        // Mach-O emission merges), and the NDK's -shared host link would
+        // skip those blobs with only a warning. Flatten to one plain
+        // object archive so the Android host tier keeps linking exactly
+        // the archive it already stages.
+        const merged = mergeMobileArchive(b, dep, lib, options.name);
+        const lib_name = b.fmt("lib{s}.a", .{options.name});
+        b.getInstallStep().dependOn(&b.addInstallFileWithDir(merged, .lib, lib_name).step);
+        lib_step.dependOn(&b.addInstallFileWithDir(merged, .lib, lib_name).step);
+    } else {
+        b.installArtifact(lib);
+        lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+    }
+}
+
+/// Flatten an Android embed library whose members include the compiled
+/// TypeScript archives (see the call site above). Runs under node like the
+/// rest of the TypeScript lane's drivers.
+fn mergeMobileArchive(b: *std.Build, dep: *std.Build.Dependency, lib: *std.Build.Step.Compile, name: []const u8) std.Build.LazyPath {
+    const node = b.findProgram(&.{"node"}, &.{}) catch
+        @panic("\nmerging the mobile TypeScript archives needs node on PATH (the TypeScript core lane already requires it).\n");
+    const merge = b.addSystemCommand(&.{node});
+    merge.addFileArg(dep.path("packages/core/scripts/merge_static_archives.mjs"));
+    merge.addArgs(&.{ "--zig", b.graph.zig_exe, "--format", "gnu" });
+    merge.addArg("--out");
+    const merged = merge.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
+    merge.addArg("--in");
+    merge.addFileArg(lib.getEmittedBin());
+    return merged;
 }
 
 /// The pieces `addApp` wires, for callers that extend the standard app
@@ -1040,14 +1296,6 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
                 " a Zig core.\nDrop the flag or port the core to TypeScript.\n");
         }
     }
-    // Mobile targets are taught BEFORE lane selection: TypeScript cores
-    // are desktop-only until the external core toolchain grows mobile
-    // targets; Zig/markup cores stay fully supported on mobile.
-    if (core_tree == .ts and (target.result.os.tag == .ios or target.result.abi.isAndroid())) {
-        @panic("\nTypeScript app cores are desktop-only today: the external core compiler does not" ++
-            " target mobile yet.\nBuild for a desktop target, or port the core to a Zig" ++
-            " `mobileOptions` app — Zig and markup cores are fully supported on mobile.\n");
-    }
     // The service-carrier selection: `-Dservice-carrier` overrides app.zon's
     // `.service_carrier`; both default to auto (the child carrier).
     const service_carrier_choice: ServiceCarrierOption = choice: {
@@ -1094,7 +1342,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     // artifact the toolkit-owned iOS host (and any hand-written shim)
     // links, so `native dev|package --target ios` works against every
     // standard app build — generated graph or ejected — with nothing but
-    // `-Dtarget`. Desktop targets keep the step absent.
+    // `-Dtarget`. Desktop targets keep the step absent. A TypeScript core
+    // roots the library's app module at the staged mobile wiring and
+    // merges the compiled archives into it.
     if (target.result.os.tag == .ios or target.result.abi.isAndroid()) {
         addMobileLibWithTarget(b, dep, target, optimize, .{
             .name = app_options.name,
@@ -1104,7 +1354,14 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             .relational_migrations = relational_migrations,
             .credentials_capability = app_config.credentials_capability,
             .credentials_permission = app_config.credentials_permission,
+            .filesystem_permission = app_config.filesystem_permission,
             .credentials_service = app_config.app_id,
+            .ts_core = if (ts_stage) |stage| .{
+                .main_root = stage.mobile_root,
+                .archive = stage.archive,
+                .service_archive = stage.service_archive,
+                .manifest_mod = b.createModule(.{ .root_source_file = b.path(appPath(b, app_options.app_root, "app.zon")) }),
+            } else null,
         });
     }
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
@@ -1494,8 +1751,10 @@ const sqlite_c_defines = [_][]const u8{
 /// Zig deliberately supplies no libc headers for Apple/Android cross targets.
 /// Store-capable mobile libraries therefore compile the vendored amalgamation
 /// against the same platform SDK the host tier will use to link the archive.
-/// Desktop targets keep Zig's ordinary libc discovery.
-fn sqliteCFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const u8 {
+/// Desktop targets keep Zig's ordinary libc discovery. Pub because the SDK's
+/// own build graph compiles the same amalgamation into modules that also
+/// configure under a mobile -Dtarget (the mobile e2e battery).
+pub fn sqliteCFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const u8 {
     if (target.result.os.tag == .ios) {
         const sysroot = b.sysroot orelse iosSdkPath(b, target.result.abi == .simulator) orelse
             std.debug.panic("a store-capable iOS library needs the Apple SDK; install Xcode or pass --sysroot <iphone SDK path>", .{});
@@ -1545,6 +1804,35 @@ fn iosSdkPath(b: *std.Build, simulator: bool) ?[]const u8 {
         return null;
     }
     return std.mem.trimEnd(u8, result.stdout, "\r\n");
+}
+
+/// Thread the Android NDK location into a ScriptC driver invocation the
+/// way `--zig-exe` threads this build's zig: resolved here, at the one
+/// boundary that already knows how to discover it, so the compiler's own
+/// discovery never depends on the ambient environment. A missing NDK stays
+/// quiet — the driver and compiler own the teaching when an Android
+/// compile actually needs one.
+pub fn addScriptcAndroidNdk(b: *std.Build, run: *std.Build.Step.Run, target: std.Build.ResolvedTarget) void {
+    if (!target.result.abi.isAndroid()) return;
+    const ndk_root = androidNdkRootPath(b) orelse return;
+    run.addArgs(&.{ "--android-ndk", ndk_root });
+}
+
+/// The NDK's root directory (the directory holding toolchains/llvm):
+/// ANDROID_NDK_ROOT/ANDROID_NDK_HOME wins, else the newest ndk/<version>
+/// under the platform SDK location — the same order the compiler's own
+/// discovery uses, so threading it changes nothing but the authority.
+fn androidNdkRootPath(b: *std.Build) ?[]const u8 {
+    for ([_][]const u8{ "ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "ANDROID_NDK_LATEST_HOME" }) |name| {
+        if (b.graph.environ_map.get(name)) |root| {
+            if (root.len > 0 and buildDirExists(b, root)) return root;
+        }
+    }
+    const sdk_root = androidSdkRoot(b) orelse return null;
+    return latestVersionSubdir(b, sdk_root, "ndk") orelse blk: {
+        const legacy = b.pathJoin(&.{ sdk_root, "ndk-bundle" });
+        break :blk if (buildDirExists(b, legacy)) legacy else null;
+    };
 }
 
 fn androidNdkSysrootPath(b: *std.Build) ?[]const u8 {
@@ -1931,9 +2219,12 @@ fn linkPlatform(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Res
         app_mod.linkSystemLibrary("oleacc", .{});
         app_mod.linkSystemLibrary("shell32", .{});
         // TypeScript cores link ScriptC's host runtime, whose network-interface
-        // helpers use GetAdaptersAddresses and Winsock address conversion.
+        // helpers use GetAdaptersAddresses and Winsock address conversion; the
+        // in-process service archive shares the same runtime and additionally
+        // reaches advapi32 (crypto-backed randomness).
         app_mod.linkSystemLibrary("iphlpapi", .{});
         app_mod.linkSystemLibrary("ws2_32", .{});
+        app_mod.linkSystemLibrary("advapi32", .{});
         // The audio backend: Media Foundation (session + source resolver
         // + streaming audio renderer) and WinHTTP (the cache fill).
         app_mod.linkSystemLibrary("mf", .{});
@@ -2042,6 +2333,7 @@ const AppManifestBuildConfig = struct {
     relational_capability: bool = false,
     credentials_capability: bool = false,
     credentials_permission: bool = false,
+    filesystem_permission: bool = false,
     sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
@@ -2135,6 +2427,7 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8) AppManifestBuildC
         .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
         .credentials_capability = hasManifestCapability(raw.capabilities, "credentials"),
         .credentials_permission = hasManifestPermission(raw.permissions, "credentials"),
+        .filesystem_permission = hasManifestPermission(raw.permissions, "filesystem"),
         .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };

@@ -159,6 +159,42 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(result.warnings.some((d) => d.id === "NS1071"), false);
 });
 
+test("NS1074 catches certainly-external literal file paths without filesystem permission", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly bytes: Uint8Array; }
+export type Msg =
+  | { readonly kind: "go" }
+  | { readonly kind: "wrote" }
+  | { readonly kind: "loaded"; readonly bytes: Uint8Array }
+  | { readonly kind: "stat"; readonly exists: boolean; readonly size: number; readonly mtimeMs: number }
+  | { readonly kind: "done"; readonly total: number }
+  | { readonly kind: "failed"; readonly reason: Uint8Array };
+export function initialModel(): Model { return { bytes: asciiBytes("x") }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "go": return [model, Cmd.batch([
+      Cmd.readFile(asciiBytes("/tmp/input"), { ok: "loaded", err: "failed" }),
+      Cmd.writeFile(asciiBytes("../output"), model.bytes, { ok: "wrote", err: "failed" }),
+      Cmd.appendFile(asciiBytes("logs/local"), model.bytes, { ok: "wrote", err: "failed" }),
+      Cmd.statFile(asciiBytes("C:\\\\Users\\\\outside"), { ok: "stat", err: "failed" }),
+      Cmd.readFileStream(asciiBytes("safe/import"), { chunk: "loaded", done: "done", err: "failed" }),
+      Cmd.writeFileStream("sink", asciiBytes("/tmp/export"), { ok: "wrote", err: "failed" }),
+    ])];
+    case "wrote":
+    case "loaded":
+    case "stat":
+    case "done":
+    case "failed": return model;
+  }
+}
+`;
+  const denied = check(source);
+  assert.equal(denied.diagnostics.filter((d) => d.id === "NS1074").length, 4);
+  const granted = check(source, { permissions: ["filesystem"] });
+  assert.equal(granted.diagnostics.some((d) => d.id === "NS1074"), false);
+});
+
 test("NS1033 validates app.zon persistence restore routes against Msg", () => {
   const source = `
 import { Cmd } from "@native-sdk/core";
@@ -714,6 +750,29 @@ test("diagnostics carry rule, fix, and why", () => {
   assert.ok(d.title.length > 0, "has a rule title");
   assert.ok(d.message.includes("Cmd."), "shows the idiomatic rewrite");
   assert.ok(d.message.toLowerCase().includes("replay"), "says why");
+  assert.ok(d.message.includes("src/services/"), "names the service alternative");
+  assert.ok(!d.message.includes("deliberately deferred"), "guarantee rules carry no deferral clause");
+});
+
+test("every rule carries a class and the deferred set is exact", async () => {
+  const { rules } = await import("../src/diagnostics.ts");
+  const deferred = Object.values(rules)
+    .filter((r) => r.class === "deferred")
+    .map((r) => r.id)
+    .sort();
+  assert.deepEqual(deferred, ["NS1011", "NS1019", "NS1040", "NS1042", "NS1044"]);
+  for (const r of Object.values(rules)) {
+    assert.ok(r.class === "guarantee" || r.class === "deferred", `${r.id} has a class`);
+  }
+});
+
+test("deferred rules teach the deferral, not impossibility", () => {
+  const result = checkOnly(`export function f(): number { const m = new Map<number, number>(); return m.size; }`);
+  const d = result.diagnostics.find((x) => x.id === "NS1011");
+  assert.ok(d, `got ${ruleIds(result)}`);
+  assert.ok(d.message.includes("deliberately deferred"), "names the class");
+  assert.ok(d.message.includes("id-keyed array"), "still teaches the core idiom first");
+  assert.ok(d.message.includes("src/services/"), "names the service alternative");
 });
 
 test("NS1022 in-place sort teaches the toSorted rewrite", () => {
@@ -1147,6 +1206,64 @@ export function update(model: Model, msg: Msg): Model { return model; }
 export function statusItem(): StatusItemState { throw { kind: "unreachable" }; }
 `);
   assert.ok(ruleIds(wrongHelper).includes("NS1033"), `got ${ruleIds(wrongHelper)}`);
+});
+
+test("NS1033 statusItems is the canonical independent-item collection", () => {
+  const clean = check(`
+import { type StatusItemDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const exportList = check(`
+import { type StatusItemDescriptor } from "@native-sdk/core/events";
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+export { statusItems };
+`);
+  assert.equal(exportList.ok, true, exportList.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(exportList).includes("NS1033"), `got ${ruleIds(exportList)}`);
+
+  const wrongNestedShape = checkOnly(`
+export interface BadPresentation { readonly title: Uint8Array; }
+export interface BadItem { readonly id: number; }
+export interface StatusItemDescriptor {
+  readonly id: number;
+  readonly visible: boolean;
+  readonly iconPath: Uint8Array;
+  readonly tooltip: Uint8Array;
+  readonly activationCommand: Uint8Array;
+  readonly alternateActivationCommand: Uint8Array;
+  readonly openCommand: Uint8Array;
+  readonly presentation: BadPresentation;
+  readonly items: readonly BadItem[];
+}
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  assert.ok(ruleIds(wrongNestedShape).includes("NS1033"), `got ${ruleIds(wrongNestedShape)}`);
+
+  const mutuallyExclusive = checkOnly(`
+import { type StatusItemDescriptor, type StatusItemState } from "@native-sdk/core/events";
+export interface Model { readonly spend: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItem(model: Model): StatusItemState { throw { kind: "unreachable" }; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  assert.ok(ruleIds(mutuallyExclusive).includes("NS1033"), `got ${ruleIds(mutuallyExclusive)}`);
 });
 
 test("NS1061: value-record aliases refuse the shapes value storage cannot carry", () => {

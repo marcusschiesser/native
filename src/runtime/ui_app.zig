@@ -12,12 +12,14 @@
 //! view. Shell command events can map into messages through `on_command`.
 //!
 //! Secondary windows are model-declared: `Options.windows_fn` returns the
-//! window descriptors that should exist right now (presence IS
-//! visibility), `Options.window_view` builds each declared window's
+//! window descriptors that should exist right now (presence IS liveness;
+//! a `.hide` close policy may temporarily hide one),
+//! `Options.window_view` builds each declared window's
 //! canvas tree, the runtime reconciles declared against live windows
 //! after every rebuild, input from any window dispatches Msgs with its
-//! window identity, and a user close dispatches the descriptor's
-//! `on_close` Msg — the dismissal precedent, applied to windows.
+//! window identity, and a `.quit` user close dispatches the descriptor's
+//! `on_close` Msg while `.hide` retains it — the platform close-policy
+//! contract applied to model-declared windows.
 //!
 //! Markup apps choose an engine per build: `Options.markup` runs the
 //! runtime parser/interpreter (dev, hot reload), while
@@ -279,6 +281,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             items: []const platform.TrayMenuItem = &.{},
         };
 
+        /// One entry in the model-declared status-item collection.
+        /// `id` is stable identity; dropping the entry removes that
+        /// native status item, while every other field patches in place.
+        pub const StatusItemDescriptor = struct {
+            id: platform.StatusItemId,
+            visible: bool = true,
+            state: StatusItemState = .{},
+        };
+
         /// Scratch handed to `status_item_fn` so a derived title
         /// (`std.fmt.bufPrint(&scratch.title_buffer, "{d} open", ...)`)
         /// and a built-up item list need no model-side storage. Lives on
@@ -290,20 +301,39 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             items: [platform.max_tray_items]platform.TrayMenuItem = undefined,
         };
 
+        /// Scratch for `status_items_fn`. The flat row store gives each
+        /// of the eight status items its full 32-row budget without heap
+        /// allocation; TypeScript adapters partition it by descriptor.
+        pub const StatusItemsScratch = struct {
+            status_items: [platform.max_status_items]StatusItemDescriptor = undefined,
+            title_buffers: [platform.max_status_items][platform.max_tray_title_bytes]u8 = undefined,
+            arena_buffer: [platform.max_status_items * 2048]u8 = undefined,
+            items: [platform.max_status_items * platform.max_tray_items]platform.TrayMenuItem = undefined,
+        };
+
+        const AppliedStatusItem = struct {
+            id: platform.StatusItemId = 0,
+            active: bool = false,
+            shell_hash: u64 = 0,
+            presentation_hash: u64 = 0,
+            menu_hash: u64 = 0,
+            shell_unsupported: bool = false,
+            presentation_unsupported: bool = false,
+        };
+
         /// Budget for model-declared secondary windows (see
         /// `canvas_limits.max_ui_app_windows` for the sizing rationale).
         pub const max_ui_windows: usize = canvas_limits.max_ui_app_windows;
 
         /// A model-declared secondary window (`Options.windows_fn`):
         /// settings, about, inspectors. Identity is `label`; PRESENCE in
-        /// the returned slice is visibility — the runtime reconciles the
+        /// the returned slice is liveness — the runtime reconciles the
         /// declared set against live windows after every rebuild,
         /// creating the missing and closing the no-longer-declared.
-        /// There is deliberately no `visible` flag: the platform window
-        /// channel is create/focus/close with no hide, so a
-        /// hidden-but-open descriptor would lie about what exists. The
-        /// model bool that `windows_fn` consults IS the visibility
-        /// channel, exactly like a dismissible surface's open flag.
+        /// There is deliberately no `visible` flag: transient visibility
+        /// is host state, changed through `hideWindow`/`showWindow` or a
+        /// `.hide` close policy. Stop declaring the window to close it and
+        /// release its retained views.
         pub const WindowDescriptor = struct {
             /// Window label: the stable identity across rebuilds, and
             /// the label automation snapshots print for the window.
@@ -351,8 +381,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// False leaves the window resizable but disables the green
             /// fullscreen affordance and fullscreen command.
             allows_fullscreen: bool = true,
+            /// What the USER'S close affordance does. `.quit` (the
+            /// default) really closes the window; `.hide` retains its
+            /// native identity and views for a later `showWindow`. Fixed
+            /// at create like the titlebar. Unsupported hosts refuse
+            /// `.hide` rather than strand an unreachable hidden window.
+            close_policy: app_manifest.WindowClosePolicy = .quit,
             /// Msg dispatched when the USER closes the window (never for
-            /// a reconcile close the model itself initiated). The
+            /// a `.hide` policy hide or a reconcile close the model itself
+            /// initiated). The
             /// dismissal precedent: the window is already gone as an
             /// optimistic echo; the model clears its open flag in
             /// `update` — or keeps declaring the window and the next
@@ -731,17 +768,24 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// tray title seam keep the menu updates and log the title
             /// gap once.
             status_item_fn: ?*const fn (model: *const ModelT, scratch: *StatusItemScratch) StatusItemState = null,
+            /// Model-declared status-item collection. Stable non-zero
+            /// identifiers own native identity; presence creates,
+            /// absence removes, and changed shell/presentation/menu
+            /// fields patch the existing item independently. Mutually
+            /// exclusive with `status_item` and `status_item_fn`.
+            status_items_fn: ?*const fn (model: *const ModelT, scratch: *StatusItemsScratch) []const StatusItemDescriptor = null,
             /// Model-declared secondary windows, reconciled after every
             /// rebuild (and on the installing frame): windows the model
             /// declares exist, windows it stops declaring close — the
             /// `status_item_fn` shape applied to the window set, so a
             /// settings window is `if (model.settings_open)` declaring a
             /// descriptor, opened by a Msg and closed by one. Requires
-            /// `window_view`. A user close dispatches the descriptor's
-            /// `on_close` Msg (the dismissal precedent: the engine
-            /// already closed it; the model's next declared set is
-            /// truth). Reconcile failures degrade to logged warnings —
-            /// a failed create never takes the render loop down.
+            /// `window_view`. A `.quit` user close dispatches the
+            /// descriptor's `on_close` Msg (the dismissal precedent: the
+            /// engine already closed it; the model's next declared set is
+            /// truth); `.hide` retains the declared window and dispatches
+            /// no close Msg. Reconcile failures degrade to logged warnings
+            /// — a failed create never takes the render loop down.
             windows_fn: ?*const fn (model: *const ModelT, scratch: *WindowsScratch) []const WindowDescriptor = null,
             /// Per-window view for declared secondary windows, keyed by
             /// the descriptor's window label — the `view` seam with the
@@ -961,19 +1005,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         web_pane_state_count: usize = 0,
         /// Exactly-once guard for `Options.status_item`/`status_item_fn`.
         status_item_installed: bool = false,
-        /// True once `createTray` succeeded — the gate for model-driven
-        /// tray updates (`status_item_fn`).
-        tray_created: bool = false,
-        /// The platform reported no tray-title seam; stop retrying (menu
-        /// updates keep flowing).
-        tray_title_unsupported: bool = false,
-        /// Hashes of the last APPLIED model-derived tray state, so
-        /// rebuilds only touch the platform when the output changed.
-        tray_title_hash: u64 = 0,
-        tray_menu_hash: u64 = 0,
+        /// Last successfully created status-item identities and their
+        /// applied channel hashes. Each channel patches independently;
+        /// menu changes never replace the native item.
+        applied_status_items: [platform.max_status_items]AppliedStatusItem = [_]AppliedStatusItem{.{}} ** platform.max_status_items,
+        applied_status_item_count: usize = 0,
         /// Scratch handed to `status_item_fn`; on the app struct so the
         /// returned slices outlive the apply.
         tray_scratch: StatusItemScratch = .{},
+        status_items_scratch: StatusItemsScratch = .{},
         /// Press-and-hold gesture state (`ElementOptions.on_hold`): the
         /// widget id whose press armed the hold timer, and whether the
         /// timer fired for the current gesture (a fired hold suppresses
@@ -1417,6 +1457,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .permitted = runtime.options.credentials_enabled and
                     security.hasPermission(runtime.options.security.permissions, security.permission_credentials),
             });
+            if (runtime.options.file_access) |binding| {
+                self.effects.bindFileAccess(binding);
+            } else if (!builtin.is_test and !self.effects.replayArmed()) {
+                // Fail closed for custom/older runners that omit the new path
+                // policy. Replay is exempt: the journal is the whole world and
+                // fake file requests must park without consulting live paths.
+                self.effects.bindFileAccess(.{
+                    .roots = &.{},
+                    .permitted = security.hasPermission(runtime.options.security.permissions, security.permission_filesystem),
+                    .enforce = true,
+                });
+            }
             self.effects.bindImages(runtime.canvasImageRegistryBinding());
             self.effects.bindMediaSurfaces(runtime.mediaSurfaceBinding());
             self.effects.bindWindowActions(.{
@@ -1497,7 +1549,16 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                         record.truncated,
                         record.dropped,
                     ),
-                    .file => try self.effects.feedFileResult(record.key, record.file_outcome, record.payload),
+                    .file => try self.effects.feedFileResultDetailed(.{
+                        .key = record.key,
+                        .op = record.file_op,
+                        .event = record.file_event,
+                        .outcome = record.file_outcome,
+                        .bytes = record.payload,
+                        .total = record.file_total,
+                        .mtime_ms = record.file_mtime_ms,
+                        .exists = record.file_exists,
+                    }),
                     .clipboard => try self.effects.feedClipboardResult(record.key, record.clipboard_outcome, record.payload),
                     // `.host` records ride the route in `code` (0 ok / 1
                     // err); rejections never reach here — they carry
@@ -2746,6 +2807,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .allows_fullscreen = descriptor.allows_fullscreen,
                 .min_width = descriptor.min_width,
                 .min_height = descriptor.min_height,
+                .close_policy = descriptor.close_policy,
                 // Deterministic reopen: the descriptor is the geometry
                 // channel, not a persisted frame store.
                 .restore_state = false,
@@ -3676,86 +3738,177 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// menu): ~350 ms press-and-hold.
         pub const press_hold_duration_ns: u64 = 350 * std.time.ns_per_ms;
 
-        /// Install the menu-bar extra once, on the installing frame.
-        /// Selecting one of its items dispatches the item's `command`
-        /// through the ordinary `on_command` path (source `.tray`).
-        /// Unsupported platforms degrade to a logged warning. With a
-        /// `status_item_fn`, the model's derived presentation/items win from
-        /// the very first frame (the static options keep icon+tooltip).
+        /// Install the declarative status-item surface on the installing
+        /// frame. Collection entries reconcile by stable id; the legacy
+        /// singular channel occupies the reserved primary id.
         fn installStatusItem(self: *Self, runtime: *Runtime) void {
             if (self.status_item_installed) return;
-            if (self.options.status_item == null and self.options.status_item_fn == null) return;
-            self.status_item_installed = true;
-            const static = self.options.status_item orelse StatusItemOptions{};
-            var presentation = platform.TrayPresentation{ .title = static.title };
-            var icon_path = static.icon_path;
-            var tooltip = static.tooltip;
-            var activation_command = static.activation_command;
-            var alternate_activation_command = static.alternate_activation_command;
-            var open_command = static.open_command;
-            var items = static.items;
-            if (self.options.status_item_fn) |state_fn| {
-                const state = state_fn(&self.model, &self.tray_scratch);
-                presentation = state.presentation;
-                if (presentation.title.len == 0) presentation.title = state.title;
-                if (state.icon_path.len > 0) icon_path = state.icon_path;
-                if (state.tooltip.len > 0) tooltip = state.tooltip;
-                if (state.activation_command.len > 0) activation_command = state.activation_command;
-                if (state.alternate_activation_command.len > 0) alternate_activation_command = state.alternate_activation_command;
-                if (state.open_command.len > 0) open_command = state.open_command;
-                items = state.items;
+            if (self.options.status_item == null and self.options.status_item_fn == null and self.options.status_items_fn == null) return;
+            if (self.options.status_items_fn != null and (self.options.status_item != null or self.options.status_item_fn != null)) {
+                @panic("UiApp status_items_fn is mutually exclusive with status_item/status_item_fn");
             }
-            runtime.createTray(.{
-                .title = presentation.title,
-                .icon_path = icon_path,
-                .tooltip = tooltip,
-                .items = items,
-                .presentation = presentation,
-                .activation_command = activation_command,
-                .alternate_activation_command = alternate_activation_command,
-                .open_command = open_command,
-            }) catch |err| {
-                ui_app_log.warn("status item install failed: {s}", .{@errorName(err)});
-                return;
-            };
-            self.tray_created = true;
-            self.tray_title_hash = hashTrayPresentation(presentation);
-            self.tray_menu_hash = hashTrayMenu(items);
+            self.status_item_installed = true;
+            self.reconcileStatusItems(runtime, self.desiredStatusItems());
         }
 
-        /// Re-derive the tray state from the model after a rebuild and
-        /// patch only what changed — the `web_panes` shape for the menu
-        /// bar. Failures degrade to a logged warning; a rejected
-        /// state is remembered so a static model does not warn per frame.
+        /// Re-derive the status-item collection after every committed
+        /// rebuild and patch shell, presentation, and menu independently.
         fn applyStatusItem(self: *Self, runtime: *Runtime) void {
-            const state_fn = self.options.status_item_fn orelse return;
-            if (!self.tray_created) return;
-            const state = state_fn(&self.model, &self.tray_scratch);
-            var presentation = state.presentation;
-            if (presentation.title.len == 0) presentation.title = state.title;
+            if (!self.status_item_installed) return;
+            if (self.options.status_item_fn == null and self.options.status_items_fn == null) return;
+            self.reconcileStatusItems(runtime, self.desiredStatusItems());
+        }
 
-            const title_hash = hashTrayPresentation(presentation);
-            if (title_hash != self.tray_title_hash) {
-                self.tray_title_hash = title_hash;
-                if (!self.tray_title_unsupported) {
-                    runtime.updateTrayPresentation(presentation) catch |err| {
-                        if (err == error.UnsupportedService) {
-                            self.tray_title_unsupported = true;
-                            ui_app_log.warn("status item presentation updates unsupported on this platform: the menu keeps updating", .{});
-                        } else {
-                            ui_app_log.warn("status item presentation update failed: {s}", .{@errorName(err)});
-                        }
+        fn desiredStatusItems(self: *Self) []const StatusItemDescriptor {
+            if (self.options.status_items_fn) |items_fn| {
+                return items_fn(&self.model, &self.status_items_scratch);
+            }
+            const static = self.options.status_item orelse StatusItemOptions{};
+            var state: StatusItemState = .{
+                .title = static.title,
+                .presentation = .{ .title = static.title },
+                .icon_path = static.icon_path,
+                .tooltip = static.tooltip,
+                .activation_command = static.activation_command,
+                .alternate_activation_command = static.alternate_activation_command,
+                .open_command = static.open_command,
+                .items = static.items,
+            };
+            if (self.options.status_item_fn) |state_fn| {
+                state = state_fn(&self.model, &self.tray_scratch);
+                if (state.presentation.title.len == 0) state.presentation.title = state.title;
+                if (state.icon_path.len == 0) state.icon_path = static.icon_path;
+                if (state.tooltip.len == 0) state.tooltip = static.tooltip;
+                if (state.activation_command.len == 0) state.activation_command = static.activation_command;
+                if (state.alternate_activation_command.len == 0) state.alternate_activation_command = static.alternate_activation_command;
+                if (state.open_command.len == 0) state.open_command = static.open_command;
+            }
+            self.status_items_scratch.status_items[0] = .{
+                .id = platform.primary_status_item_id,
+                .state = state,
+            };
+            return self.status_items_scratch.status_items[0..1];
+        }
+
+        fn reconcileStatusItems(self: *Self, runtime: *Runtime, declared: []const StatusItemDescriptor) void {
+            if (declared.len > platform.max_status_items) {
+                ui_app_log.warn("status item collection has {d} entries; at most {d} are supported", .{ declared.len, platform.max_status_items });
+            }
+            const desired = declared[0..@min(declared.len, platform.max_status_items)];
+
+            for (&self.applied_status_items) |*applied| {
+                if (!applied.active or statusItemDeclared(desired, applied.id)) continue;
+                runtime.removeStatusItem(applied.id) catch |err| {
+                    ui_app_log.warn("status item #{d} remove failed: {s}", .{ applied.id, @errorName(err) });
+                    continue;
+                };
+                applied.* = .{};
+                self.applied_status_item_count -= 1;
+            }
+
+            for (desired, 0..) |raw_descriptor, index| {
+                if (raw_descriptor.id == 0 or statusItemIdAppearedEarlier(desired, index, raw_descriptor.id)) {
+                    ui_app_log.warn("status item declaration ignored: identifiers must be unique and non-zero (got {d})", .{raw_descriptor.id});
+                    continue;
+                }
+                var descriptor = raw_descriptor;
+                if (descriptor.state.presentation.title.len == 0) descriptor.state.presentation.title = descriptor.state.title;
+                const shell = platform.TrayShell{
+                    .icon_path = descriptor.state.icon_path,
+                    .tooltip = descriptor.state.tooltip,
+                    .visible = descriptor.visible,
+                    .activation_command = descriptor.state.activation_command,
+                    .alternate_activation_command = descriptor.state.alternate_activation_command,
+                    .open_command = descriptor.state.open_command,
+                };
+                const shell_hash = hashTrayShell(shell);
+                const presentation_hash = hashTrayPresentation(descriptor.state.presentation);
+                const menu_hash = hashTrayMenu(descriptor.state.items);
+
+                const applied = self.findAppliedStatusItem(descriptor.id) orelse self.emptyAppliedStatusItem() orelse {
+                    ui_app_log.warn("status item #{d} ignored: status-item capacity is full", .{descriptor.id});
+                    continue;
+                };
+                if (!applied.active) {
+                    runtime.createStatusItem(descriptor.id, .{
+                        .title = descriptor.state.presentation.title,
+                        .icon_path = shell.icon_path,
+                        .tooltip = shell.tooltip,
+                        .visible = shell.visible,
+                        .items = descriptor.state.items,
+                        .presentation = descriptor.state.presentation,
+                        .activation_command = shell.activation_command,
+                        .alternate_activation_command = shell.alternate_activation_command,
+                        .open_command = shell.open_command,
+                    }) catch |err| {
+                        ui_app_log.warn("status item #{d} install failed: {s}", .{ descriptor.id, @errorName(err) });
+                        continue;
+                    };
+                    applied.* = .{
+                        .id = descriptor.id,
+                        .active = true,
+                        .shell_hash = shell_hash,
+                        .presentation_hash = presentation_hash,
+                        .menu_hash = menu_hash,
+                    };
+                    self.applied_status_item_count += 1;
+                    continue;
+                }
+
+                if (shell_hash != applied.shell_hash) {
+                    applied.shell_hash = shell_hash;
+                    if (!applied.shell_unsupported) {
+                        runtime.updateStatusItemShell(descriptor.id, shell) catch |err| {
+                            if (err == error.UnsupportedService) applied.shell_unsupported = true;
+                            ui_app_log.warn("status item #{d} shell update failed: {s}", .{ descriptor.id, @errorName(err) });
+                        };
+                    }
+                }
+                if (presentation_hash != applied.presentation_hash) {
+                    applied.presentation_hash = presentation_hash;
+                    if (!applied.presentation_unsupported) {
+                        runtime.updateStatusItemPresentation(descriptor.id, descriptor.state.presentation) catch |err| {
+                            if (err == error.UnsupportedService) applied.presentation_unsupported = true;
+                            ui_app_log.warn("status item #{d} presentation update failed: {s}", .{ descriptor.id, @errorName(err) });
+                        };
+                    }
+                }
+                if (menu_hash != applied.menu_hash) {
+                    applied.menu_hash = menu_hash;
+                    runtime.updateStatusItemMenu(descriptor.id, descriptor.state.items) catch |err| {
+                        ui_app_log.warn("status item #{d} menu update failed: {s}", .{ descriptor.id, @errorName(err) });
                     };
                 }
             }
+        }
 
-            const menu_hash = hashTrayMenu(state.items);
-            if (menu_hash != self.tray_menu_hash) {
-                self.tray_menu_hash = menu_hash;
-                runtime.updateTrayMenu(state.items) catch |err| {
-                    ui_app_log.warn("status item menu update failed: {s} (items must carry unique non-zero ids and validated command names)", .{@errorName(err)});
-                };
+        fn findAppliedStatusItem(self: *Self, id: platform.StatusItemId) ?*AppliedStatusItem {
+            for (&self.applied_status_items) |*applied| {
+                if (applied.active and applied.id == id) return applied;
             }
+            return null;
+        }
+
+        fn emptyAppliedStatusItem(self: *Self) ?*AppliedStatusItem {
+            if (self.applied_status_item_count >= self.applied_status_items.len) return null;
+            for (&self.applied_status_items) |*applied| {
+                if (!applied.active) return applied;
+            }
+            return null;
+        }
+
+        fn statusItemDeclared(declared: []const StatusItemDescriptor, id: platform.StatusItemId) bool {
+            for (declared) |descriptor| {
+                if (descriptor.id == id) return true;
+            }
+            return false;
+        }
+
+        fn statusItemIdAppearedEarlier(declared: []const StatusItemDescriptor, index: usize, id: platform.StatusItemId) bool {
+            for (declared[0..index]) |descriptor| {
+                if (descriptor.id == id) return true;
+            }
+            return false;
         }
 
         /// The video channel snapshot in the builder's chrome shape
@@ -4551,6 +4704,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// Change-detection hashes for the model-derived tray state:
         /// field lengths are folded in so adjacent slices can
         /// never alias across boundaries.
+        fn hashTrayShell(shell: platform.TrayShell) u64 {
+            var hasher = std.hash.Wyhash.init(0x7261795f7368656c); // "ray_shel"
+            const fields = [_][]const u8{
+                shell.icon_path,
+                shell.tooltip,
+                shell.activation_command,
+                shell.alternate_activation_command,
+                shell.open_command,
+            };
+            for (fields) |field| {
+                hasher.update(std.mem.asBytes(&field.len));
+                hasher.update(field);
+            }
+            hasher.update(&.{@intFromBool(shell.visible)});
+            return hasher.final();
+        }
+
         fn hashTrayPresentation(presentation: platform.TrayPresentation) u64 {
             var hasher = std.hash.Wyhash.init(0x7261795f70726573); // "ray_pres"
             hasher.update(presentation.title);

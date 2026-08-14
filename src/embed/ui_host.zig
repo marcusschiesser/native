@@ -14,6 +14,10 @@
 //!   `canvas_label` must be `mobile-surface` (use `mobile_shell_scene` /
 //!   `mobile_gpu_surface_label` for the canonical single-surface scene).
 //! - optional `pub const features: native_sdk.UiAppFeatures`
+//! - optional `pub fn serviceDataRoot([]const u8) void` /
+//!   `pub fn serviceTeardown() void` — the generated TypeScript mobile
+//!   wiring's hooks: the host hands `setDataRoot`'s directory to the
+//!   in-process service pool and tears the pool down on destroy.
 //!
 //! The host owns a `NullPlatform` runtime (M1: no real surface — M2 adds
 //! presentation) and pumps the `UiApp` loop from the shim's frame callback:
@@ -24,10 +28,12 @@
 //! the ABI via `native_sdk_app_render_pixels`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const app_manifest = @import("app_manifest");
 const canvas = @import("canvas");
 const runtime = @import("../runtime/root.zig");
 const platform = @import("../platform/root.zig");
+const app_dirs = @import("app_dirs");
 const security = @import("../security/root.zig");
 const types = @import("types.zig");
 const host = @import("host.zig");
@@ -83,6 +89,7 @@ pub fn UiAppHostWithStorage(
         relational_migrations,
         false,
         false,
+        false,
         "dev.native_sdk.app",
     );
 }
@@ -96,6 +103,7 @@ pub fn UiAppHostWithStorageAndCredentials(
     comptime relational_migrations: []const runtime.relational_store.Migration,
     comptime credentials_enabled: bool,
     comptime credentials_permitted: bool,
+    comptime filesystem_permitted: bool,
     comptime credentials_service: []const u8,
 ) type {
     const features: runtime.UiAppFeatures = if (@hasDecl(AppDef, "features")) AppDef.features else .{};
@@ -125,6 +133,8 @@ pub fn UiAppHostWithStorageAndCredentials(
         asset_root_len: usize = 0,
         asset_entry: [max_mobile_asset_entry_bytes]u8 = undefined,
         asset_entry_len: usize = 0,
+        file_root_storage: [6][max_mobile_asset_root_bytes]u8 = undefined,
+        file_roots: [6][]const u8 = undefined,
         automation_dir: [max_mobile_asset_root_bytes]u8 = undefined,
         automation_dir_len: usize = 0,
         automation_io: ?*std.Io.Threaded = null,
@@ -191,6 +201,8 @@ pub fn UiAppHostWithStorageAndCredentials(
             self.asset_root_len = 0;
             self.asset_entry = undefined;
             self.asset_entry_len = 0;
+            self.file_root_storage = undefined;
+            self.file_roots = undefined;
             self.automation_dir = undefined;
             self.automation_dir_len = 0;
             self.automation_io = null;
@@ -221,10 +233,21 @@ pub fn UiAppHostWithStorageAndCredentials(
             // registers its OS credential service.
             try host.setCredentialService(self, .{}, null);
             self.embedded.runtime.options.credentials_enabled = credentials_enabled;
-            self.embedded.runtime.options.security.permissions = if (credentials_permitted)
+            self.embedded.runtime.options.security.permissions = if (credentials_permitted and filesystem_permitted)
+                &.{ security.permission_credentials, security.permission_filesystem }
+            else if (credentials_permitted)
                 &.{security.permission_credentials}
+            else if (filesystem_permitted)
+                &.{security.permission_filesystem}
             else
                 &.{};
+            // Until the OS data root is installed, fail closed for ungranted
+            // raw paths. A filesystem grant is sufficient on its own.
+            self.embedded.runtime.options.file_access = .{
+                .roots = &.{},
+                .permitted = filesystem_permitted,
+                .enforce = true,
+            };
             // The damage seam: capture pixel presents (chained through
             // the null platform's recording present, so nonblank
             // sampling keeps working), drop the packet presenters no
@@ -247,6 +270,11 @@ pub fn UiAppHostWithStorageAndCredentials(
             // its heap-owned registrations (registered canvas font
             // bytes) before the host storage goes.
             self.embedded.deinit();
+            // An AppDef owning module-level service state (the generated
+            // TypeScript mobile wiring's in-process pool) tears it down
+            // after the effects channel is gone; the pool's own shutdown
+            // already ran through the binding.
+            if (comptime @hasDecl(AppDef, "serviceTeardown")) AppDef.serviceTeardown();
             if (comptime record_store_enabled) {
                 if (self.record_store_open) self.record_store.deinit();
             }
@@ -284,10 +312,48 @@ pub fn UiAppHostWithStorageAndCredentials(
         /// Install the OS-owned app-data directory before start. iOS passes
         /// Library/Application Support and Android passes files/, exactly the
         /// `.data` directories resolved by `app_dirs` on those platforms.
+        /// An AppDef declaring `serviceDataRoot` (the generated TypeScript
+        /// mobile wiring) receives the directory too — the in-process
+        /// service pool keeps its cooperative-cancellation markers and
+        /// stream relays there, and cores reading `NATIVE_SDK_APP_DATA_DIR`
+        /// through `envMsgs` get this value.
         pub fn setDataRoot(self: *Self, data_root: []const u8) !void {
-            if (comptime !record_store_enabled and !relational_store_enabled) return;
             if (self.started) return error.AppAlreadyStarted;
             if (data_root.len == 0 or data_root.len > max_mobile_asset_root_bytes) return error.InvalidStoreDataDir;
+            if (comptime @hasDecl(AppDef, "serviceDataRoot")) AppDef.serviceDataRoot(data_root);
+            const platform_value = app_dirs.currentPlatform();
+            if (builtin.is_test and platform_value != .ios and platform_value != .android) {
+                for (&self.file_root_storage, 0..) |*storage, index| {
+                    @memcpy(storage[0..data_root.len], data_root);
+                    self.file_roots[index] = storage[0..data_root.len];
+                }
+                self.embedded.runtime.options.file_access = .{
+                    .roots = &self.file_roots,
+                    .permitted = filesystem_permitted,
+                    .enforce = true,
+                };
+            } else {
+                const home = switch (platform_value) {
+                    // iOS data_root is HOME/Library/Application Support.
+                    .ios => std.fs.path.dirname(std.fs.path.dirname(data_root) orelse return error.InvalidStoreDataDir) orelse return error.InvalidStoreDataDir,
+                    // Android data_root is HOME/files.
+                    .android => std.fs.path.dirname(data_root) orelse return error.InvalidStoreDataDir,
+                    else => return error.InvalidStoreDataDir,
+                };
+                const dir_buffers = app_dirs.Buffers.fromArray(max_mobile_asset_root_bytes, &self.file_root_storage);
+                const dirs = try app_dirs.resolve(
+                    .{ .name = credentials_service },
+                    platform_value,
+                    .{ .home = home },
+                    dir_buffers,
+                );
+                self.file_roots = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
+                self.embedded.runtime.options.file_access = .{
+                    .roots = &self.file_roots,
+                    .permitted = filesystem_permitted,
+                    .enforce = true,
+                };
+            }
             if (comptime record_store_enabled) {
                 if (self.record_store_open) {
                     self.record_store.deinit();

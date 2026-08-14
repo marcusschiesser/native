@@ -178,6 +178,13 @@ pub fn replaySession(
             },
             .effect => |effect_record| {
                 var effect = effect_record;
+                if (effect.kind == .file and fileRecordDamaged(effect)) {
+                    std.debug.print(
+                        "replay refused after event {d}: file record for key {d} has an invalid stream/stat payload shape\n",
+                        .{ report.events_replayed, effect.key },
+                    );
+                    return error.ReplayDamagedRecord;
+                }
                 // A `.loaded` image record ALWAYS names source bytes:
                 // the recorder journals `.loaded` only after those
                 // exact bytes decoded and registered (a failed decode
@@ -357,6 +364,16 @@ pub fn replaySession(
                         std.debug.print(
                             "replay refused after event {d}: pty record for key {d} references blob {s} ({d} bytes) that could not be resolved ({s}) - replay needs the journal's blobs/ directory beside it\n",
                             .{ report.events_replayed, effect.key, session_blobs.hexName(effect.pty_blob_hash), effect.pty_blob_len, @errorName(err) },
+                        );
+                        return error.ReplayMissingBlob;
+                    };
+                    effect.payload = bytes;
+                }
+                if (effect.kind == .file and effect.file_blob_len > 0) {
+                    const bytes = resolveBlob(effect.file_blob_hash, effect.file_blob_len, runtime_effects.effect_file_stream_chunk_bytes, options.blobs, &blob_scratch) catch |err| {
+                        std.debug.print(
+                            "replay refused after event {d}: file stream for key {d} references blob {s} ({d} bytes) that could not be resolved ({s})\n",
+                            .{ report.events_replayed, effect.key, session_blobs.hexName(effect.file_blob_hash), effect.file_blob_len, @errorName(err) },
                         );
                         return error.ReplayMissingBlob;
                     };
@@ -592,6 +609,25 @@ fn dbRecordDamaged(record: journal.EffectResultRecord) bool {
     };
 }
 
+fn fileRecordDamaged(record: journal.EffectResultRecord) bool {
+    if (record.file_rejected_admission) switch (record.file_outcome) {
+        .rejected => {},
+        .sink_missing, .out_of_order => if (record.file_op != .write_stream_chunk and record.file_op != .write_stream_close) return true,
+        else => return true,
+    };
+    if (record.file_blob_len > runtime_effects.effect_file_stream_chunk_bytes) return true;
+    if (record.file_event == .chunk) {
+        return record.file_op != .read_stream or record.file_outcome != .ok or
+            record.payload.len != 0 or record.file_blob_len == 0;
+    }
+    if (record.file_blob_len != 0) return true;
+    if (record.file_event == .done) {
+        return record.file_op != .read_stream or record.file_outcome != .ok or record.payload.len != 0;
+    }
+    if (record.file_op == .stat and record.file_outcome == .ok) return record.payload.len != 0;
+    return record.file_total != 0 or record.file_mtime_ms != 0 or record.file_exists;
+}
+
 fn credentialsRecordDamaged(record: journal.EffectResultRecord) bool {
     if (record.payload.len != 0 or record.exit_reason != .exited) return true;
     const redacted_get = record.credentials_operation == .get and record.credentials_outcome == .ok;
@@ -731,15 +767,13 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
     return switch (record.kind) {
         .timer => true,
         .exit => record.exit_reason == .rejected,
-        // Only DETERMINISTIC admission refusals regenerate — marked by
-        // the provenance bit the recorder set (`truncated`, unused for
-        // pty otherwise). Executor-truth terminals — start failures,
-        // the platform-unsupported rejection, output, and real exits —
-        // are external inputs and must be fed, even when their reason
-        // is `.rejected`.
+        // Only DETERMINISTIC admission/protocol results regenerate — marked
+        // by each effect family's provenance bit. Executor-truth terminals —
+        // start failures, platform refusals, output, and real exits — are
+        // external inputs and must be fed, even when their reason is rejected.
         .pty => record.pty_kind == .exit and record.truncated,
         .response => record.fetch_outcome == .rejected,
-        .file => record.file_outcome == .rejected,
+        .file => record.file_rejected_admission,
         .clipboard => record.clipboard_outcome == .rejected,
         // Audio rejections are loop-side validation (path bounds) that
         // refuses again; everything else — loaded acknowledgments,
@@ -789,6 +823,62 @@ fn effectRegeneratesUnderReplay(record: journal.EffectResultRecord) bool {
         // replay launch's environment is never consulted.
         .line, .clock, .env, .persist => false,
     };
+}
+
+test "only admission-tagged file results regenerate" {
+    try std.testing.expect(effectRegeneratesUnderReplay(.{
+        .kind = .file,
+        .key = 1,
+        .file_outcome = .rejected,
+        .file_rejected_admission = true,
+    }));
+    try std.testing.expect(!fileRecordDamaged(.{
+        .kind = .file,
+        .key = 2,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .sink_missing,
+        .file_rejected_admission = true,
+    }));
+    try std.testing.expect(fileRecordDamaged(.{
+        .kind = .file,
+        .key = 2,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .ok,
+        .file_rejected_admission = true,
+    }));
+    try std.testing.expect(!effectRegeneratesUnderReplay(.{
+        .kind = .file,
+        .key = 1,
+        .file_op = .read_stream,
+        .file_outcome = .rejected,
+    }));
+    try std.testing.expect(effectRegeneratesUnderReplay(.{
+        .kind = .file,
+        .key = 2,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .sink_missing,
+        .file_rejected_admission = true,
+    }));
+    try std.testing.expect(effectRegeneratesUnderReplay(.{
+        .kind = .file,
+        .key = 3,
+        .file_op = .write_stream_close,
+        .file_outcome = .out_of_order,
+        .file_rejected_admission = true,
+    }));
+    try std.testing.expect(!fileRecordDamaged(.{
+        .kind = .file,
+        .key = 4,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .ok,
+    }));
+    try std.testing.expect(fileRecordDamaged(.{
+        .kind = .file,
+        .key = 4,
+        .file_op = .write_stream_chunk,
+        .file_outcome = .ok,
+        .file_total = 1,
+    }));
 }
 
 /// Re-render a journaled screenshot mark through the same deterministic
