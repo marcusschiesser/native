@@ -289,13 +289,13 @@ test "runtime dispatches tray item commands" {
         .{ .id = 8, .label = "Legacy" },
     } });
 
-    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = 7 });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = .{ .item_id = 7 } });
     try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
     try std.testing.expectEqualStrings("app.refresh", app_state.last_name);
     try std.testing.expectEqual(CommandSource.tray, app_state.last_source);
     try std.testing.expectEqual(@as(platform.TrayItemId, 7), app_state.last_tray_item_id);
 
-    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = 8 });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_action = .{ .item_id = 8 } });
     try std.testing.expectEqual(@as(u32, 2), app_state.command_count);
     try std.testing.expectEqualStrings("tray.action", app_state.last_name);
     try std.testing.expectEqual(@as(platform.TrayItemId, 8), app_state.last_tray_item_id);
@@ -347,6 +347,48 @@ test "runtime dispatches named tray lifecycle commands with tray source" {
     try std.testing.expectEqualStrings("app.refresh", app_state.last_name);
     try std.testing.expectEqual(CommandSource.tray, app_state.last_source);
     try std.testing.expectEqual(@as(platform.WindowId, 3), app_state.last_window_id);
+}
+
+test "runtime dispatches notification actions through the normal command path" {
+    const TestApp = struct {
+        command_count: u32 = 0,
+        last_name: []const u8 = "",
+        last_source: CommandSource = .runtime,
+        last_window_id: platform.WindowId = 0,
+
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "notification-command", .source = platform.WebViewSource.html("<p>Notification</p>"), .event_fn = event };
+        }
+
+        fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+            _ = runtime;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (event_value) {
+                .command => |command| {
+                    self.command_count += 1;
+                    self.last_name = command.name;
+                    self.last_source = command.source;
+                    self.last_window_id = command.window_id;
+                },
+                else => {},
+            }
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .notification_command = .{
+        .name = "build.open",
+        .window_id = 4,
+    } });
+
+    try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
+    try std.testing.expectEqualStrings("build.open", app_state.last_name);
+    try std.testing.expectEqual(CommandSource.notification, app_state.last_source);
+    try std.testing.expectEqual(@as(platform.WindowId, 4), app_state.last_window_id);
 }
 
 test "runtime dispatches file drop events to app and window bridge" {

@@ -62,7 +62,7 @@ export function update(model: Model, msg: Msg): Model {
 test("a small core's contract carries types, arms, slots, and channels", () => {
   const doc = contractOf(smallCore);
   assert.equal(doc.format, 1);
-  assert.equal(doc.wire_version, 4);
+  assert.equal(doc.wire_version, 6);
   assert.equal(doc.abi_version, 2);
   assert.equal(doc.entry, "src/core.ts");
   assert.equal(doc.model, "Model");
@@ -196,6 +196,26 @@ export function statusItem(model: Model): StatusItemState {
   assert.deepEqual(doc.model_unbound, ["statusItem"]);
   const structs = (doc.types as { structs: { name: string }[] }).structs.map((record) => record.name);
   assert.ok(structs.includes("StatusItemState"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemMenuItem"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemPresentation"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemModifiers"), `structs: ${structs.join(", ")}`);
+});
+
+test("statusItems is projected as a launcher-bound descriptor slice", () => {
+  const doc = contractOf(`
+import { type StatusItemDescriptor } from "@native-sdk/core/events";
+export interface Model { spend: number; }
+export type Msg = { kind: "tick" };
+export function initialModel(): Model { return { spend: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function statusItems(model: Model): readonly StatusItemDescriptor[] { return []; }
+`);
+  const helpers = doc.model_helpers as { name: string; returns: unknown }[];
+  assert.deepEqual(helpers.map((helper) => helper.name), ["statusItems"]);
+  assert.deepEqual(helpers[0].returns, { kind: "slice", elem: { kind: "value", name: "StatusItemDescriptor" } });
+  assert.deepEqual(doc.model_unbound, ["statusItems"]);
+  const structs = (doc.types as { structs: { name: string }[] }).structs.map((record) => record.name);
+  assert.ok(structs.includes("StatusItemDescriptor"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemMenuItem"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemPresentation"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemModifiers"), `structs: ${structs.join(", ")}`);

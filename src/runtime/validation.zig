@@ -77,9 +77,14 @@ fn validateDialogString(value: []const u8, max_len: usize, allow_empty: bool) !v
 
 pub fn validateNotificationOptions(options: platform.NotificationOptions) !void {
     if (options.title.len == 0) return error.InvalidNotificationOptions;
+    try validateNotificationField(options.id, platform.max_notification_id_bytes);
     try validateNotificationField(options.title, platform.max_notification_title_bytes);
     try validateNotificationField(options.subtitle, platform.max_notification_subtitle_bytes);
     try validateNotificationField(options.body, platform.max_notification_body_bytes);
+    try validateNotificationField(options.action_label, platform.max_notification_action_label_bytes);
+    try validateNotificationField(options.action_command, platform.max_notification_action_command_bytes);
+    if ((options.action_label.len == 0) != (options.action_command.len == 0)) return error.InvalidNotificationOptions;
+    if (options.action_command.len > 0) try validateCommandName(options.action_command);
 }
 
 pub fn validateClipboardData(data: platform.ClipboardData) !void {
@@ -128,6 +133,21 @@ pub fn validateTrayOptions(options: platform.TrayOptions) !void {
     if (options.alternate_activation_command.len > 0) try validateCommandName(options.alternate_activation_command);
     if (options.open_command.len > 0) try validateCommandName(options.open_command);
     try validateTrayMenuItems(options.items);
+}
+
+pub fn validateStatusItemId(status_item_id: platform.StatusItemId) !void {
+    if (status_item_id == 0) return error.InvalidTrayOptions;
+}
+
+pub fn validateTrayShell(shell: platform.TrayShell) !void {
+    try validateTrayField(shell.icon_path, platform.max_tray_icon_path_bytes);
+    try validateTrayField(shell.tooltip, platform.max_tray_tooltip_bytes);
+    try validateTrayField(shell.activation_command, platform.max_tray_item_command_bytes);
+    try validateTrayField(shell.alternate_activation_command, platform.max_tray_item_command_bytes);
+    try validateTrayField(shell.open_command, platform.max_tray_item_command_bytes);
+    if (shell.activation_command.len > 0) try validateCommandName(shell.activation_command);
+    if (shell.alternate_activation_command.len > 0) try validateCommandName(shell.alternate_activation_command);
+    if (shell.open_command.len > 0) try validateCommandName(shell.open_command);
 }
 
 pub fn validateTrayTitle(title: []const u8) !void {

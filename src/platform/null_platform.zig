@@ -29,12 +29,16 @@ const max_recent_document_path_bytes = types.max_recent_document_path_bytes;
 const max_notification_title_bytes = types.max_notification_title_bytes;
 const max_notification_subtitle_bytes = types.max_notification_subtitle_bytes;
 const max_notification_body_bytes = types.max_notification_body_bytes;
+const max_notification_id_bytes = types.max_notification_id_bytes;
+const max_notification_action_label_bytes = types.max_notification_action_label_bytes;
+const max_notification_action_command_bytes = types.max_notification_action_command_bytes;
 const max_clipboard_mime_type_bytes = types.max_clipboard_mime_type_bytes;
 const max_clipboard_data_bytes = types.max_clipboard_data_bytes;
 const max_credential_service_bytes = types.max_credential_service_bytes;
 const max_credential_account_bytes = types.max_credential_account_bytes;
 const max_credential_secret_bytes = types.max_credential_secret_bytes;
 const max_local_time_text_bytes = types.max_local_time_text_bytes;
+const max_status_items = types.max_status_items;
 const max_tray_items = types.max_tray_items;
 const max_tray_icon_path_bytes = types.max_tray_icon_path_bytes;
 const max_tray_title_bytes = types.max_tray_title_bytes;
@@ -112,6 +116,8 @@ const NotificationOptions = types.NotificationOptions;
 const CredentialKey = types.CredentialKey;
 const Credential = types.Credential;
 const LocalTimeStyle = types.LocalTimeStyle;
+const StatusItemId = types.StatusItemId;
+const TrayShell = types.TrayShell;
 const TrayItemId = types.TrayItemId;
 const TrayOptions = types.TrayOptions;
 const TrayPresentation = types.TrayPresentation;
@@ -119,6 +125,7 @@ const TrayMenuItem = types.TrayMenuItem;
 const NativeCommandEvent = types.NativeCommandEvent;
 const MenuCommandEvent = types.MenuCommandEvent;
 const TrayCommandEvent = types.TrayCommandEvent;
+const Event = types.Event;
 const TimerEvent = types.TimerEvent;
 const FileDropEvent = types.FileDropEvent;
 const GpuFrame = types.GpuFrame;
@@ -145,7 +152,6 @@ const WidgetAccessibilityActionEvent = types.WidgetAccessibilityActionEvent;
 const ClipboardData = types.ClipboardData;
 const ColorScheme = types.ColorScheme;
 const Appearance = types.Appearance;
-const Event = types.Event;
 const splitDropPaths = types.splitDropPaths;
 const EventHandler = types.EventHandler;
 const PlatformServices = types.PlatformServices;
@@ -292,6 +298,37 @@ pub const NullAudioCapture = struct {
     sink: types.AudioCaptureSink = .{},
     start_count: usize = 0,
     stop_count: usize = 0,
+};
+
+const NullStatusItem = struct {
+    id: StatusItemId = 0,
+    active: bool = false,
+    visible: bool = true,
+    icon_path: [max_tray_icon_path_bytes]u8 = undefined,
+    icon_path_len: usize = 0,
+    title: [max_tray_title_bytes]u8 = undefined,
+    title_len: usize = 0,
+    tooltip: [max_tray_tooltip_bytes]u8 = undefined,
+    tooltip_len: usize = 0,
+    activation_command: [max_tray_item_command_bytes]u8 = undefined,
+    activation_command_len: usize = 0,
+    alternate_activation_command: [max_tray_item_command_bytes]u8 = undefined,
+    alternate_activation_command_len: usize = 0,
+    open_command: [max_tray_item_command_bytes]u8 = undefined,
+    open_command_len: usize = 0,
+    presentation: TrayPresentation = .{},
+    items: [max_tray_items]TrayMenuItem = undefined,
+    item_count: usize = 0,
+};
+
+const max_null_notifications: usize = 16;
+
+const NullNotification = struct {
+    active: bool = false,
+    id: [max_notification_id_bytes]u8 = undefined,
+    id_len: usize = 0,
+    action_command: [max_notification_action_command_bytes]u8 = undefined,
+    action_command_len: usize = 0,
 };
 
 pub const NullPlatform = struct {
@@ -464,7 +501,15 @@ pub const NullPlatform = struct {
     notification_subtitle_len: usize = 0,
     notification_body: [max_notification_body_bytes]u8 = undefined,
     notification_body_len: usize = 0,
+    notification_id: [max_notification_id_bytes]u8 = undefined,
+    notification_id_len: usize = 0,
+    notification_action_label: [max_notification_action_label_bytes]u8 = undefined,
+    notification_action_label_len: usize = 0,
+    notification_action_command: [max_notification_action_command_bytes]u8 = undefined,
+    notification_action_command_len: usize = 0,
+    notifications: [max_null_notifications]NullNotification = [_]NullNotification{.{}} ** max_null_notifications,
     notification_count: usize = 0,
+    notification_replacement_count: usize = 0,
     clipboard_mime_type: [max_clipboard_mime_type_bytes]u8 = undefined,
     clipboard_mime_type_len: usize = 0,
     clipboard_data: [max_clipboard_data_bytes]u8 = undefined,
@@ -487,22 +532,10 @@ pub const NullPlatform = struct {
     /// fixed offset so suites can pin exact output without ambient state.
     local_time_offset_minutes: i16 = 0,
     webview_navigate_count: usize = 0,
-    tray_icon_path: [max_tray_icon_path_bytes]u8 = undefined,
-    tray_icon_path_len: usize = 0,
-    tray_title: [max_tray_title_bytes]u8 = undefined,
-    tray_title_len: usize = 0,
-    tray_tooltip: [max_tray_tooltip_bytes]u8 = undefined,
-    tray_tooltip_len: usize = 0,
-    tray_activation_command: [max_tray_item_command_bytes]u8 = undefined,
-    tray_activation_command_len: usize = 0,
-    tray_alternate_activation_command: [max_tray_item_command_bytes]u8 = undefined,
-    tray_alternate_activation_command_len: usize = 0,
-    tray_open_command: [max_tray_item_command_bytes]u8 = undefined,
-    tray_open_command_len: usize = 0,
-    tray_presentation: TrayPresentation = .{},
-    tray_items: [max_tray_items]TrayMenuItem = undefined,
-    tray_item_count: usize = 0,
+    status_items: [max_status_items]NullStatusItem = [_]NullStatusItem{.{}} ** max_status_items,
+    status_item_count: usize = 0,
     tray_create_count: usize = 0,
+    tray_shell_update_count: usize = 0,
     tray_update_count: usize = 0,
     tray_title_update_count: usize = 0,
     tray_remove_count: usize = 0,
@@ -885,6 +918,7 @@ pub const NullPlatform = struct {
                 .note_blocking_call_abandoned_fn = noteChannelWakeAbandoned,
                 .format_local_time_fn = formatLocalTime,
                 .create_tray_fn = createTray,
+                .update_tray_shell_fn = updateTrayShell,
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
                 .update_tray_presentation_fn = updateTrayPresentation,
@@ -1541,9 +1575,36 @@ pub const NullPlatform = struct {
         self.notification_title = undefined;
         self.notification_subtitle = undefined;
         self.notification_body = undefined;
+        self.notification_id = undefined;
+        self.notification_action_label = undefined;
+        self.notification_action_command = undefined;
         self.notification_title_len = (try copyInto(&self.notification_title, options.title)).len;
         self.notification_subtitle_len = (try copyInto(&self.notification_subtitle, options.subtitle)).len;
         self.notification_body_len = (try copyInto(&self.notification_body, options.body)).len;
+        self.notification_id_len = (try copyInto(&self.notification_id, options.id)).len;
+        self.notification_action_label_len = (try copyInto(&self.notification_action_label, options.action_label)).len;
+        self.notification_action_command_len = (try copyInto(&self.notification_action_command, options.action_command)).len;
+
+        if (options.id.len > 0) {
+            var selected: ?usize = null;
+            var free: ?usize = null;
+            for (&self.notifications, 0..) |*entry, index| {
+                if (!entry.active) {
+                    if (free == null) free = index;
+                    continue;
+                }
+                if (std.mem.eql(u8, entry.id[0..entry.id_len], options.id)) {
+                    selected = index;
+                    self.notification_replacement_count += 1;
+                    break;
+                }
+            }
+            const index = selected orelse free orelse (self.notification_count % max_null_notifications);
+            var entry = &self.notifications[index];
+            entry.* = .{ .active = true };
+            entry.id_len = (try copyInto(&entry.id, options.id)).len;
+            entry.action_command_len = (try copyInto(&entry.action_command, options.action_command)).len;
+        }
         self.notification_count += 1;
     }
 
@@ -1657,51 +1718,92 @@ pub const NullPlatform = struct {
         return .{ .year = @intCast(civil_year), .month = month, .day = day };
     }
 
-    fn createTray(context: ?*anyopaque, options: TrayOptions) anyerror!void {
+    fn findStatusItem(self: *NullPlatform, status_item_id: StatusItemId) ?*NullStatusItem {
+        for (&self.status_items) |*item| {
+            if (item.active and item.id == status_item_id) return item;
+        }
+        return null;
+    }
+
+    fn findStatusItemConst(self: *const NullPlatform, status_item_id: StatusItemId) ?*const NullStatusItem {
+        for (&self.status_items) |*item| {
+            if (item.active and item.id == status_item_id) return item;
+        }
+        return null;
+    }
+
+    fn statusItemSlot(self: *NullPlatform, status_item_id: StatusItemId) anyerror!*NullStatusItem {
+        if (self.findStatusItem(status_item_id)) |item| return item;
+        for (&self.status_items) |*item| {
+            if (!item.active) {
+                item.* = .{ .id = status_item_id, .active = true };
+                self.status_item_count += 1;
+                return item;
+            }
+        }
+        return error.UnsupportedService;
+    }
+
+    fn copyTrayShell(item: *NullStatusItem, shell: TrayShell) anyerror!void {
+        item.icon_path_len = (try copyInto(&item.icon_path, shell.icon_path)).len;
+        item.tooltip_len = (try copyInto(&item.tooltip, shell.tooltip)).len;
+        item.activation_command_len = (try copyInto(&item.activation_command, shell.activation_command)).len;
+        item.alternate_activation_command_len = (try copyInto(&item.alternate_activation_command, shell.alternate_activation_command)).len;
+        item.open_command_len = (try copyInto(&item.open_command, shell.open_command)).len;
+        item.visible = shell.visible;
+    }
+
+    fn createTray(context: ?*anyopaque, status_item_id: StatusItemId, options: TrayOptions) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        self.tray_icon_path = undefined;
-        self.tray_title = undefined;
-        self.tray_tooltip = undefined;
-        self.tray_icon_path_len = (try copyInto(&self.tray_icon_path, options.icon_path)).len;
+        const item = try self.statusItemSlot(status_item_id);
+        try copyTrayShell(item, types.trayShell(options));
         var presentation = options.presentation;
         if (presentation.title.len == 0) presentation.title = options.title;
-        self.tray_title_len = (try copyInto(&self.tray_title, presentation.title)).len;
-        self.tray_tooltip_len = (try copyInto(&self.tray_tooltip, options.tooltip)).len;
-        self.tray_activation_command_len = (try copyInto(&self.tray_activation_command, options.activation_command)).len;
-        self.tray_alternate_activation_command_len = (try copyInto(&self.tray_alternate_activation_command, options.alternate_activation_command)).len;
-        self.tray_open_command_len = (try copyInto(&self.tray_open_command, options.open_command)).len;
-        self.tray_presentation = presentation;
-        self.tray_presentation.title = self.tray_title[0..self.tray_title_len];
-        try updateTrayMenu(context, options.items);
+        item.title_len = (try copyInto(&item.title, presentation.title)).len;
+        item.presentation = presentation;
+        item.presentation.title = item.title[0..item.title_len];
+        try updateTrayMenu(context, status_item_id, options.items);
         self.tray_create_count += 1;
     }
 
-    fn updateTrayMenu(context: ?*anyopaque, items: []const TrayMenuItem) anyerror!void {
+    fn updateTrayShell(context: ?*anyopaque, status_item_id: StatusItemId, shell: TrayShell) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        if (items.len > self.tray_items.len) return error.InvalidTrayOptions;
-        for (items, 0..) |item, index| self.tray_items[index] = item;
-        self.tray_item_count = items.len;
+        const item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
+        try copyTrayShell(item, shell);
+        self.tray_shell_update_count += 1;
+    }
+
+    fn updateTrayMenu(context: ?*anyopaque, status_item_id: StatusItemId, items: []const TrayMenuItem) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const status_item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
+        if (items.len > status_item.items.len) return error.InvalidTrayOptions;
+        for (items, 0..) |item, index| status_item.items[index] = item;
+        status_item.item_count = items.len;
         self.tray_update_count += 1;
     }
 
-    fn updateTrayTitle(context: ?*anyopaque, title: []const u8) anyerror!void {
+    fn updateTrayTitle(context: ?*anyopaque, status_item_id: StatusItemId, title: []const u8) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        self.tray_title = undefined;
-        self.tray_title_len = (try copyInto(&self.tray_title, title)).len;
-        self.tray_presentation.title = self.tray_title[0..self.tray_title_len];
+        const item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
+        item.title_len = (try copyInto(&item.title, title)).len;
+        item.presentation.title = item.title[0..item.title_len];
         self.tray_title_update_count += 1;
     }
 
-    fn updateTrayPresentation(context: ?*anyopaque, presentation: TrayPresentation) anyerror!void {
+    fn updateTrayPresentation(context: ?*anyopaque, status_item_id: StatusItemId, presentation: TrayPresentation) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        try updateTrayTitle(context, presentation.title);
-        self.tray_presentation = presentation;
-        self.tray_presentation.title = self.tray_title[0..self.tray_title_len];
+        try updateTrayTitle(context, status_item_id, presentation.title);
+        const item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
+        item.presentation = presentation;
+        item.presentation.title = item.title[0..item.title_len];
     }
 
-    fn removeTray(context: ?*anyopaque) anyerror!void {
+    fn removeTray(context: ?*anyopaque, status_item_id: StatusItemId) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
-        self.tray_item_count = 0;
+        const item = self.findStatusItem(status_item_id) orelse return;
+        item.active = false;
+        item.item_count = 0;
+        self.status_item_count -= 1;
         self.tray_remove_count += 1;
     }
 
@@ -2979,8 +3081,43 @@ pub const NullPlatform = struct {
         return self.notification_body[0..self.notification_body_len];
     }
 
+    pub fn lastNotificationId(self: *const NullPlatform) []const u8 {
+        return self.notification_id[0..self.notification_id_len];
+    }
+
+    pub fn lastNotificationActionLabel(self: *const NullPlatform) []const u8 {
+        return self.notification_action_label[0..self.notification_action_label_len];
+    }
+
+    pub fn lastNotificationActionCommand(self: *const NullPlatform) []const u8 {
+        return self.notification_action_command[0..self.notification_action_command_len];
+    }
+
+    /// Deterministically model a user activating the action on a named,
+    /// currently active notification. The returned event borrows this
+    /// platform's fixed storage until the next notification update.
+    pub fn activateNotification(self: *const NullPlatform, id: []const u8) ?Event {
+        for (&self.notifications) |*entry| {
+            if (!entry.active or !std.mem.eql(u8, entry.id[0..entry.id_len], id)) continue;
+            if (entry.action_command_len == 0) return null;
+            return .{ .notification_command = .{ .name = entry.action_command[0..entry.action_command_len] } };
+        }
+        return null;
+    }
+
+    /// Anonymous notifications have no replacement key; tests can still
+    /// activate the most recently delivered action through this seam.
+    pub fn activateLastNotification(self: *const NullPlatform) ?Event {
+        if (self.notification_action_command_len == 0) return null;
+        return .{ .notification_command = .{ .name = self.lastNotificationActionCommand() } };
+    }
+
     pub fn notificationCount(self: *const NullPlatform) usize {
         return self.notification_count;
+    }
+
+    pub fn notificationReplacementCount(self: *const NullPlatform) usize {
+        return self.notification_replacement_count;
     }
 
     pub fn lastClipboardMimeType(self: *const NullPlatform) []const u8 {
@@ -3016,35 +3153,77 @@ pub const NullPlatform = struct {
     }
 
     pub fn lastTrayIconPath(self: *const NullPlatform) []const u8 {
-        return self.tray_icon_path[0..self.tray_icon_path_len];
+        return self.statusItemIconPath(types.primary_status_item_id);
     }
 
     pub fn lastTrayTitle(self: *const NullPlatform) []const u8 {
-        return self.tray_title[0..self.tray_title_len];
+        return self.statusItemTitle(types.primary_status_item_id);
     }
 
     pub fn lastTrayTooltip(self: *const NullPlatform) []const u8 {
-        return self.tray_tooltip[0..self.tray_tooltip_len];
+        return self.statusItemTooltip(types.primary_status_item_id);
     }
 
     pub fn lastTrayActivationCommand(self: *const NullPlatform) []const u8 {
-        return self.tray_activation_command[0..self.tray_activation_command_len];
+        const item = self.findStatusItemConst(types.primary_status_item_id) orelse return "";
+        return item.activation_command[0..item.activation_command_len];
     }
 
     pub fn lastTrayAlternateActivationCommand(self: *const NullPlatform) []const u8 {
-        return self.tray_alternate_activation_command[0..self.tray_alternate_activation_command_len];
+        const item = self.findStatusItemConst(types.primary_status_item_id) orelse return "";
+        return item.alternate_activation_command[0..item.alternate_activation_command_len];
     }
 
     pub fn lastTrayOpenCommand(self: *const NullPlatform) []const u8 {
-        return self.tray_open_command[0..self.tray_open_command_len];
+        const item = self.findStatusItemConst(types.primary_status_item_id) orelse return "";
+        return item.open_command[0..item.open_command_len];
     }
 
     pub fn lastTrayPresentation(self: *const NullPlatform) TrayPresentation {
-        return self.tray_presentation;
+        const item = self.findStatusItemConst(types.primary_status_item_id) orelse return .{};
+        return item.presentation;
     }
 
     pub fn trayItems(self: *const NullPlatform) []const TrayMenuItem {
-        return self.tray_items[0..self.tray_item_count];
+        return self.statusItemMenu(types.primary_status_item_id);
+    }
+
+    pub fn statusItemCount(self: *const NullPlatform) usize {
+        return self.status_item_count;
+    }
+
+    pub fn statusItemExists(self: *const NullPlatform, status_item_id: StatusItemId) bool {
+        return self.findStatusItemConst(status_item_id) != null;
+    }
+
+    pub fn statusItemVisible(self: *const NullPlatform, status_item_id: StatusItemId) bool {
+        const item = self.findStatusItemConst(status_item_id) orelse return false;
+        return item.visible;
+    }
+
+    pub fn statusItemIconPath(self: *const NullPlatform, status_item_id: StatusItemId) []const u8 {
+        const item = self.findStatusItemConst(status_item_id) orelse return "";
+        return item.icon_path[0..item.icon_path_len];
+    }
+
+    pub fn statusItemTitle(self: *const NullPlatform, status_item_id: StatusItemId) []const u8 {
+        const item = self.findStatusItemConst(status_item_id) orelse return "";
+        return item.title[0..item.title_len];
+    }
+
+    pub fn statusItemTooltip(self: *const NullPlatform, status_item_id: StatusItemId) []const u8 {
+        const item = self.findStatusItemConst(status_item_id) orelse return "";
+        return item.tooltip[0..item.tooltip_len];
+    }
+
+    pub fn statusItemActivationCommand(self: *const NullPlatform, status_item_id: StatusItemId) []const u8 {
+        const item = self.findStatusItemConst(status_item_id) orelse return "";
+        return item.activation_command[0..item.activation_command_len];
+    }
+
+    pub fn statusItemMenu(self: *const NullPlatform, status_item_id: StatusItemId) []const TrayMenuItem {
+        const item = self.findStatusItemConst(status_item_id) orelse return &.{};
+        return item.items[0..item.item_count];
     }
 
     pub fn trayCreateCount(self: *const NullPlatform) usize {
@@ -3053,6 +3232,10 @@ pub const NullPlatform = struct {
 
     pub fn trayUpdateCount(self: *const NullPlatform) usize {
         return self.tray_update_count;
+    }
+
+    pub fn trayShellUpdateCount(self: *const NullPlatform) usize {
+        return self.tray_shell_update_count;
     }
 
     pub fn trayTitleUpdateCount(self: *const NullPlatform) usize {
