@@ -2773,7 +2773,7 @@ const FacadeEmitter = struct {
             \\      nscfWBytes(sink, cmd.bytes);
             \\      return;
             \\    case "append_file":
-            \\      nscfWU8(sink, 0x32);
+            \\      nscfWU8(sink, 0x2b);
             \\      nscfWShortText(sink, cmd.key);
             \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
             \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
@@ -2889,7 +2889,7 @@ const FacadeEmitter = struct {
             \\      nscfWShortText(sink, cmd.label);
             \\      return;
             \\    case "webview_navigate":
-            \\      nscfWU8(sink, 0x2b);
+            \\      nscfWU8(sink, 0x32);
             \\      nscfWShortText(sink, cmd.label);
             \\      nscfWBytes(sink, cmd.url);
             \\      return;
