@@ -146,8 +146,8 @@ The runtime watches the command queue and processes these actions:
       <td>Dispatch a shortcut command event for the main window</td>
     </tr>
     <tr>
-      <td><code>tray-action &lt;item-id&gt;</code></td>
-      <td>Select a status-item dropdown row (ids from the snapshot's <code>tray-item #id</code> lines)</td>
+      <td><code>tray-action &lt;item-id&gt;</code> or <code>tray-action &lt;status-item-id&gt; &lt;item-id&gt;</code></td>
+      <td>Select a status-item dropdown row. The one-id form targets primary status item <code>#1</code>; multiple-item snapshots print <code>tray #id</code> headers</td>
     </tr>
     <tr>
       <td><code>focus &lt;view-label&gt;</code></td>
@@ -260,6 +260,12 @@ native automate edit kanban-canvas 6624116744891006388 remove-attr variant
 Edits refuse rather than guess: a widget authored in Zig, a file that changed on disk since the app loaded it (the provenance response carries the loaded bytes' hash, so concurrent edits are never clobbered), or an edit that would fail markup validation all stop with a teaching error and leave the file untouched. A successful edit needs no reload command — the markup watch (`MarkupOptions.watch_path`, a dev/Debug feature) reloads within its poll interval, so `native automate assert` on the snapshot is the way to await the repaint.
 
 `zig build test-writeback-smoke` (macOS) drives the whole loop against the kanban example: query provenance, flip the button label through the verb, assert the repaint, verify the byte-exact diff, and flip it back.
+
+## Session recording and blob growth
+
+`NATIVE_SDK_SESSION_RECORD=/path/session.journal` records platform events and effect results; `NATIVE_SDK_SESSION_REPLAY` replays that journal without touching the original network, process, database, or file. Large effect payloads—including every streamed file-read chunk—live content-addressed under the sibling `blobs/` directory, and the journal stores each hash and length. Keep the journal and `blobs/` together when copying a recording.
+
+The blob store deduplicates identical chunks but is intentionally unbounded today: there is no automatic size quota or garbage collector. Long recordings and repeated large imports can therefore grow the directory substantially. Treat a recording as one disposable artifact, monitor its directory size in long automation runs, and delete the journal plus its sibling `blobs/` directory when it is no longer needed. A future GC must reason over every retained journal before removing an unreferenced content address; Tier 5 does not guess at that retention policy.
 
 ## Custom directory
 

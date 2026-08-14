@@ -2663,7 +2663,7 @@ const FacadeEmitter = struct {
             \\// ---------------------------------------------------- the cmd wire
             \\// Encoder for the inert Cmd data the author's update returns —
             \\// byte-for-byte the layouts the host's command decoder expects
-            \\// (cmd_format_version 4). nscfTagOf maps a Msg arm name onto its
+            \\// (cmd_format_version 6). nscfTagOf maps a Msg arm name onto its
             \\// declaration-order wire tag.
             \\
             \\const nscfFetchMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
@@ -2771,6 +2771,49 @@ const FacadeEmitter = struct {
             \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
             \\      nscfWBytes(sink, cmd.path);
             \\      nscfWBytes(sink, cmd.bytes);
+            \\      return;
+            \\    case "append_file":
+            \\      nscfWU8(sink, 0x32);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWBytes(sink, cmd.path);
+            \\      nscfWBytes(sink, cmd.bytes);
+            \\      return;
+            \\    case "stat_file":
+            \\      nscfWU8(sink, 0x2c);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWBytes(sink, cmd.path);
+            \\      return;
+            \\    case "read_file_stream":
+            \\      nscfWU8(sink, 0x2d);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.chunkKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.doneKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWBytes(sink, cmd.path);
+            \\      return;
+            \\    case "write_file_stream":
+            \\      nscfWU8(sink, 0x2e);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWBytes(sink, cmd.path);
+            \\      return;
+            \\    case "write_file_chunk":
+            \\      nscfWU8(sink, 0x2f);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWBytes(sink, cmd.bytes);
+            \\      return;
+            \\    case "write_file_close":
+            \\      nscfWU8(sink, 0x30);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
             \\      return;
             \\    case "fetch": {
             \\      nscfWU8(sink, 0x09);
@@ -3004,10 +3047,20 @@ const FacadeEmitter = struct {
             \\      nscfWShortText(sink, cmd.key);
             \\      return;
             \\    case "show_notification":
-            \\      nscfWU8(sink, 0x1d);
-            \\      nscfWBytes(sink, cmd.title);
-            \\      nscfWBytes(sink, cmd.subtitle);
-            \\      nscfWBytes(sink, cmd.body);
+            \\      if (cmd.id.length === 0 && cmd.actionLabel.length === 0 && cmd.actionCommand.length === 0) {
+            \\        nscfWU8(sink, 0x1d);
+            \\        nscfWBytes(sink, cmd.title);
+            \\        nscfWBytes(sink, cmd.subtitle);
+            \\        nscfWBytes(sink, cmd.body);
+            \\      } else {
+            \\        nscfWU8(sink, 0x31);
+            \\        nscfWBytes(sink, cmd.id);
+            \\        nscfWBytes(sink, cmd.title);
+            \\        nscfWBytes(sink, cmd.subtitle);
+            \\        nscfWBytes(sink, cmd.body);
+            \\        nscfWBytes(sink, cmd.actionLabel);
+            \\        nscfWBytes(sink, cmd.actionCommand);
+            \\      }
             \\      return;
             \\    case "audio_capture_start":
             \\      nscfWU8(sink, 0x1e);

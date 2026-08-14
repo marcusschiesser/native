@@ -43,6 +43,7 @@ const AppKitEventKind = enum(c_int) {
     video = 21,
     view_focused = 22,
     tray_command = 23,
+    notification_command = 24,
 };
 
 const AppKitEvent = extern struct {
@@ -67,6 +68,7 @@ const AppKitEvent = extern struct {
     shortcut_modifiers: u32,
     command_name: [*]const u8,
     command_name_len: usize,
+    status_item_id: u32,
     view_label: [*]const u8,
     view_label_len: usize,
     key_text: [*]const u8,
@@ -246,7 +248,7 @@ extern fn native_sdk_appkit_decode_image(bytes: [*]const u8, bytes_len: usize, p
 extern fn native_sdk_appkit_clipboard_write(host: *AppKitHost, text: [*]const u8, text_len: usize) void;
 extern fn native_sdk_appkit_clipboard_read_data(host: *AppKitHost, mime_type: [*]const u8, mime_type_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_clipboard_write_data(host: *AppKitHost, mime_type: [*]const u8, mime_type_len: usize, bytes: [*]const u8, bytes_len: usize) c_int;
-extern fn native_sdk_appkit_show_notification(host: *AppKitHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize) c_int;
+extern fn native_sdk_appkit_show_notification(host: *AppKitHost, title: [*]const u8, title_len: usize, subtitle: [*]const u8, subtitle_len: usize, body: [*]const u8, body_len: usize, notification_id: [*]const u8, notification_id_len: usize, action_label: [*]const u8, action_label_len: usize, action_command: [*]const u8, action_command_len: usize) c_int;
 extern fn native_sdk_appkit_open_external_url(host: *AppKitHost, url: [*]const u8, url_len: usize) c_int;
 extern fn native_sdk_appkit_reveal_path(host: *AppKitHost, path: [*]const u8, path_len: usize) c_int;
 extern fn native_sdk_appkit_add_recent_document(host: *AppKitHost, path: [*]const u8, path_len: usize) c_int;
@@ -399,16 +401,17 @@ const widget_action_drag: u32 = 1 << 8;
 const widget_action_drop_files: u32 = 1 << 9;
 const widget_action_dismiss: u32 = 1 << 10;
 
-const AppKitTrayCallback = *const fn (context: ?*anyopaque, item_id: u32) callconv(.c) void;
+const AppKitTrayCallback = *const fn (context: ?*anyopaque, status_item_id: u32, item_id: u32) callconv(.c) void;
 
 extern fn native_sdk_appkit_show_open_dialog(host: *AppKitHost, opts: *const AppKitOpenDialogOpts, buffer: [*]u8, buffer_len: usize) AppKitOpenDialogResult;
 extern fn native_sdk_appkit_show_save_dialog(host: *AppKitHost, opts: *const AppKitSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_show_message_dialog(host: *AppKitHost, opts: *const AppKitMessageDialogOpts) c_int;
-extern fn native_sdk_appkit_create_tray(host: *AppKitHost, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
-extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
-extern fn native_sdk_appkit_update_tray_title(host: *AppKitHost, title: [*]const u8, title_len: usize) void;
-extern fn native_sdk_appkit_update_tray_presentation(host: *AppKitHost, title: [*]const u8, title_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int) void;
-extern fn native_sdk_appkit_remove_tray(host: *AppKitHost) void;
+extern fn native_sdk_appkit_create_tray(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
+extern fn native_sdk_appkit_update_tray_shell(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
+extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, status_item_id: u32, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
+extern fn native_sdk_appkit_update_tray_title(host: *AppKitHost, status_item_id: u32, title: [*]const u8, title_len: usize) void;
+extern fn native_sdk_appkit_update_tray_presentation(host: *AppKitHost, status_item_id: u32, title: [*]const u8, title_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int) void;
+extern fn native_sdk_appkit_remove_tray(host: *AppKitHost, status_item_id: u32) void;
 extern fn native_sdk_appkit_set_tray_callback(host: *AppKitHost, callback: AppKitTrayCallback, context: ?*anyopaque) void;
 
 /// Whether a Dock icon path names a raw image source (.png/.svg) that
@@ -751,6 +754,7 @@ pub const MacPlatform = struct {
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
                 .create_tray_fn = createTray,
+                .update_tray_shell_fn = updateTrayShell,
                 .update_tray_menu_fn = updateTrayMenu,
                 .update_tray_title_fn = updateTrayTitle,
                 .update_tray_presentation_fn = updateTrayPresentation,
@@ -968,6 +972,11 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
             .window_id = event.window_id,
         } }),
         .tray_command => state.emit(.{ .tray_command = .{
+            .name = event.command_name[0..event.command_name_len],
+            .window_id = event.window_id,
+            .status_item_id = event.status_item_id,
+        } }),
+        .notification_command => state.emit(.{ .notification_command = .{
             .name = event.command_name[0..event.command_name_len],
             .window_id = event.window_id,
         } }),
@@ -2109,6 +2118,12 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
         options.subtitle.len,
         options.body.ptr,
         options.body.len,
+        options.id.ptr,
+        options.id.len,
+        options.action_label.ptr,
+        options.action_label.len,
+        options.action_command.ptr,
+        options.action_command.len,
     ) == 0) return error.UnsupportedService;
 }
 
@@ -2379,6 +2394,31 @@ fn isSupportedNativeViewKind(kind: platform_mod.ViewKind) bool {
     };
 }
 
+test "macos notification actions use process-scoped opaque tokens" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            host_source,
+            "NSString *actionToken = [NSUUID UUID].UUIDString;",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            host_source,
+            "notification.userInfo = @{ @\"native-sdk-action-token\": actionToken };",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            host_source,
+            "self.notificationActionCommands[token]",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            host_source,
+            "@\"native-sdk-action-command\"",
+        ) == null);
+    }
+}
+
 test "macos supports native container and control kinds" {
     try std.testing.expect(isSupportedNativeViewKind(.split));
     try std.testing.expect(isSupportedNativeViewKind(.stack));
@@ -2522,18 +2562,20 @@ fn showMessageDialog(context: ?*anyopaque, options: platform_mod.MessageDialogOp
 
 const max_tray_items: usize = 32;
 
-fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!void {
+fn createTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, options: platform_mod.TrayOptions) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     var presentation = options.presentation;
     if (presentation.title.len == 0) presentation.title = options.title;
     native_sdk_appkit_create_tray(
         self.host,
+        status_item_id,
         options.icon_path.ptr,
         options.icon_path.len,
         presentation.title.ptr,
         presentation.title.len,
         options.tooltip.ptr,
         options.tooltip.len,
+        if (options.visible) 1 else 0,
         presentation.width,
         @intFromEnum(presentation.tone),
         presentation.icon_opacity,
@@ -2546,11 +2588,16 @@ fn createTray(context: ?*anyopaque, options: platform_mod.TrayOptions) anyerror!
         options.open_command.len,
     );
     if (options.items.len > 0) {
-        try updateTrayMenu(context, options.items);
+        try updateTrayMenu(context, status_item_id, options.items);
     }
 }
 
-fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem) anyerror!void {
+fn updateTrayShell(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, shell: platform_mod.TrayShell) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    native_sdk_appkit_update_tray_shell(self.host, status_item_id, shell.icon_path.ptr, shell.icon_path.len, shell.tooltip.ptr, shell.tooltip.len, if (shell.visible) 1 else 0, shell.activation_command.ptr, shell.activation_command.len, shell.alternate_activation_command.ptr, shell.alternate_activation_command.len, shell.open_command.ptr, shell.open_command.len);
+}
+
+fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, items: []const platform_mod.TrayMenuItem) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     const count = @min(items.len, max_tray_items);
     var ids: [max_tray_items]u32 = undefined;
@@ -2581,27 +2628,27 @@ fn updateTrayMenu(context: ?*anyopaque, items: []const platform_mod.TrayMenuItem
             (@as(u32, @intFromBool(item.modifiers.option)) << 3) |
             (@as(u32, @intFromBool(item.modifiers.shift)) << 4);
     }
-    native_sdk_appkit_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, &details, &detail_lens, &roles, &keys, &key_lens, &modifiers, count);
+    native_sdk_appkit_update_tray_menu(self.host, status_item_id, &ids, &labels, &label_lens, &separators, &enabled_flags, &details, &detail_lens, &roles, &keys, &key_lens, &modifiers, count);
 }
 
-fn updateTrayTitle(context: ?*anyopaque, title: []const u8) anyerror!void {
+fn updateTrayTitle(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, title: []const u8) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    native_sdk_appkit_update_tray_title(self.host, title.ptr, title.len);
+    native_sdk_appkit_update_tray_title(self.host, status_item_id, title.ptr, title.len);
 }
 
-fn updateTrayPresentation(context: ?*anyopaque, presentation: platform_mod.TrayPresentation) anyerror!void {
+fn updateTrayPresentation(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, presentation: platform_mod.TrayPresentation) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    native_sdk_appkit_update_tray_presentation(self.host, presentation.title.ptr, presentation.title.len, presentation.width, @intFromEnum(presentation.tone), presentation.icon_opacity, if (presentation.monospaced) 1 else 0);
+    native_sdk_appkit_update_tray_presentation(self.host, status_item_id, presentation.title.ptr, presentation.title.len, presentation.width, @intFromEnum(presentation.tone), presentation.icon_opacity, if (presentation.monospaced) 1 else 0);
 }
 
-fn removeTray(context: ?*anyopaque) anyerror!void {
+fn removeTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    native_sdk_appkit_remove_tray(self.host);
+    native_sdk_appkit_remove_tray(self.host, status_item_id);
 }
 
-fn appkitTrayCallback(context: ?*anyopaque, item_id: u32) callconv(.c) void {
+fn appkitTrayCallback(context: ?*anyopaque, status_item_id: u32, item_id: u32) callconv(.c) void {
     const state: *RunState = @ptrCast(@alignCast(context.?));
-    state.emit(.{ .tray_action = item_id });
+    state.emit(.{ .tray_action = .{ .status_item_id = status_item_id, .item_id = item_id } });
 }
 
 fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []const u8 {
@@ -2631,7 +2678,7 @@ test "mac status agent rows recognize decorated states and stay actionable" {
     try std.testing.expect(std.mem.indexOf(u8, host_source, "[state hasPrefix:@\"configured \"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "[state hasPrefix:@\"warning \"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "label.textColor = configured ? successColor : warning ? warningColor : NSColor.secondaryLabelColor;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host_source, "button.tag = itemIds[index];") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host_source, "button.tag = (NSInteger)(((uint64_t)statusItemId << 32) | itemIds[index]);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "button.enabled = enabled[index].boolValue;") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "button.keyEquivalent = NativeSdkMenuKeyEquivalent(key);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "button.keyEquivalentModifierMask = NativeSdkMenuModifierFlags(modifiers[index].unsignedIntValue);") != null);
@@ -2640,22 +2687,22 @@ test "mac status agent rows recognize decorated states and stay actionable" {
 
 test "mac title-only tray updates preserve the applied presentation" {
     for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "object.statusPresentationWidth = width;") != null);
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "object.statusPresentationTone = tone;") != null);
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "object.statusPresentationIconOpacity = iconOpacity;") != null);
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "object.statusPresentationMonospaced = monospaced;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "entry.presentationWidth = width;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "entry.presentationTone = tone;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "entry.presentationIconOpacity = iconOpacity;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "entry.presentationMonospaced = monospaced;") != null);
         const update_at = std.mem.indexOf(u8, host_source, "void native_sdk_appkit_update_tray_title(") orelse return error.TestExpectedEqual;
         const update_tail = host_source[update_at..];
-        try std.testing.expect(std.mem.indexOf(u8, update_tail, "object.statusPresentationWidth,") != null);
-        try std.testing.expect(std.mem.indexOf(u8, update_tail, "object.statusPresentationTone,") != null);
-        try std.testing.expect(std.mem.indexOf(u8, update_tail, "object.statusPresentationIconOpacity,") != null);
-        try std.testing.expect(std.mem.indexOf(u8, update_tail, "object.statusPresentationMonospaced") != null);
+        try std.testing.expect(std.mem.indexOf(u8, update_tail, "entry.presentationWidth,") != null);
+        try std.testing.expect(std.mem.indexOf(u8, update_tail, "entry.presentationTone,") != null);
+        try std.testing.expect(std.mem.indexOf(u8, update_tail, "entry.presentationIconOpacity,") != null);
+        try std.testing.expect(std.mem.indexOf(u8, update_tail, "entry.presentationMonospaced") != null);
     }
 }
 
 test "mac status lifecycle hooks emit tray commands" {
     for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
-        const emit_at = std.mem.indexOf(u8, host_source, "- (void)emitStatusCommand:(NSString *)command {") orelse return error.TestExpectedEqual;
+        const emit_at = std.mem.indexOf(u8, host_source, "- (void)emitStatusCommand:(NSString *)command statusItemId:(uint32_t)statusItemId {") orelse return error.TestExpectedEqual;
         const emit_tail = host_source[emit_at..];
         const emit_end = std.mem.indexOf(u8, emit_tail, "- (void)statusItemActivated:") orelse return error.TestExpectedEqual;
         const emit_source = emit_tail[0..emit_end];
@@ -2666,7 +2713,7 @@ test "mac status lifecycle hooks emit tray commands" {
 
 test "mac status menu updates preserve the menu being opened" {
     for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMenu *menu = object.statusMenu;") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMenu *menu = entry.menu;") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "[menu removeAllItems];") != null);
     }
 }

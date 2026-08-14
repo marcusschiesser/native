@@ -78,6 +78,7 @@ const persist_store = @import("persist_store.zig");
 const record_store = @import("record_store.zig");
 const relational_store = @import("relational_store.zig");
 const credentials_store = @import("credentials_store.zig");
+const file_access = @import("file_access.zig");
 const pty_transport = @import("pty.zig");
 
 const effects_log = std.log.scoped(.zero_effects);
@@ -181,6 +182,13 @@ pub const max_effect_file_path_bytes: usize = 1024;
 /// write would corrupt the file on disk, which truncation flags cannot
 /// undo.
 pub const max_effect_file_bytes: usize = 1024 * 1024;
+/// Streaming reads use a stable 256-KiB delivery granularity. Writes accept
+/// any chunk through the shared 1-MiB payload ceiling.
+pub const effect_file_stream_chunk_bytes: usize = 256 * 1024;
+/// Streaming file operations own a separate worker/slot family, so a large
+/// import or export cannot consume the sixteen general effect slots.
+pub const max_effect_file_streams: usize = 4;
+pub const FileAccessBinding = file_access.Binding;
 /// Model persistence owns a separate payload family and bound; it does not
 /// consume a file-effect slot or inherit the raw-file cap.
 pub const max_effect_persist_snapshot_bytes: usize = persist_store.max_snapshot_bytes;
@@ -635,8 +643,23 @@ pub const EffectResponse = struct {
     dropped_before: u32 = 0,
 };
 
-/// Which file operation a file effect performs.
-pub const EffectFileOp = enum { read, write };
+/// Which file operation a file effect performs. Values are append-only: the
+/// enum is journaled as part of deterministic record/replay.
+pub const EffectFileOp = enum {
+    read,
+    write,
+    append,
+    stat,
+    read_stream,
+    write_stream_open,
+    write_stream_chunk,
+    write_stream_close,
+};
+
+/// Whether a file result is an ordinary one-shot terminal or one delivery
+/// in a streaming read. A read stream emits `chunk` zero or more times and
+/// exactly one `done` or terminal error.
+pub const EffectFileEvent = enum { terminal, chunk, done };
 
 /// The terminal outcome of one file effect. Every started file effect
 /// delivers exactly one Msg carrying one of these — failure is never
@@ -661,6 +684,13 @@ pub const EffectFileOutcome = enum {
     /// `cancel(key)` ended it before the result was delivered. The
     /// operation itself may still have completed on disk.
     cancelled,
+    /// A write-stream chunk/close named no live sink.
+    sink_missing,
+    /// A chunk or close arrived while the sink still had an earlier
+    /// operation in flight.
+    out_of_order,
+    /// The filesystem explicitly reported exhausted capacity/quota.
+    disk_full,
 };
 
 /// Payload for file-effect Msg constructors. Exactly one is delivered
@@ -671,11 +701,20 @@ pub const EffectFileOutcome = enum {
 pub const EffectFileResult = struct {
     key: u64,
     op: EffectFileOp = .read,
+    event: EffectFileEvent = .terminal,
     outcome: EffectFileOutcome = .ok,
     /// Read contents: the whole file for `.ok`, the first
     /// `max_effect_file_bytes` for `.truncated`, `""` otherwise (and
     /// always for writes).
     bytes: []const u8 = "",
+    /// Stream total bytes on `.done`; stat size on a successful `.stat`.
+    total: u64 = 0,
+    /// Stat modification time in Unix milliseconds (inside JavaScript's
+    /// exact-integer window for contemporary dates). Zero for a missing file.
+    mtime_ms: i64 = 0,
+    /// Stat existence bit. `.stat` of an absent path is a successful result
+    /// with `exists=false`, size/time zero.
+    exists: bool = false,
     /// Loop-side terminal notices evicted from the pending ring to make
     /// room before this one (only under extreme rejection bursts).
     /// Never silently zero when something was lost.
@@ -2105,7 +2144,18 @@ pub const EffectResultRecord = struct {
     status: u16 = 0,
     fetch_outcome: EffectFetchOutcome = .ok,
     file_op: EffectFileOp = .read,
+    file_event: EffectFileEvent = .terminal,
     file_outcome: EffectFileOutcome = .ok,
+    file_total: u64 = 0,
+    file_mtime_ms: i64 = 0,
+    file_exists: bool = false,
+    /// True only for a loop-side admission/protocol result that deterministically
+    /// regenerates under replay. Executor/start failures keep this false even
+    /// when their closed outcome is `.rejected`. The retained field name preserves
+    /// the journal layout and also covers `.sink_missing` and `.out_of_order`.
+    file_rejected_admission: bool = false,
+    file_blob_hash: [effect_image_blob_hash_len]u8 = @splat(0),
+    file_blob_len: u64 = 0,
     clipboard_op: EffectClipboardOp = .write,
     clipboard_outcome: EffectClipboardOutcome = .ok,
     timer_timestamp_ns: u64 = 0,
@@ -2611,7 +2661,17 @@ const FileWorkerContext = struct {
     buffer: []u8,
     payload_len: usize,
     read_len: usize = 0,
+    stat_size: u64 = 0,
+    stat_mtime_ms: i64 = 0,
+    stat_exists: bool = false,
     outcome: EffectFileOutcome = .io_failed,
+    /// App-directory exemptions carry authority as an already-open parent
+    /// directory. External paths granted by the manifest leave this null and
+    /// use `path_storage` directly.
+    parent: ?std.Io.Dir = null,
+    basename_storage: [max_effect_file_path_bytes]u8 = undefined,
+    basename_len: usize = 0,
+    missing: bool = false,
     /// Copy of the effect's path: the slot's copy lives inside the
     /// channel, which the owner frees right after an abandoning
     /// teardown returns.
@@ -2624,6 +2684,41 @@ const FileWorkerContext = struct {
 
     fn payload(ctx: *const FileWorkerContext) []const u8 {
         return ctx.buffer[0..ctx.payload_len];
+    }
+
+    fn basename(ctx: *const FileWorkerContext) []const u8 {
+        return ctx.basename_storage[0..ctx.basename_len];
+    }
+};
+
+/// Process-lived context for one streamed file syscall. Unlike the stream
+/// table slot, this may outlive the Effects owner after a bounded teardown:
+/// cancellation transfers the atomic sink and chunk bytes here before the
+/// worker starts, then the commit/abandon handshake decides whether results
+/// may move back into the slot.
+const FileStreamWorkerContext = struct {
+    mutex: SpinMutex = .{},
+    abandoned: bool = false,
+    committed: bool = false,
+    interrupt: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    op: EffectFileOp,
+    parent: ?std.Io.Dir = null,
+    path_storage: [max_effect_file_path_bytes]u8 = undefined,
+    path_len: usize = 0,
+    offset: u64 = 0,
+    total: u64 = 0,
+    read_file: ?std.Io.File = null,
+    chunk: ?[]u8 = null,
+    atomic: ?std.Io.File.Atomic = null,
+    atomic_dest: ?[]u8 = null,
+    read_buffer: ?[]u8 = null,
+    read_len: usize = 0,
+    event: EffectFileEvent = .terminal,
+    outcome: EffectFileOutcome = .io_failed,
+
+    fn path(ctx: *const FileStreamWorkerContext) []const u8 {
+        return ctx.path_storage[0..ctx.path_len];
     }
 };
 
@@ -3032,6 +3127,42 @@ pub fn Effects(comptime Msg: type) type {
             path: []const u8,
             /// The bytes a `writeFile` would write; `""` for reads.
             bytes: []const u8 = "",
+        };
+
+        pub const AppendFileOptions = struct {
+            key: u64,
+            path: []const u8,
+            bytes: []const u8,
+            on_result: ?FileMsgFn = null,
+        };
+
+        pub const StatFileOptions = struct {
+            key: u64,
+            path: []const u8,
+            on_result: ?FileMsgFn = null,
+        };
+
+        pub const ReadFileStreamOptions = struct {
+            key: u64,
+            path: []const u8,
+            on_result: ?FileMsgFn = null,
+        };
+
+        pub const WriteFileStreamOptions = struct {
+            key: u64,
+            path: []const u8,
+            on_result: ?FileMsgFn = null,
+        };
+
+        pub const WriteFileChunkOptions = struct {
+            key: u64,
+            bytes: []const u8,
+            on_result: ?FileMsgFn = null,
+        };
+
+        pub const WriteFileCloseOptions = struct {
+            key: u64,
+            on_result: ?FileMsgFn = null,
         };
 
         pub const WriteClipboardOptions = struct {
@@ -3823,6 +3954,14 @@ pub fn Effects(comptime Msg: type) type {
             /// `line_len`.
             file_op: EffectFileOp = .read,
             file_outcome: EffectFileOutcome = .ok,
+            file_event: EffectFileEvent = .terminal,
+            file_total: u64 = 0,
+            file_mtime_ms: i64 = 0,
+            file_exists: bool = false,
+            file_rejected_admission: bool = false,
+            /// Streaming-file table generation. Zero means the ordinary
+            /// general-slot file family.
+            file_stream_generation: u64 = 0,
             /// `.clipboard` entries: the operation and its terminal
             /// outcome. A read's text stays in the slot's heap buffer
             /// (taken at drain, like a fetch body) with its length in
@@ -3904,7 +4043,7 @@ pub fn Effects(comptime Msg: type) type {
                 retire_generation: u64 = 0,
             },
             response: struct { response: EffectResponse, response_fn: ?ResponseMsgFn },
-            file: struct { result: EffectFileResult, file_fn: ?FileMsgFn },
+            file: struct { result: EffectFileResult, file_fn: ?FileMsgFn, stream_generation: u64 = 0, rejected_admission: bool = false },
             clipboard: struct { result: EffectClipboardResult, clipboard_fn: ?ClipboardMsgFn },
             timer: struct { timer: EffectTimer, timer_fn: ?TimerMsgFn },
             /// `.host` terminals produced on the loop thread: rejections
@@ -4344,6 +4483,37 @@ pub fn Effects(comptime Msg: type) type {
             execution: credentials_store.Execution = .{ .outcome = .rejected },
         };
 
+        const FileStreamState = enum(u8) { idle, reading, sink_open, sink_busy, sink_closing };
+
+        /// Long-lived read stream / atomic write sink. It has a dedicated
+        /// table and never consumes the general spawn/fetch/file slots.
+        const FileStreamSlot = struct {
+            state: FileStreamState = .idle,
+            fake: bool = false,
+            key: u64 = 0,
+            generation: u64 = 0,
+            op: EffectFileOp = .read_stream,
+            on_result: ?FileMsgFn = null,
+            path_storage: [max_effect_file_path_bytes]u8 = undefined,
+            path_len: usize = 0,
+            total: u64 = 0,
+            offset: u64 = 0,
+            chunk_pending: bool = false,
+            cancelling: bool = false,
+            cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+            worker_thread: ?std.Thread = null,
+            worker_ctx: ?*FileStreamWorkerContext = null,
+            read_file: ?std.Io.File = null,
+            atomic: ?std.Io.File.Atomic = null,
+            atomic_dest: ?[]u8 = null,
+            parent: ?std.Io.Dir = null,
+            chunk: ?[]u8 = null,
+
+            fn path(slot: *const FileStreamSlot) []const u8 {
+                return slot.path_storage[0..slot.path_len];
+            }
+        };
+
         const Slot = struct {
             state: std.atomic.Value(SlotState) = std.atomic.Value(SlotState).init(.idle),
             generation: u32 = 0,
@@ -4742,6 +4912,10 @@ pub fn Effects(comptime Msg: type) type {
         /// Capability-installed Tier-3 relational database. Queries execute
         /// synchronously on the loop thread and stage bounded page results.
         relational_store_binding: ?RelationalStoreBinding = null,
+        /// Raw-file path policy installed by the runtime. Null preserves the
+        /// embedding API's legacy unrestricted behavior; shipping app
+        /// runners always bind an explicit policy.
+        file_access_binding: ?file_access.Binding = null,
         /// Window-action mirror: counts and the last requested label,
         /// observable in tests (`windowActionState`).
         window_action_state: WindowActionState = .{},
@@ -4761,6 +4935,10 @@ pub fn Effects(comptime Msg: type) type {
         /// Injectable so tests pin the interrupt and abandon paths
         /// with a tiny bound.
         file_join_deadline_ms: u64 = default_effect_file_join_deadline_ms,
+        /// Deterministic failure seam for raw-file tests. Real runtimes leave
+        /// this null. The next blocking raw-file operation consumes it and
+        /// reports the same closed outcome the OS error would classify to.
+        test_next_file_error: ?anyerror = null,
         /// Best-effort interruption switch: halfway through the file
         /// deadline, teardown cancels a stuck file worker's blocking
         /// task (the threaded io interrupts the blocked syscall —
@@ -4845,6 +5023,8 @@ pub fn Effects(comptime Msg: type) type {
         /// the non-wrapping guarantee without 2^32 opens.
         channel_generation: u64 = 0,
         slots: [total_effect_slots]Slot = [_]Slot{.{}} ** total_effect_slots,
+        file_stream_slots: [max_effect_file_streams]FileStreamSlot = [_]FileStreamSlot{.{}} ** max_effect_file_streams,
+        next_file_stream_generation: u64 = 1,
         db_slots: [max_db_effects]DbSlot = [_]DbSlot{.{}} ** max_db_effects,
         next_db_generation: u64 = 1,
         db_revision: u64 = 0,
@@ -5412,6 +5592,17 @@ pub fn Effects(comptime Msg: type) type {
             }
             if (io_threaded_supported) {
                 if (self.io_threaded) |threaded| {
+                    // Stream workers use the same bounded
+                    // commit/abandon protocol as whole-file workers.
+                    for (&self.file_stream_slots) |*stream| {
+                        if (stream.state != .idle) self.retireFileStream(stream);
+                    }
+                    if (self.abandoned_file_workers > 0 and self.io_threaded != null) {
+                        // A detached stream worker still owns a task inside
+                        // this executor. Preserve it exactly like the
+                        // whole-file/spawn abandon path below.
+                        self.io_threaded = null;
+                    }
                     // Wait for every worker's terminal post, then JOIN
                     // every worker thread. For fetch workers the wait
                     // is unbounded on purpose: a worker holds pointers
@@ -5753,6 +5944,7 @@ pub fn Effects(comptime Msg: type) type {
             self.credentials_store_binding = null;
             self.relational_store_binding = null;
             self.system_services = null;
+            self.file_access_binding = null;
         }
 
         /// Discard every queued completion, freeing heap line payloads
@@ -6143,6 +6335,42 @@ pub fn Effects(comptime Msg: type) type {
             if (self.relational_store_binding == null) self.relational_store_binding = binding;
         }
 
+        /// Install the runtime's raw-file confinement policy. The binding's
+        /// roots and their strings must outlive this Effects instance.
+        pub fn bindFileAccess(self: *Self, binding: file_access.Binding) void {
+            if (self.file_access_binding == null) self.file_access_binding = binding;
+        }
+
+        fn resolvedFileAccess(self: *Self, path: []const u8, create_parents: bool) ?file_access.Resolved {
+            const binding = self.file_access_binding orelse return .{
+                .path = self.allocator.dupe(u8, path) catch return null,
+                .decision = .allow,
+            };
+            const io = self.ensureIo() catch return null;
+            var resolved = file_access.resolveForOperation(self.allocator, io, binding, path, .{
+                .create_parents = create_parents,
+            }) catch return null;
+            return switch (resolved.decision) {
+                .allow => resolved,
+                .reject => blk: {
+                    resolved.deinit(self.allocator, io);
+                    break :blk null;
+                },
+                .warn => blk: {
+                    if (comptime builtin.os.tag != .freestanding) {
+                        std.debug.print("native warning: raw file effect path '{s}' is outside this app's directories; add the `filesystem` permission before enforcement\n", .{path});
+                    }
+                    break :blk resolved;
+                },
+            };
+        }
+
+        fn takeTestFileFailure(self: *Self) ?EffectFileOutcome {
+            const err = self.test_next_file_error orelse return null;
+            self.test_next_file_error = null;
+            return fileOpFailure(err);
+        }
+
         /// Switch this channel into session-replay mode: the fake
         /// executor (no processes, no network, no file or pasteboard
         /// I/O — requests park in their slots) with journaled results as
@@ -6151,6 +6379,10 @@ pub fn Effects(comptime Msg: type) type {
         pub fn armReplay(self: *Self) void {
             self.executor = .fake;
             self.replay = true;
+        }
+
+        pub fn replayArmed(self: *const Self) bool {
+            return self.replay;
         }
 
         /// End-of-journal consistency check (the `.finish` replay
@@ -6860,10 +7092,13 @@ pub fn Effects(comptime Msg: type) type {
         /// outcome `.rejected` on the next drain. File effects share the
         /// `max_effects` slots and the key space with spawns and fetches.
         pub fn writeFile(self: *Self, options: WriteFileOptions) void {
-            if (options.bytes.len > max_effect_file_bytes) {
+            if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes or
+                options.bytes.len > max_effect_file_bytes)
+            {
                 return self.rejectFile(options.key, .write, options.on_result);
             }
-            self.startFile(options.key, .write, options.path, options.bytes, options.on_result);
+            var access = self.resolvedFileAccess(options.path, true) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
+            self.startFile(options.key, .write, &access, options.bytes, options.on_result);
         }
 
         /// Read a whole file on a worker thread and deliver it as
@@ -6874,15 +7109,210 @@ pub fn Effects(comptime Msg: type) type {
         /// snapshot must not parse as whole). The bytes are drain
         /// scratch: copy what the model keeps.
         pub fn readFile(self: *Self, options: ReadFileOptions) void {
-            self.startFile(options.key, .read, options.path, "", options.on_result);
+            if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes) {
+                return self.rejectFile(options.key, .read, options.on_result);
+            }
+            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .read, options.on_result);
+            self.startFile(options.key, .read, &access, "", options.on_result);
         }
 
-        fn startFile(self: *Self, key: u64, op: EffectFileOp, file_path: []const u8, bytes: []const u8, on_result: ?FileMsgFn) void {
+        /// Append one bounded payload to a file. Unlike a streaming sink this
+        /// intentionally has no atomic-finalize contract: it is the log-file
+        /// case, where each accepted payload extends the visible file.
+        pub fn appendFile(self: *Self, options: AppendFileOptions) void {
+            if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes or
+                options.bytes.len > max_effect_file_bytes)
+            {
+                return self.rejectFile(options.key, .append, options.on_result);
+            }
+            var access = self.resolvedFileAccess(options.path, true) orelse return self.rejectFileExternal(options.key, .append, options.on_result);
+            self.startFile(options.key, .append, &access, options.bytes, options.on_result);
+        }
+
+        /// Stat a path without first allocating a whole-file read. Absence is
+        /// a successful result with `exists=false`.
+        pub fn statFile(self: *Self, options: StatFileOptions) void {
+            if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes) {
+                return self.rejectFile(options.key, .stat, options.on_result);
+            }
+            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .stat, options.on_result);
+            self.startFile(options.key, .stat, &access, "", options.on_result);
+        }
+
+        /// Stream a file as 256-KiB chunks followed by one `.done(total)`.
+        /// Reads own `max_effect_file_streams`; no whole-file allocation and
+        /// no total-size ceiling is involved.
+        pub fn readFileStream(self: *Self, options: ReadFileStreamOptions) void {
+            // Read streams join the file-style key family: reissuing a live
+            // read key silently retires the predecessor before opening the
+            // replacement. A sink under the key still owns it loudly — never
+            // splice a read over a half-written export.
+            if (self.findFileStream(options.key)) |existing| {
+                if (self.file_stream_slots[existing].op != .read_stream) {
+                    return self.rejectFile(options.key, .read_stream, options.on_result);
+                }
+                self.retireFileStream(&self.file_stream_slots[existing]);
+            }
+            if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes or
+                self.keyOccupiedUntilDelivery(options.key))
+            {
+                return self.rejectFile(options.key, .read_stream, options.on_result);
+            }
+            var access = self.resolvedFileAccess(options.path, false) orelse return self.rejectFileExternal(options.key, .read_stream, options.on_result);
+            const access_io = self.ensureIo() catch unreachable;
+            defer access.deinit(self.allocator, access_io);
+            if (access.path.len > max_effect_file_path_bytes) return self.rejectFileExternal(options.key, .read_stream, options.on_result);
+            if (self.takeTestFileFailure()) |outcome| {
+                return self.deliverLoopFile(.{ .key = options.key, .op = .read_stream, .outcome = outcome }, options.on_result);
+            }
+            const index = self.findIdleFileStream() orelse return self.rejectFile(options.key, .read_stream, options.on_result);
+            const slot = &self.file_stream_slots[index];
+            slot.* = .{
+                .state = .reading,
+                .fake = self.executor == .fake,
+                .key = options.key,
+                .generation = self.mintFileStreamGeneration(),
+                .op = .read_stream,
+                .on_result = options.on_result,
+            };
+            const stream_path = if (access.parent != null) access.basename else access.path;
+            @memcpy(slot.path_storage[0..stream_path.len], stream_path);
+            slot.path_len = stream_path.len;
+            slot.parent = access.parent;
+            access.parent = null;
+            if (access.missing) {
+                slot.fake = false;
+                return self.deliverLoopFileStream(.{ .key = slot.key, .op = .read_stream, .outcome = .not_found }, slot.on_result, slot.generation, false);
+            }
+            if (!slot.fake) self.startReadFileStreamChunk(index);
+        }
+
+        /// Open an atomic write sink. Chunks write into an unnamed/sibling
+        /// temporary file; only close syncs and atomically replaces `path`.
+        pub fn writeFileStream(self: *Self, options: WriteFileStreamOptions) void {
+            if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes or
+                self.keyOccupiedUntilDelivery(options.key) or
+                self.findFileStream(options.key) != null)
+            {
+                return self.rejectFile(options.key, .write_stream_open, options.on_result);
+            }
+            var access = self.resolvedFileAccess(options.path, true) orelse return self.rejectFileExternal(options.key, .write_stream_open, options.on_result);
+            const access_io = self.ensureIo() catch unreachable;
+            defer access.deinit(self.allocator, access_io);
+            if (access.path.len > max_effect_file_path_bytes) return self.rejectFileExternal(options.key, .write_stream_open, options.on_result);
+            if (self.takeTestFileFailure()) |outcome| {
+                return self.deliverLoopFile(.{ .key = options.key, .op = .write_stream_open, .outcome = outcome }, options.on_result);
+            }
+            const index = self.findIdleFileStream() orelse return self.rejectFile(options.key, .write_stream_open, options.on_result);
+            const slot = &self.file_stream_slots[index];
+            slot.* = .{
+                .state = if (self.executor == .fake) .sink_open else .sink_busy,
+                .fake = self.executor == .fake,
+                .key = options.key,
+                .generation = self.mintFileStreamGeneration(),
+                .op = .write_stream_open,
+                .on_result = options.on_result,
+                .chunk_pending = true,
+            };
+            @memcpy(slot.path_storage[0..if (access.parent != null) access.basename.len else access.path.len], if (access.parent != null) access.basename else access.path);
+            slot.path_len = if (access.parent != null) access.basename.len else access.path.len;
+            slot.parent = access.parent;
+            access.parent = null;
+            if (slot.fake) return;
+            const io = self.ensureIo() catch return self.failFileStreamOpen(index, .io_failed);
+            const ctx = self.createFileStreamContext(slot) orelse return self.failFileStreamOpen(index, .rejected);
+            slot.worker_ctx = ctx;
+            slot.worker_thread = std.Thread.spawn(.{}, fileStreamWorkerMain, .{ self, index, slot.generation, io, ctx }) catch {
+                slot.worker_ctx = null;
+                moveFileStreamResourcesToSlot(slot, ctx);
+                destroyFileStreamContext(ctx, io);
+                return self.failFileStreamOpen(index, .rejected);
+            };
+        }
+
+        pub fn writeFileChunk(self: *Self, options: WriteFileChunkOptions) void {
+            const index = self.findFileStream(options.key) orelse {
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .sink_missing }, options.on_result);
+            };
+            const slot = &self.file_stream_slots[index];
+            if (slot.state != .sink_open or slot.chunk_pending) {
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .out_of_order }, options.on_result);
+            }
+            if (options.bytes.len > max_effect_file_bytes) {
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .rejected }, options.on_result);
+            }
+            if (self.takeTestFileFailure()) |outcome| {
+                return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_chunk, .outcome = outcome }, options.on_result, slot.generation, false);
+            }
+            slot.chunk_pending = true;
+            slot.state = .sink_busy;
+            slot.op = .write_stream_chunk;
+            slot.on_result = options.on_result;
+            if (slot.fake) return;
+            slot.chunk = self.allocator.dupe(u8, options.bytes) catch {
+                return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .rejected }, options.on_result, slot.generation, false);
+            };
+            const io = self.ensureIo() catch {
+                return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .io_failed }, options.on_result, slot.generation, false);
+            };
+            const ctx = self.createFileStreamContext(slot) orelse return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .rejected }, options.on_result, slot.generation, false);
+            slot.worker_ctx = ctx;
+            slot.worker_thread = std.Thread.spawn(.{}, fileStreamWorkerMain, .{ self, index, slot.generation, io, ctx }) catch {
+                slot.worker_ctx = null;
+                moveFileStreamResourcesToSlot(slot, ctx);
+                destroyFileStreamContext(ctx, io);
+                return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_chunk, .outcome = .rejected }, options.on_result, slot.generation, false);
+            };
+        }
+
+        pub fn writeFileClose(self: *Self, options: WriteFileCloseOptions) void {
+            const index = self.findFileStream(options.key) orelse {
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_close, .outcome = .sink_missing }, options.on_result);
+            };
+            const slot = &self.file_stream_slots[index];
+            if (slot.state != .sink_open or slot.chunk_pending) {
+                return self.deliverLoopFileAdmission(.{ .key = options.key, .op = .write_stream_close, .outcome = .out_of_order }, options.on_result);
+            }
+            if (self.takeTestFileFailure()) |outcome| {
+                return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_close, .outcome = outcome }, options.on_result, slot.generation, false);
+            }
+            slot.state = .sink_closing;
+            slot.chunk_pending = true;
+            slot.op = .write_stream_close;
+            slot.on_result = options.on_result;
+            if (slot.fake) return;
+            const io = self.ensureIo() catch {
+                return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_close, .outcome = .io_failed }, options.on_result, slot.generation, false);
+            };
+            const ctx = self.createFileStreamContext(slot) orelse return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_close, .outcome = .rejected }, options.on_result, slot.generation, false);
+            slot.worker_ctx = ctx;
+            slot.worker_thread = std.Thread.spawn(.{}, fileStreamWorkerMain, .{ self, index, slot.generation, io, ctx }) catch {
+                slot.worker_ctx = null;
+                moveFileStreamResourcesToSlot(slot, ctx);
+                destroyFileStreamContext(ctx, io);
+                return self.deliverLoopFileStream(.{ .key = options.key, .op = .write_stream_close, .outcome = .rejected }, options.on_result, slot.generation, false);
+            };
+        }
+
+        fn failFileStreamOpen(self: *Self, index: usize, outcome: EffectFileOutcome) void {
+            const slot = &self.file_stream_slots[index];
+            const result: EffectFileResult = .{ .key = slot.key, .op = .write_stream_open, .outcome = outcome };
+            const file_fn = slot.on_result;
+            self.retireFileStream(slot);
+            self.deliverLoopFile(result, file_fn);
+        }
+
+        fn startFile(self: *Self, key: u64, op: EffectFileOp, access: *file_access.Resolved, bytes: []const u8, on_result: ?FileMsgFn) void {
             self.reclaimSlots();
+            defer access.deinit(self.allocator, self.ensureIo() catch unreachable);
+            const file_path = access.path;
             if (file_path.len == 0 or file_path.len > max_effect_file_path_bytes) {
-                return self.rejectFile(key, op, on_result);
+                return self.rejectFileExternal(key, op, on_result);
             }
             if (self.keyOccupiedUntilDelivery(key)) return self.rejectFile(key, op, on_result);
+            if (self.takeTestFileFailure()) |outcome| {
+                return self.deliverLoopFile(.{ .key = key, .op = op, .outcome = outcome }, on_result);
+            }
             const slot_index = self.findIdleSlot() orelse return self.rejectFile(key, op, on_result);
 
             const slot = &self.slots[slot_index];
@@ -6893,9 +7323,14 @@ pub fn Effects(comptime Msg: type) type {
             // delivery space the drain hands to `update`); a real
             // worker's blocking phase gets its own process-lived copy
             // in `FileWorkerContext.buffer` below.
-            const buffer_len = if (op == .write) bytes.len else max_effect_file_bytes + 1;
+            const buffer_len = switch (op) {
+                .write, .append => bytes.len,
+                .read => max_effect_file_bytes + 1,
+                .stat => 0,
+                else => unreachable,
+            };
             const buffer = self.allocator.alloc(u8, buffer_len) catch {
-                return self.rejectFile(key, op, on_result);
+                return self.rejectFileExternal(key, op, on_result);
             };
             slot.generation = self.next_generation;
             self.next_generation +%= 1;
@@ -6919,7 +7354,7 @@ pub fn Effects(comptime Msg: type) type {
             }
             if (slot.fetch_buffer) |old| self.allocator.free(old);
             slot.fetch_buffer = buffer;
-            if (op == .write) {
+            if (op == .write or op == .append) {
                 @memcpy(buffer[0..bytes.len], bytes);
                 slot.payload_len = bytes.len;
             } else {
@@ -6933,7 +7368,7 @@ pub fn Effects(comptime Msg: type) type {
 
             const io = self.ensureIo() catch {
                 self.releaseFetchSlot(slot);
-                return self.rejectFile(key, op, on_result);
+                return self.rejectFileExternal(key, op, on_result);
             };
             // The worker's blocking phase touches only this out-of-line
             // context (path copy, op, its own data buffer), never the
@@ -6947,28 +7382,36 @@ pub fn Effects(comptime Msg: type) type {
             // process-lifetime seam.
             const ctx = process_allocator.create(FileWorkerContext) catch {
                 self.releaseFetchSlot(slot);
-                return self.rejectFile(key, op, on_result);
+                return self.rejectFileExternal(key, op, on_result);
             };
             const worker_buffer = process_allocator.alloc(u8, buffer_len) catch {
                 process_allocator.destroy(ctx);
                 self.releaseFetchSlot(slot);
-                return self.rejectFile(key, op, on_result);
+                return self.rejectFileExternal(key, op, on_result);
             };
             ctx.* = .{
                 .op = op,
                 .buffer = worker_buffer,
                 .payload_len = slot.payload_len,
+                .parent = access.parent,
+                .missing = access.missing,
             };
-            if (op == .write) @memcpy(worker_buffer[0..bytes.len], bytes);
+            access.parent = null;
+            if (op == .write or op == .append) @memcpy(worker_buffer[0..bytes.len], bytes);
             @memcpy(ctx.path_storage[0..file_path.len], file_path);
             ctx.path_len = file_path.len;
+            if (access.basename.len > 0) {
+                @memcpy(ctx.basename_storage[0..access.basename.len], access.basename);
+                ctx.basename_len = access.basename.len;
+            }
             slot.file_ctx = ctx;
             const thread = std.Thread.spawn(.{}, fileWorkerMain, .{ self, slot_index, slot.generation, io, ctx }) catch {
+                if (ctx.parent) |parent| parent.close(io);
                 process_allocator.free(worker_buffer);
                 process_allocator.destroy(ctx);
                 slot.file_ctx = null;
                 self.releaseFetchSlot(slot);
-                return self.rejectFile(key, op, on_result);
+                return self.rejectFileExternal(key, op, on_result);
             };
             slot.worker_thread = thread;
         }
@@ -9610,6 +10053,28 @@ pub fn Effects(comptime Msg: type) type {
         /// Host-request slots keep their own contract instead: a cancel
         /// aimed at one drops it silently (`cancelHostRequest`).
         pub fn cancel(self: *Self, key: u64) void {
+            if (self.findFileStream(key)) |stream_index| {
+                const stream = &self.file_stream_slots[stream_index];
+                if (stream.op == .read_stream) {
+                    // File-style reads cancel silently. A queued chunk from
+                    // the retired generation is generation-filtered at drain.
+                    self.retireFileStream(stream);
+                    return;
+                }
+                if (stream.fake and self.replay) {
+                    // The recorded `.cancelled` terminal is the executor
+                    // truth under replay. Keep the fake sink parked so that
+                    // record can feed and retire this exact occupancy.
+                    stream.cancelling = true;
+                    return;
+                }
+                const file_fn = stream.on_result;
+                const op = stream.op;
+                const key_copy = stream.key;
+                self.retireFileStream(stream);
+                self.deliverLoopFile(.{ .key = key_copy, .op = op, .outcome = .cancelled }, file_fn);
+                return;
+            }
             const slot_index = self.findActiveSlot(key) orelse {
                 // The worker may have finished with its exit still in
                 // the queue: mark the finished generation cancelled so
@@ -10924,6 +11389,9 @@ pub fn Effects(comptime Msg: type) type {
         pub fn activeCount(self: *Self) usize {
             self.reclaimSlots();
             var count: usize = 0;
+            for (&self.file_stream_slots) |*slot| {
+                if (slot.state != .idle) count += 1;
+            }
             for (&self.slots) |*slot| {
                 if (slot.state.load(.acquire) == .running) count += 1;
             }
@@ -11109,6 +11577,7 @@ pub fn Effects(comptime Msg: type) type {
                             return response_fn(entry.response);
                         },
                         .file => |entry| {
+                            if (entry.stream_generation != 0) self.advanceFileStreamAfterDelivery(entry.result, entry.stream_generation);
                             const file_fn = entry.file_fn orelse continue;
                             self.journalNote(.{
                                 .kind = .file,
@@ -11116,7 +11585,12 @@ pub fn Effects(comptime Msg: type) type {
                                 .payload = entry.result.bytes,
                                 .dropped = entry.result.dropped_before,
                                 .file_op = entry.result.op,
+                                .file_event = entry.result.event,
                                 .file_outcome = entry.result.outcome,
+                                .file_total = entry.result.total,
+                                .file_mtime_ms = entry.result.mtime_ms,
+                                .file_exists = entry.result.exists,
+                                .file_rejected_admission = entry.rejected_admission,
                             });
                             return file_fn(entry.result);
                         },
@@ -11571,6 +12045,49 @@ pub fn Effects(comptime Msg: type) type {
                         return response_fn(response);
                     },
                     .file => {
+                        if (entry.file_stream_generation != 0) {
+                            if (self.drain_heap_line) |old| {
+                                self.allocator.free(old);
+                                self.drain_heap_line = null;
+                            }
+                            if (entry.heap_line) |heap| {
+                                self.drain_heap_line = heap;
+                                entry.heap_line = null;
+                            }
+                            const stream_index = self.findFileStream(entry.key) orelse continue;
+                            const stream = &self.file_stream_slots[stream_index];
+                            if (stream.generation != entry.file_stream_generation) continue;
+                            if (stream.worker_thread) |thread| {
+                                thread.join();
+                                stream.worker_thread = null;
+                            }
+                            if (stream.worker_ctx) |ctx| {
+                                destroyFileStreamContext(ctx, self.ensureIo() catch unreachable);
+                                stream.worker_ctx = null;
+                            }
+                            const bytes: []const u8 = if (self.drain_heap_line) |heap| heap[0..entry.line_len] else "";
+                            const result: EffectFileResult = .{
+                                .key = entry.key,
+                                .op = entry.file_op,
+                                .event = entry.file_event,
+                                .outcome = entry.file_outcome,
+                                .bytes = bytes,
+                                .total = entry.file_total,
+                            };
+                            self.advanceFileStreamAfterDelivery(result, entry.file_stream_generation);
+                            self.journalNote(.{
+                                .kind = .file,
+                                .key = result.key,
+                                .payload = result.bytes,
+                                .file_op = result.op,
+                                .file_event = result.event,
+                                .file_outcome = result.outcome,
+                                .file_total = result.total,
+                                .file_rejected_admission = entry.file_rejected_admission,
+                            });
+                            const file_fn = entry.file_fn orelse continue;
+                            return file_fn(result);
+                        }
                         // One terminal per file occupancy, mirroring
                         // `.response`: a mismatched generation means the
                         // occupant was already retired.
@@ -11600,8 +12117,12 @@ pub fn Effects(comptime Msg: type) type {
                             .{
                                 .key = entry.key,
                                 .op = entry.file_op,
+                                .event = entry.file_event,
                                 .outcome = entry.file_outcome,
                                 .bytes = bytes,
+                                .total = entry.file_total,
+                                .mtime_ms = entry.file_mtime_ms,
+                                .exists = entry.file_exists,
                                 .dropped_before = entry.dropped_before,
                             };
                         self.journalNote(.{
@@ -11610,7 +12131,12 @@ pub fn Effects(comptime Msg: type) type {
                             .payload = result.bytes,
                             .dropped = result.dropped_before,
                             .file_op = result.op,
+                            .file_event = result.event,
                             .file_outcome = result.outcome,
+                            .file_total = result.total,
+                            .file_mtime_ms = result.mtime_ms,
+                            .file_exists = result.exists,
+                            .file_rejected_admission = entry.file_rejected_admission,
                         });
                         return file_fn(result);
                     },
@@ -12549,6 +13075,34 @@ pub fn Effects(comptime Msg: type) type {
         /// lost that way reports `.truncated`, never silently.
         pub fn feedFileResult(self: *Self, key: u64, outcome: EffectFileOutcome, bytes: []const u8) error{EffectNotFound}!void {
             const slot_index = self.findActiveFakeSlot(key, .file) orelse return error.EffectNotFound;
+            return self.feedFileResultDetailed(.{
+                .key = key,
+                .op = self.slots[slot_index].file_op,
+                .outcome = outcome,
+                .bytes = bytes,
+            });
+        }
+
+        pub const FeedFileResult = struct {
+            key: u64,
+            op: EffectFileOp,
+            event: EffectFileEvent = .terminal,
+            outcome: EffectFileOutcome,
+            bytes: []const u8 = "",
+            total: u64 = 0,
+            mtime_ms: i64 = 0,
+            exists: bool = false,
+        };
+
+        pub fn feedFileResultDetailed(self: *Self, fed: FeedFileResult) error{EffectNotFound}!void {
+            // Streaming-family replay/fakes park in their own table.
+            if (fed.op == .read_stream or fed.op == .write_stream_open or fed.op == .write_stream_chunk or fed.op == .write_stream_close) {
+                return self.feedFileStreamResult(fed);
+            }
+            const key = fed.key;
+            const outcome = fed.outcome;
+            const bytes = fed.bytes;
+            const slot_index = self.findActiveFakeSlot(key, .file) orelse return error.EffectNotFound;
             const slot = &self.slots[slot_index];
             const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
             var delivered_len: usize = 0;
@@ -12566,8 +13120,12 @@ pub fn Effects(comptime Msg: type) type {
                 .generation = slot.generation,
                 .key = slot.key,
                 .line_len = @intCast(delivered_len),
-                .file_op = slot.file_op,
+                .file_op = fed.op,
+                .file_event = fed.event,
                 .file_outcome = delivered_outcome,
+                .file_total = fed.total,
+                .file_mtime_ms = fed.mtime_ms,
+                .file_exists = fed.exists,
                 .file_fn = slot.on_file,
             };
             slot.state.store(.draining, .release);
@@ -12582,6 +13140,54 @@ pub fn Effects(comptime Msg: type) type {
                 }, file_fn);
             }
             self.wakeHost();
+        }
+
+        fn feedFileStreamResult(self: *Self, fed: FeedFileResult) error{EffectNotFound}!void {
+            const index = self.findFileStream(fed.key) orelse return error.EffectNotFound;
+            const slot = &self.file_stream_slots[index];
+            if (!slot.fake) return error.EffectNotFound;
+            if (fed.op == .read_stream) {
+                if (slot.state != .reading) return error.EffectNotFound;
+                if (fed.event == .chunk) {
+                    if (fed.bytes.len > effect_file_stream_chunk_bytes) return error.EffectNotFound;
+                    const copy = self.allocator.dupe(u8, fed.bytes) catch return error.EffectNotFound;
+                    var entry: Entry = .{
+                        .kind = .file,
+                        .slot_index = @intCast(index),
+                        .key = fed.key,
+                        .line_len = @intCast(copy.len),
+                        .file_op = fed.op,
+                        .file_event = fed.event,
+                        .file_outcome = fed.outcome,
+                        .file_total = fed.total,
+                        .file_stream_generation = slot.generation,
+                        .file_fn = slot.on_result,
+                        .heap_line = copy,
+                    };
+                    if (!self.enqueue(&entry)) {
+                        self.allocator.free(copy);
+                        return error.EffectNotFound;
+                    }
+                    self.wakeHost();
+                    return;
+                }
+                self.deliverLoopFileStream(.{
+                    .key = fed.key,
+                    .op = fed.op,
+                    .event = fed.event,
+                    .outcome = fed.outcome,
+                    .total = fed.total,
+                }, slot.on_result, slot.generation, false);
+                return;
+            }
+            if (fed.op != slot.op) return error.EffectNotFound;
+            self.deliverLoopFileStream(.{
+                .key = fed.key,
+                .op = fed.op,
+                .event = fed.event,
+                .outcome = fed.outcome,
+                .total = fed.total,
+            }, slot.on_result, slot.generation, false);
         }
 
         /// Number of recorded (still-active) fake clipboard requests.
@@ -13041,6 +13647,17 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn rejectFile(self: *Self, key: u64, op: EffectFileOp, file_fn: ?FileMsgFn) void {
+            self.deliverLoopFileAdmission(.{
+                .key = key,
+                .op = op,
+                .outcome = .rejected,
+            }, file_fn);
+        }
+
+        /// Queue a rejection that replay cannot re-derive (path-policy or
+        /// executor/resource truth). Unlike deterministic admission gates,
+        /// the journal must feed this terminal to retire replay's fake slot.
+        fn rejectFileExternal(self: *Self, key: u64, op: EffectFileOp, file_fn: ?FileMsgFn) void {
             self.deliverLoopFile(.{
                 .key = key,
                 .op = op,
@@ -13948,8 +14565,19 @@ pub fn Effects(comptime Msg: type) type {
         /// (file rejections, fake cancels, feed fallbacks) for the next
         /// drain. Bytes here are always empty.
         fn deliverLoopFile(self: *Self, result: EffectFileResult, file_fn: ?FileMsgFn) void {
-            if (file_fn == null) return;
-            self.deliverPending(.{ .file = .{ .result = result, .file_fn = file_fn } });
+            self.deliverLoopFileStream(result, file_fn, 0, false);
+        }
+
+        fn deliverLoopFileAdmission(self: *Self, result: EffectFileResult, file_fn: ?FileMsgFn) void {
+            self.deliverLoopFileStream(result, file_fn, 0, true);
+        }
+
+        fn deliverLoopFileStream(self: *Self, result: EffectFileResult, file_fn: ?FileMsgFn, stream_generation: u64, rejected_admission: bool) void {
+            if (file_fn == null) {
+                if (stream_generation != 0) self.advanceFileStreamAfterDelivery(result, stream_generation);
+                return;
+            }
+            self.deliverPending(.{ .file = .{ .result = result, .file_fn = file_fn, .stream_generation = stream_generation, .rejected_admission = rejected_admission } });
         }
 
         /// Push onto the loop-side pending ring. When the ring is full
@@ -14601,6 +15229,147 @@ pub fn Effects(comptime Msg: type) type {
             return null;
         }
 
+        fn findIdleFileStream(self: *Self) ?usize {
+            for (&self.file_stream_slots, 0..) |*slot, index| {
+                if (slot.state == .idle) return index;
+            }
+            return null;
+        }
+
+        fn findFileStream(self: *Self, key: u64) ?usize {
+            for (&self.file_stream_slots, 0..) |*slot, index| {
+                if (slot.state != .idle and slot.key == key) return index;
+            }
+            return null;
+        }
+
+        fn mintFileStreamGeneration(self: *Self) u64 {
+            const generation = self.next_file_stream_generation;
+            self.next_file_stream_generation +%= 1;
+            if (self.next_file_stream_generation == 0) self.next_file_stream_generation = 1;
+            return generation;
+        }
+
+        fn retireFileStream(self: *Self, slot: *FileStreamSlot) void {
+            slot.cancelled.store(true, .release);
+            if (slot.worker_thread) |thread| {
+                const ctx = slot.worker_ctx;
+                const io = self.ensureIo() catch null;
+                const deadline_ms = self.file_join_deadline_ms;
+                var waited_ms: u64 = 0;
+                while (ctx != null and !ctx.?.done.load(.acquire) and waited_ms < deadline_ms) : (waited_ms += 1) {
+                    if (self.file_join_interrupt and waited_ms == deadline_ms / 2) ctx.?.interrupt.store(true, .release);
+                    if (io) |value| std.Io.sleep(value, std.Io.Duration.fromMilliseconds(1), .awake) catch break;
+                }
+                var abandoned = false;
+                if (ctx) |worker_ctx| {
+                    worker_ctx.mutex.lock();
+                    if (!worker_ctx.committed and !worker_ctx.done.load(.acquire)) {
+                        worker_ctx.abandoned = true;
+                        abandoned = true;
+                    }
+                    worker_ctx.mutex.unlock();
+                }
+                if (abandoned) {
+                    thread.detach();
+                    slot.worker_thread = null;
+                    slot.worker_ctx = null;
+                    self.abandoned_file_workers += 1;
+                } else {
+                    thread.join();
+                    slot.worker_thread = null;
+                    if (slot.worker_ctx) |worker_ctx| {
+                        if (io) |value| destroyFileStreamContext(worker_ctx, value);
+                        slot.worker_ctx = null;
+                    }
+                }
+            }
+            if (slot.atomic) |*atomic| {
+                const io = self.ensureIo() catch null;
+                if (io) |value| atomic.deinit(value);
+                slot.atomic = null;
+            }
+            if (slot.read_file) |file| {
+                if (self.ensureIo() catch null) |value| file.close(value);
+                slot.read_file = null;
+            }
+            if (slot.atomic_dest) |dest| {
+                process_allocator.free(dest);
+                slot.atomic_dest = null;
+            }
+            if (slot.parent) |parent| {
+                if (self.ensureIo() catch null) |value| parent.close(value);
+                slot.parent = null;
+            }
+            if (slot.chunk) |bytes| {
+                self.allocator.free(bytes);
+                slot.chunk = null;
+            }
+            slot.* = .{};
+        }
+
+        fn advanceFileStreamAfterDelivery(self: *Self, result: EffectFileResult, generation: u64) void {
+            const index = self.findFileStream(result.key) orelse return;
+            const slot = &self.file_stream_slots[index];
+            if (slot.generation != generation) return;
+            if (result.op == .read_stream) {
+                if (result.event == .chunk and result.outcome == .ok) {
+                    slot.chunk_pending = false;
+                    if (!slot.fake) self.startReadFileStreamChunk(index);
+                } else {
+                    self.retireFileStream(slot);
+                }
+                return;
+            }
+            if (result.op == .write_stream_open) {
+                slot.chunk_pending = false;
+                slot.state = .sink_open;
+                if (result.outcome != .ok) self.retireFileStream(slot);
+            } else if (result.op == .write_stream_chunk) {
+                slot.chunk_pending = false;
+                if (slot.chunk) |bytes| {
+                    self.allocator.free(bytes);
+                    slot.chunk = null;
+                }
+                slot.state = .sink_open;
+                if (result.outcome != .ok and result.outcome != .rejected and result.outcome != .out_of_order) {
+                    self.retireFileStream(slot);
+                }
+            } else if (result.op == .write_stream_close) {
+                self.retireFileStream(slot);
+            }
+        }
+
+        /// Test/replay seam: clear the open acknowledgment so the fake sink
+        /// can accept its first chunk before that acknowledgment is fed.
+        pub fn acknowledgeFakeFileStreamOpen(self: *Self, key: u64) error{EffectNotFound}!void {
+            const index = self.findFileStream(key) orelse return error.EffectNotFound;
+            const slot = &self.file_stream_slots[index];
+            if (!slot.fake or slot.op != .write_stream_open) return error.EffectNotFound;
+            slot.chunk_pending = false;
+        }
+
+        fn startReadFileStreamChunk(self: *Self, index: usize) void {
+            const slot = &self.file_stream_slots[index];
+            if (slot.state != .reading or slot.chunk_pending or slot.worker_thread != null) return;
+            slot.chunk_pending = true;
+            const io = self.ensureIo() catch {
+                return self.deliverLoopFileStream(.{ .key = slot.key, .op = .read_stream, .outcome = .io_failed }, slot.on_result, slot.generation, false);
+            };
+            const ctx = self.createFileStreamContext(slot) orelse {
+                slot.chunk_pending = false;
+                return self.deliverLoopFileStream(.{ .key = slot.key, .op = .read_stream, .outcome = .rejected }, slot.on_result, slot.generation, false);
+            };
+            slot.worker_ctx = ctx;
+            slot.worker_thread = std.Thread.spawn(.{}, fileStreamWorkerMain, .{ self, index, slot.generation, io, ctx }) catch {
+                slot.worker_ctx = null;
+                moveFileStreamResourcesToSlot(slot, ctx);
+                destroyFileStreamContext(ctx, io);
+                slot.chunk_pending = false;
+                return self.deliverLoopFileStream(.{ .key = slot.key, .op = .read_stream, .outcome = .rejected }, slot.on_result, slot.generation, false);
+            };
+        }
+
         fn findIdleStoreSlot(self: *Self) ?usize {
             for (self.slots[max_effects .. max_effects + max_store_effects], max_effects..) |*slot, index| {
                 if (slot.state.load(.acquire) == .idle) return index;
@@ -14637,6 +15406,7 @@ pub fn Effects(comptime Msg: type) type {
         /// update — so reissuing a key from its own terminal handler
         /// is always accepted.
         fn keyOccupiedUntilDelivery(self: *Self, key: u64) bool {
+            if (self.findFileStream(key) != null) return true;
             if (self.findActiveSlot(key) != null) return true;
             if (self.findUndeliveredTerminalSlot(key) != null) return true;
             if (self.stagedImageOccupiesKey(key)) return true;
@@ -15625,6 +16395,10 @@ pub fn Effects(comptime Msg: type) type {
                 };
                 superviseWorkerTask(io, &future, &ctx.done, &ctx.interrupt);
             }
+            if (ctx.parent) |parent| {
+                parent.close(io);
+                ctx.parent = null;
+            }
             ctx.mutex.lock();
             if (ctx.abandoned) {
                 // Teardown gave up on this worker: the channel may
@@ -15655,7 +16429,13 @@ pub fn Effects(comptime Msg: type) type {
                 }
             }
             slot.body_len = ctx.read_len;
-            self.postFile(slot, @intCast(slot_index), generation, io, outcome, ctx.read_len);
+            self.postFileDetailed(slot, @intCast(slot_index), generation, io, .{
+                .outcome = outcome,
+                .read_len = ctx.read_len,
+                .total = ctx.stat_size,
+                .mtime_ms = ctx.stat_mtime_ms,
+                .exists = ctx.stat_exists,
+            });
             slot.state.store(.draining, .release);
             self.wakeHost();
         }
@@ -15690,24 +16470,58 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn runFileOp(ctx: *FileWorkerContext, io: std.Io) EffectFileOutcome {
-            const cwd = std.Io.Dir.cwd();
-            const file_path = ctx.path();
+            if (ctx.missing) return if (ctx.op == .stat) .ok else .not_found;
+            const dir = ctx.parent orelse std.Io.Dir.cwd();
+            const file_path = if (ctx.parent != null) ctx.basename() else ctx.path();
             switch (ctx.op) {
                 .write => {
-                    if (std.fs.path.dirname(file_path)) |parent| {
-                        cwd.createDirPath(io, parent) catch |err| return fileOpFailure(err);
+                    if (ctx.parent == null) {
+                        if (std.fs.path.dirname(file_path)) |parent| {
+                            dir.createDirPath(io, parent) catch |err| return fileOpFailure(err);
+                        }
+                        dir.writeFile(io, .{ .sub_path = file_path, .data = ctx.payload() }) catch |err| return fileOpFailure(err);
+                        return .ok;
                     }
-                    cwd.writeFile(io, .{
-                        .sub_path = file_path,
-                        .data = ctx.payload(),
-                    }) catch |err| return fileOpFailure(err);
+                    var atomic = dir.createFileAtomic(io, file_path, .{ .make_path = ctx.parent == null, .replace = true }) catch |err| return fileOpFailure(err);
+                    defer atomic.deinit(io);
+                    atomic.file.writePositionalAll(io, ctx.payload(), 0) catch |err| return fileOpFailure(err);
+                    atomic.file.sync(io) catch |err| return fileOpFailure(err);
+                    atomic.replace(io) catch |err| return fileOpFailure(err);
+                    return .ok;
+                },
+                .append => {
+                    if (ctx.parent == null) {
+                        if (std.fs.path.dirname(file_path)) |parent| {
+                            dir.createDirPath(io, parent) catch |err| return fileOpFailure(err);
+                        }
+                    }
+                    var file = dir.openFile(io, file_path, .{
+                        .mode = .read_write,
+                        .allow_directory = false,
+                        .follow_symlinks = false,
+                        .resolve_beneath = ctx.parent != null,
+                        .lock = .exclusive,
+                    }) catch |err| switch (err) {
+                        error.FileNotFound => dir.createFile(io, file_path, .{
+                            .read = true,
+                            .truncate = false,
+                            .exclusive = true,
+                            .lock = .exclusive,
+                            .resolve_beneath = ctx.parent != null,
+                        }) catch |create_err| return fileOpFailure(create_err),
+                        else => return fileOpFailure(err),
+                    };
+                    defer file.close(io);
+                    const stat = file.stat(io) catch |err| return fileOpFailure(err);
+                    file.writePositionalAll(io, ctx.payload(), stat.size) catch |err| return fileOpFailure(err);
                     return .ok;
                 },
                 .read => {
-                    var file = cwd.openFile(io, file_path, .{}) catch |err| {
+                    var file = dir.openFile(io, file_path, .{ .resolve_beneath = ctx.parent != null }) catch |err| {
                         return if (err == error.FileNotFound) .not_found else fileOpFailure(err);
                     };
                     defer file.close(io);
+                    if (ctx.parent != null and !openedFileIsInsideDir(io, dir, file)) return .io_failed;
                     // The buffer has one byte past the delivery bound:
                     // filling it proves the file is over-bound.
                     const len = file.readPositionalAll(io, ctx.buffer, 0) catch |err| return fileOpFailure(err);
@@ -15718,6 +16532,23 @@ pub fn Effects(comptime Msg: type) type {
                     ctx.read_len = len;
                     return .ok;
                 },
+                .stat => {
+                    var file = dir.openFile(io, file_path, .{ .path_only = true, .resolve_beneath = ctx.parent != null }) catch |err| {
+                        if (err == error.FileNotFound) {
+                            ctx.stat_exists = false;
+                            return .ok;
+                        }
+                        return fileOpFailure(err);
+                    };
+                    defer file.close(io);
+                    if (ctx.parent != null and !openedFileIsInsideDir(io, dir, file)) return .io_failed;
+                    const stat = file.stat(io) catch |err| return fileOpFailure(err);
+                    ctx.stat_exists = true;
+                    ctx.stat_size = stat.size;
+                    ctx.stat_mtime_ms = @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_ms));
+                    return .ok;
+                },
+                else => unreachable,
             }
         }
 
@@ -15725,7 +16556,274 @@ pub fn Effects(comptime Msg: type) type {
         /// teardown cancels the task); every other failure stays the
         /// blanket `.io_failed`.
         fn fileOpFailure(err: anyerror) EffectFileOutcome {
-            return if (err == error.Canceled) .cancelled else .io_failed;
+            return switch (err) {
+                error.Canceled => .cancelled,
+                error.NoSpaceLeft, error.DiskQuota => .disk_full,
+                else => .io_failed,
+            };
+        }
+
+        fn openedFileIsInsideDir(io: std.Io, dir: std.Io.Dir, file: std.Io.File) bool {
+            var dir_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            var file_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const dir_len = dir.realPath(io, &dir_path) catch return false;
+            const file_len = file.realPath(io, &file_path) catch return false;
+            const root = dir_path[0..dir_len];
+            const target = file_path[0..file_len];
+            return target.len > root.len and std.mem.eql(u8, root, target[0..root.len]) and
+                (target[root.len] == '/' or (builtin.os.tag == .windows and target[root.len] == '\\'));
+        }
+
+        pub fn failNextFileOperationForTest(self: *Self, err: anyerror) void {
+            if (comptime !builtin.is_test) @compileError("failNextFileOperationForTest is available only in test builds");
+            self.test_next_file_error = err;
+        }
+
+        fn createFileStreamContext(self: *Self, slot: *FileStreamSlot) ?*FileStreamWorkerContext {
+            const ctx = process_allocator.create(FileStreamWorkerContext) catch return null;
+            const chunk = if (slot.chunk) |bytes|
+                process_allocator.dupe(u8, bytes) catch {
+                    process_allocator.destroy(ctx);
+                    return null;
+                }
+            else
+                null;
+            ctx.* = .{ .op = slot.op, .offset = slot.offset, .total = slot.total, .chunk = chunk };
+            @memcpy(ctx.path_storage[0..slot.path_len], slot.path());
+            ctx.path_len = slot.path_len;
+            ctx.parent = slot.parent;
+            slot.parent = null;
+            ctx.read_file = slot.read_file;
+            slot.read_file = null;
+            if (slot.atomic) |*atomic| {
+                ctx.atomic = atomic.*;
+                atomic.* = undefined;
+                slot.atomic = null;
+                if (slot.atomic_dest) |dest| {
+                    ctx.atomic_dest = dest;
+                    slot.atomic_dest = null;
+                    ctx.atomic.?.dest_sub_path = dest;
+                }
+            }
+            if (slot.chunk) |bytes| {
+                self.allocator.free(bytes);
+                slot.chunk = null;
+            }
+            return ctx;
+        }
+
+        /// Move durable resources back into the owner without allocating. A
+        /// rejected chunk attempt stays context-owned and is discarded; its
+        /// retry supplies the bytes again while the atomic sink survives.
+        fn moveFileStreamResourcesToSlot(slot: *FileStreamSlot, ctx: *FileStreamWorkerContext) void {
+            std.debug.assert(slot.parent == null and slot.read_file == null and slot.atomic == null and slot.atomic_dest == null);
+            slot.parent = ctx.parent;
+            ctx.parent = null;
+            slot.read_file = ctx.read_file;
+            ctx.read_file = null;
+            if (ctx.atomic) |*atomic| {
+                slot.atomic = atomic.*;
+                atomic.* = undefined;
+                ctx.atomic = null;
+                if (ctx.atomic_dest) |dest| {
+                    slot.atomic_dest = dest;
+                    ctx.atomic_dest = null;
+                    slot.atomic.?.dest_sub_path = dest;
+                }
+            }
+        }
+
+        fn destroyFileStreamContext(ctx: *FileStreamWorkerContext, io: std.Io) void {
+            if (ctx.read_buffer) |bytes| process_allocator.free(bytes);
+            if (ctx.chunk) |bytes| process_allocator.free(bytes);
+            if (ctx.read_file) |file| file.close(io);
+            if (ctx.atomic) |*atomic| atomic.deinit(io);
+            if (ctx.atomic_dest) |dest| process_allocator.free(dest);
+            if (ctx.parent) |parent| parent.close(io);
+            process_allocator.destroy(ctx);
+        }
+
+        fn fileStreamWorkerMain(self: *Self, index: usize, generation: u64, io: std.Io, ctx: *FileStreamWorkerContext) void {
+            supervise: {
+                var future = std.Io.concurrent(io, fileStreamTask, .{ ctx, io }) catch {
+                    fileStreamTask(ctx, io);
+                    break :supervise;
+                };
+                superviseWorkerTask(io, &future, &ctx.done, &ctx.interrupt);
+            }
+            ctx.mutex.lock();
+            if (ctx.abandoned) {
+                ctx.mutex.unlock();
+                return;
+            }
+            ctx.committed = true;
+            ctx.mutex.unlock();
+            const slot = &self.file_stream_slots[index];
+            if (slot.generation != generation or slot.cancelled.load(.acquire)) return;
+            moveFileStreamResourcesToSlot(slot, ctx);
+            slot.offset = ctx.offset;
+            slot.total = ctx.total;
+            const buffer = if (ctx.read_buffer) |worker_buffer| copy: {
+                const delivery = self.allocator.dupe(u8, worker_buffer[0..ctx.read_len]) catch {
+                    process_allocator.free(worker_buffer);
+                    ctx.read_buffer = null;
+                    ctx.read_len = 0;
+                    ctx.event = .terminal;
+                    ctx.outcome = .rejected;
+                    break :copy null;
+                };
+                process_allocator.free(worker_buffer);
+                ctx.read_buffer = null;
+                break :copy delivery;
+            } else null;
+            if (ctx.op == .read_stream) {
+                self.postFileStreamWorker(index, generation, buffer, ctx.read_len, ctx.event, ctx.outcome, io);
+            } else {
+                if (buffer) |bytes| self.allocator.free(bytes);
+                self.postWriteFileStreamWorker(index, generation, ctx.op, ctx.outcome, io);
+            }
+        }
+
+        fn fileStreamTask(ctx: *FileStreamWorkerContext, io: std.Io) void {
+            defer ctx.done.store(true, .release);
+            const dir = ctx.parent orelse std.Io.Dir.cwd();
+            switch (ctx.op) {
+                .read_stream => {
+                    const buffer = process_allocator.alloc(u8, effect_file_stream_chunk_bytes) catch {
+                        ctx.outcome = .rejected;
+                        return;
+                    };
+                    ctx.read_buffer = buffer;
+                    if (ctx.read_file == null) {
+                        ctx.read_file = dir.openFile(io, ctx.path(), .{ .resolve_beneath = ctx.parent != null }) catch |err| {
+                            ctx.outcome = if (err == error.FileNotFound) .not_found else fileOpFailure(err);
+                            return;
+                        };
+                        if (ctx.parent != null and !openedFileIsInsideDir(io, dir, ctx.read_file.?)) {
+                            ctx.read_file.?.close(io);
+                            ctx.read_file = null;
+                            ctx.outcome = .io_failed;
+                            return;
+                        }
+                    }
+                    const len = ctx.read_file.?.readPositionalAll(io, buffer, ctx.offset) catch |err| {
+                        ctx.outcome = fileOpFailure(err);
+                        return;
+                    };
+                    if (len == 0) {
+                        ctx.event = .done;
+                        ctx.outcome = .ok;
+                        process_allocator.free(buffer);
+                        ctx.read_buffer = null;
+                        return;
+                    }
+                    ctx.offset += len;
+                    ctx.total += len;
+                    ctx.read_len = len;
+                    ctx.event = .chunk;
+                    ctx.outcome = .ok;
+                },
+                .write_stream_open => {
+                    ctx.atomic = dir.createFileAtomic(io, ctx.path(), .{ .make_path = ctx.parent == null, .replace = true }) catch |err| {
+                        ctx.outcome = fileOpFailure(err);
+                        return;
+                    };
+                    ctx.atomic_dest = process_allocator.dupe(u8, ctx.atomic.?.dest_sub_path) catch {
+                        ctx.atomic.?.deinit(io);
+                        ctx.atomic = null;
+                        ctx.outcome = .rejected;
+                        return;
+                    };
+                    ctx.atomic.?.dest_sub_path = ctx.atomic_dest.?;
+                    ctx.outcome = .ok;
+                },
+                .write_stream_chunk => {
+                    const bytes = ctx.chunk orelse {
+                        ctx.outcome = .sink_missing;
+                        return;
+                    };
+                    const atomic = &(ctx.atomic orelse {
+                        ctx.outcome = .sink_missing;
+                        return;
+                    });
+                    atomic.file.writePositionalAll(io, bytes, ctx.total) catch |err| {
+                        ctx.outcome = fileOpFailure(err);
+                        return;
+                    };
+                    ctx.total += bytes.len;
+                    ctx.outcome = .ok;
+                },
+                .write_stream_close => {
+                    const atomic = &(ctx.atomic orelse {
+                        ctx.outcome = .sink_missing;
+                        return;
+                    });
+                    atomic.file.sync(io) catch |err| {
+                        ctx.outcome = fileOpFailure(err);
+                        return;
+                    };
+                    atomic.replace(io) catch |err| {
+                        ctx.outcome = fileOpFailure(err);
+                        return;
+                    };
+                    ctx.outcome = .ok;
+                },
+                else => unreachable,
+            }
+        }
+
+        fn postWriteFileStreamWorker(self: *Self, index: usize, generation: u64, op: EffectFileOp, outcome: EffectFileOutcome, io: std.Io) void {
+            const slot = &self.file_stream_slots[index];
+            if (slot.cancelled.load(.acquire) or slot.generation != generation) return;
+            var entry: Entry = .{
+                .kind = .file,
+                .slot_index = @intCast(index),
+                .key = slot.key,
+                .file_op = op,
+                .file_event = .terminal,
+                .file_outcome = outcome,
+                // Writer open/chunk/close results are acknowledgements, not
+                // read progress. The running total stays internal to the sink.
+                .file_total = 0,
+                .file_stream_generation = generation,
+                .file_fn = slot.on_result,
+            };
+            while (!self.enqueue(&entry)) {
+                if (self.shutdown.load(.acquire) or slot.cancelled.load(.acquire)) return;
+                self.wakeHost();
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            }
+            self.wakeHost();
+        }
+
+        fn postFileStreamWorker(self: *Self, index: usize, generation: u64, buffer: ?[]u8, len: usize, event: EffectFileEvent, outcome: EffectFileOutcome, io: std.Io) void {
+            const slot = &self.file_stream_slots[index];
+            if (slot.cancelled.load(.acquire) or slot.generation != generation) {
+                if (buffer) |heap| self.allocator.free(heap);
+                return;
+            }
+            var entry: Entry = .{
+                .kind = .file,
+                .slot_index = @intCast(index),
+                .key = slot.key,
+                .line_len = @intCast(len),
+                .file_op = .read_stream,
+                .file_event = event,
+                .file_outcome = outcome,
+                .file_total = slot.total,
+                .file_stream_generation = generation,
+                .file_fn = slot.on_result,
+                .heap_line = buffer,
+            };
+            while (!self.enqueue(&entry)) {
+                if (self.shutdown.load(.acquire) or slot.cancelled.load(.acquire)) {
+                    if (entry.heap_line) |heap| self.allocator.free(heap);
+                    return;
+                }
+                self.wakeHost();
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            }
+            self.wakeHost();
         }
 
         // ------------------------------------------------------ image worker
@@ -16025,14 +17123,33 @@ pub fn Effects(comptime Msg: type) type {
         /// The terminal file result must never be dropped: retry until
         /// the loop thread drains space, giving up only on shutdown.
         fn postFile(self: *Self, slot: *Slot, slot_index: u16, generation: u32, io: std.Io, outcome: EffectFileOutcome, read_len: usize) void {
+            self.postFileDetailed(slot, slot_index, generation, io, .{ .outcome = outcome, .read_len = read_len });
+        }
+
+        const FilePost = struct {
+            outcome: EffectFileOutcome,
+            read_len: usize = 0,
+            event: EffectFileEvent = .terminal,
+            total: u64 = 0,
+            mtime_ms: i64 = 0,
+            exists: bool = false,
+            stream_generation: u64 = 0,
+        };
+
+        fn postFileDetailed(self: *Self, slot: *Slot, slot_index: u16, generation: u32, io: std.Io, result: FilePost) void {
             var entry: Entry = .{
                 .kind = .file,
                 .slot_index = slot_index,
                 .generation = generation,
                 .key = slot.key,
-                .line_len = @intCast(read_len),
+                .line_len = @intCast(result.read_len),
                 .file_op = slot.file_op,
-                .file_outcome = outcome,
+                .file_outcome = result.outcome,
+                .file_event = result.event,
+                .file_total = result.total,
+                .file_mtime_ms = result.mtime_ms,
+                .file_exists = result.exists,
+                .file_stream_generation = result.stream_generation,
                 .file_fn = slot.on_file,
             };
             while (!self.enqueue(&entry)) {
@@ -16149,4 +17266,46 @@ test "fetch errors map onto the documented taxonomy" {
     try std.testing.expectEqual(EffectFetchOutcome.tls_failed, classifyFetchError(error.TlsInitializationFailed));
     try std.testing.expectEqual(EffectFetchOutcome.rejected, classifyFetchError(error.UnsupportedUriScheme));
     try std.testing.expectEqual(EffectFetchOutcome.protocol_failed, classifyFetchError(error.HttpHeadersInvalid));
+}
+
+test "read stream keeps one file generation open across chunks" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const TestMsg = union(enum) { result: EffectFileResult };
+    const Channel = Effects(TestMsg);
+
+    const file_len = effect_file_stream_chunk_bytes * 2;
+    const original = try std.testing.allocator.alloc(u8, file_len);
+    defer std.testing.allocator.free(original);
+    @memset(original, 'A');
+    try tmp.dir.writeFile(io, .{ .sub_path = "stream.bin", .data = original });
+
+    const ctx = try process_allocator.create(FileStreamWorkerContext);
+    ctx.* = .{ .op = .read_stream };
+    defer Channel.destroyFileStreamContext(ctx, io);
+    var path_buffer: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, ".zig-cache/tmp/{s}/stream.bin", .{tmp.sub_path[0..]});
+    @memcpy(ctx.path_storage[0..path.len], path);
+    ctx.path_len = path.len;
+
+    Channel.fileStreamTask(ctx, io);
+    try std.testing.expectEqual(effect_file_stream_chunk_bytes, ctx.read_len);
+    try std.testing.expect(std.mem.allEqual(u8, ctx.read_buffer.?[0..ctx.read_len], 'A'));
+    process_allocator.free(ctx.read_buffer.?);
+    ctx.read_buffer = null;
+    ctx.read_len = 0;
+
+    // Replace the pathname between chunks. A stream is one open-file
+    // generation, so its next positional read must still see the original.
+    const replacement = try std.testing.allocator.alloc(u8, file_len);
+    defer std.testing.allocator.free(replacement);
+    @memset(replacement, 'B');
+    var atomic = try tmp.dir.createFileAtomic(io, "stream.bin", .{ .replace = true });
+    try atomic.file.writePositionalAll(io, replacement, 0);
+    try atomic.replace(io);
+
+    Channel.fileStreamTask(ctx, io);
+    try std.testing.expectEqual(effect_file_stream_chunk_bytes, ctx.read_len);
+    try std.testing.expect(std.mem.allEqual(u8, ctx.read_buffer.?[0..ctx.read_len], 'A'));
 }
