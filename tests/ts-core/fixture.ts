@@ -12,8 +12,8 @@
 // as Zig) and driven through the real runtime by
 // tests/ts-core/host_e2e_tests.zig.
 
-import { Cmd, Sub, asciiBytes, utf8Bytes } from "@native-sdk/core";
-import { type AudioState, type StatusItemState } from "@native-sdk/core/events";
+import { Cmd, Sub, asciiBytes, utf8Bytes, windowDescriptor } from "@native-sdk/core";
+import { type AudioState, type StatusItemState, type WindowDescriptor } from "@native-sdk/core/events";
 
 export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
 
@@ -97,6 +97,7 @@ export interface Model {
   readonly imgRejectAt: number;
   readonly fileTotal: number;
   readonly fileExists: boolean;
+  readonly settingsOpen: boolean;
 }
 
 export type Msg =
@@ -114,6 +115,7 @@ export type Msg =
   | { readonly kind: "file_stat"; readonly exists: boolean; readonly size: number; readonly mtimeMs: number }
   | { readonly kind: "stat_file" }
   | { readonly kind: "append_file" }
+  | { readonly kind: "delete_file" }
   | { readonly kind: "stream_read" }
   | { readonly kind: "stream_open" }
   | { readonly kind: "stream_chunk" }
@@ -179,7 +181,9 @@ export type Msg =
   | { readonly kind: "credential_delete" }
   | { readonly kind: "open_pty" }
   | { readonly kind: "pty_evt"; readonly key: Uint8Array; readonly state: PtyState; readonly bytes: Uint8Array; readonly code: number; readonly reason: PtyExitReason; readonly signal: number; readonly droppedWrites: number }
-  | { readonly kind: "store_scan_invalid" };
+  | { readonly kind: "store_scan_invalid" }
+  | { readonly kind: "open_settings" }
+  | { readonly kind: "close_settings"; readonly reason: Uint8Array };
 
 export function initialModel(): [Model, Cmd<Msg>] {
   return [
@@ -231,6 +235,7 @@ export function initialModel(): [Model, Cmd<Msg>] {
       imgRejectAt: -1,
       fileTotal: 0,
       fileExists: false,
+      settingsOpen: false,
     },
     Cmd.request("status.read", asciiBytes("boot"), { key: "status", ok: "loaded", err: "failed" }),
   ];
@@ -268,6 +273,8 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [model, Cmd.statFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), { key: "file", ok: "file_stat", err: "failed" })];
     case "append_file":
       return [model, Cmd.appendFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), model.status, { key: "file", ok: "wrote", err: "failed" })];
+    case "delete_file":
+      return [model, Cmd.deleteFile(asciiBytes(".zig-cache/tmp/ts-core-tier5/append.bin"), { key: "file", ok: "wrote", err: "failed" })];
     case "stream_open":
       return [model, Cmd.writeFileStream("file-stream", asciiBytes(".zig-cache/tmp/ts-core-tier5/stream.bin"), { ok: "wrote", err: "failed" })];
     case "stream_chunk":
@@ -545,6 +552,10 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [model, Cmd.ptySpawn([asciiBytes("/bin/sh")], { key: "fixture-pty", event: "pty_evt" })];
     case "pty_evt":
       return [{ ...model, status: msg.key }, Cmd.none];
+    case "open_settings":
+      return [{ ...model, settingsOpen: true }, Cmd.none];
+    case "close_settings":
+      return [{ ...model, settingsOpen: false, status: msg.reason }, Cmd.none];
   }
 }
 
@@ -596,4 +607,29 @@ export function statusItem(model: Model): StatusItemState {
       },
     ],
   };
+}
+
+export function commandMsg(name: string): Msg | null {
+  if (name === "core.toggle") return { kind: "toggle" };
+  if (name === "core.refresh") return { kind: "refresh" };
+  if (name === "core.open-settings") return { kind: "open_settings" };
+  if (name === "core.close-settings:manual") return { kind: "close_settings", reason: asciiBytes("manual") };
+  if (name === "core.close-settings:payload") return { kind: "close_settings", reason: asciiBytes("payload") };
+  return null;
+}
+
+export function windows(model: Model): readonly WindowDescriptor[] {
+  if (!model.settingsOpen) return [];
+  return [windowDescriptor({
+    label: asciiBytes("settings"),
+    canvasLabel: asciiBytes("settings-canvas"),
+    title: asciiBytes("Settings"),
+    width: 320,
+    height: 240,
+    resizable: false,
+    titlebar: "chromeless",
+    transparent: true,
+    closePolicy: model.polling ? "hide" : "quit",
+    onCloseCommand: asciiBytes("core.close-settings:payload"),
+  })];
 }

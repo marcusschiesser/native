@@ -257,8 +257,8 @@ export const rules = {
   NS1033: {
     id: "NS1033",
     title: "wiring exports match their runtime shapes",
-    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack`; singular `statusItem(model: Model): StatusItemState` or collection `statusItems(model: Model): readonly StatusItemDescriptor[]`; `appearanceMsg` / `chromeMsg` naming an arm with that channel's record shape; `envMsgs` entries targeting one-`Uint8Array`-field arms; and persistence ok/none routes naming void arms while err names a one-`Uint8Array`-field arm. Import canonical records from `@native-sdk/core/events`.",
-    why: "The generated wiring builds host events, persistence restore results, model-derived theme selection, and the live menu-bar status item structurally from your declarations at build time; a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
+    fix: "Declare the channel exactly: `commandMsg(name: string)` / `keyMsg(key: KeyEvent)` / `frameMsg(model: Model, frame: FrameEvent)` / `pinchMsg(pinch: PinchEvent)` / `dropMsg(drop: FileDropEvent)` returning `Msg | null`; `themePack(model: Model): ThemePack`; singular `statusItem(model: Model): StatusItemState` or collection `statusItems(model: Model): readonly StatusItemDescriptor[]`; `windows(model: Model): readonly WindowDescriptor[]`, with each entry constructed by `windowDescriptor` and a literal `label: asciiBytes(\"name\")` matching `src/windows/name.native`; `appearanceMsg` / `chromeMsg` naming an arm with that channel's record shape; `envMsgs` entries targeting one-`Uint8Array`-field arms; and persistence ok/none routes naming void arms while err names a one-`Uint8Array`-field arm. Import canonical records from the SDK modules.",
+    why: "The generated wiring builds host events, persistence restore results, model-derived theme/status/window declarations, and their typed callbacks structurally at build time; a wrong shape would otherwise surface as a Zig compile error inside generated code instead of a teaching diagnostic here.",
     class: "guarantee",
   },
   NS1034: {
@@ -546,6 +546,7 @@ export const rules = {
     title: "external file paths require filesystem permission",
     fix: "Add `\"filesystem\"` to app.zon's `permissions`, or keep raw file effects under a path delivered from `NATIVE_SDK_APP_DATA_DIR`.",
     why: "The runtime canonicalizes raw paths and refuses access outside this app's data/config/cache/state/logs/temp roots unless the manifest grants filesystem access; catching literal external paths at check time avoids shipping a guaranteed rejection.",
+    class: "guarantee",
   },
   NS1420: {
     id: "NS1420",
