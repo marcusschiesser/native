@@ -2663,7 +2663,7 @@ const FacadeEmitter = struct {
             \\// ---------------------------------------------------- the cmd wire
             \\// Encoder for the inert Cmd data the author's update returns —
             \\// byte-for-byte the layouts the host's command decoder expects
-            \\// (cmd_format_version 6). nscfTagOf maps a Msg arm name onto its
+            \\// (cmd_format_version 7). nscfTagOf maps a Msg arm name onto its
             \\// declaration-order wire tag.
             \\
             \\const nscfFetchMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
@@ -2787,6 +2787,13 @@ const FacadeEmitter = struct {
             \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
             \\      nscfWBytes(sink, cmd.path);
             \\      return;
+            \\    case "delete_file":
+            \\      nscfWU8(sink, 0x32);
+            \\      nscfWShortText(sink, cmd.key);
+            \\      nscfWU8(sink, nscfTagOf(cmd.okKind));
+            \\      nscfWU8(sink, nscfTagOf(cmd.errKind));
+            \\      nscfWBytes(sink, cmd.path);
+            \\      return;
             \\    case "read_file_stream":
             \\      nscfWU8(sink, 0x2d);
             \\      nscfWShortText(sink, cmd.key);
@@ -2889,7 +2896,7 @@ const FacadeEmitter = struct {
             \\      nscfWShortText(sink, cmd.label);
             \\      return;
             \\    case "webview_navigate":
-            \\      nscfWU8(sink, 0x32);
+            \\      nscfWU8(sink, 0x33);
             \\      nscfWShortText(sink, cmd.label);
             \\      nscfWBytes(sink, cmd.url);
             \\      return;

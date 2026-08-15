@@ -1191,7 +1191,7 @@ const mini_core = struct {
 
     fn cmdWebViewNavigate(label: []const u8, url: []const u8) []const u8 {
         const out = rt.frameAlloc(u8, 2 + label.len + 4 + url.len);
-        out[0] = 0x32;
+        out[0] = 0x33;
         out[1] = @intCast(label.len);
         @memcpy(out[2..][0..label.len], label);
         _ = writeLongBytes(out, 2 + label.len, url);
