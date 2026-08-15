@@ -84,6 +84,31 @@ export function utf8Bytes(s: string): Uint8Array {
 
 export type Msgish = { readonly kind: string };
 
+import { type WindowDescriptor, type WindowDescriptorSpec } from "./events.ts";
+
+export function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor {
+  return {
+    label: spec.label,
+    canvasLabel: spec.canvasLabel,
+    title: spec.title ?? new Uint8Array(0),
+    width: spec.width ?? 480,
+    height: spec.height ?? 360,
+    x: spec.x ?? null,
+    y: spec.y ?? null,
+    resizable: spec.resizable ?? true,
+    minWidth: spec.minWidth ?? 0,
+    minHeight: spec.minHeight ?? 0,
+    titlebar: spec.titlebar ?? "standard",
+    transparent: spec.transparent ?? false,
+    alwaysOnTop: spec.alwaysOnTop ?? false,
+    clickThrough: spec.clickThrough ?? false,
+    activateOnShow: spec.activateOnShow ?? true,
+    allowsFullscreen: spec.allowsFullscreen ?? true,
+    closePolicy: spec.closePolicy ?? "quit",
+    onCloseCommand: spec.onCloseCommand ?? new Uint8Array(0),
+  };
+}
+
 /** Cooperative cancellation capability supplied by generated service hosts. */
 export interface ServiceCancellation {
   readonly cancelled: () => boolean;
@@ -370,6 +395,7 @@ export type CmdData =
     }
   | { readonly op: "append_file"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
   | { readonly op: "stat_file"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array }
+  | { readonly op: "delete_file"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array }
   | { readonly op: "read_file_stream"; readonly key: string; readonly chunkKind: string; readonly doneKind: string; readonly errKind: string; readonly path: Uint8Array }
   | { readonly op: "write_file_stream"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly path: Uint8Array }
   | { readonly op: "write_file_chunk"; readonly key: string; readonly okKind: string; readonly errKind: string; readonly bytes: Uint8Array }
@@ -724,6 +750,9 @@ export const Cmd = {
   },
   statFile(path: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
     return { op: "stat_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
+  },
+  deleteFile(path: Uint8Array, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+    return { op: "delete_file", key: route.key ?? "", okKind: route.ok, errKind: route.err, path };
   },
   readFileStream(path: Uint8Array, route: { readonly key?: string; readonly chunk: string; readonly done: string; readonly err: string }): CmdData {
     return { op: "read_file_stream", key: route.key ?? "", chunkKind: route.chunk, doneKind: route.done, errKind: route.err, path };
