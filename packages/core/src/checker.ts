@@ -462,6 +462,7 @@ export class SubsetChecker {
   private readonly permissions: Set<string>;
   private readonly persistRoutes: PersistRoutes | undefined;
   private readonly sdkCorePath: string;
+  private readonly windowViews: ReadonlySet<string> | undefined;
   private usesPersist = false;
   private usesStore = false;
   private usesSqlite = false;
@@ -476,6 +477,7 @@ export class SubsetChecker {
     permissions: readonly string[] = [],
     persistRoutes?: PersistRoutes,
     sdkCorePath: string = sdkCoreModulePath,
+    windowViews?: readonly string[],
   ) {
     this.tast = tast;
     this.table = table;
@@ -487,6 +489,7 @@ export class SubsetChecker {
     this.permissions = new Set(permissions);
     this.persistRoutes = persistRoutes;
     this.sdkCorePath = sdkCorePath;
+    this.windowViews = windowViews === undefined ? undefined : new Set(windowViews);
   }
 
   check(): CheckResult {
@@ -506,6 +509,7 @@ export class SubsetChecker {
     this.checkThemePackHelper();
     this.checkStatusItemHelper();
     this.checkStatusItemsHelper();
+    this.checkWindowsHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -995,6 +999,254 @@ export class SubsetChecker {
     }
   }
 
+  /// One entry-module function exported under its own wiring name. The
+  /// entry-contract pass separately teaches re-exports and renames; this
+  /// query lets related channels prove that the generated launcher will
+  /// actually have the named callback available.
+  private entryExportedFunction(name: string): ts.FunctionDeclaration | null {
+    for (const stmt of this.entry.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === name && hasExportModifier(stmt)) return stmt;
+    }
+    for (const binding of exportListBindings(this.tast, this.entry)) {
+      if (
+        binding.exportedName === name &&
+        !binding.renamed &&
+        binding.target !== null &&
+        binding.target !== undefined &&
+        ts.isFunctionDeclaration(binding.target) &&
+        binding.target.getSourceFile() === this.entry
+      ) {
+        return binding.target;
+      }
+    }
+    return null;
+  }
+
+  /// The generated launcher owns a closed, comptime-compiled registry keyed
+  /// by direct `src/windows/<label>.native` stems. Require every possible
+  /// descriptor to declare that identity as a literal at its canonical
+  /// constructor call, then prove the root exists before compilation. This
+  /// turns a would-be first-render panic into a source diagnostic in both
+  /// `native check` and every build.
+  private checkWindowViewRegistry(windowsDecl: ts.FunctionDeclaration): void {
+    if (this.windowViews === undefined) return;
+
+    type ProducedKind = "collection" | "descriptor";
+    let sawConstructor = false;
+    let productionErrors = 0;
+    const validatingCollections = new Set<ts.FunctionDeclaration>();
+    const validatingDescriptors = new Set<ts.FunctionDeclaration>();
+    const validatedCollections = new Set<ts.FunctionDeclaration>();
+    const validatedDescriptors = new Set<ts.FunctionDeclaration>();
+
+    const unwrap = (expression: ts.Expression): ts.Expression => {
+      let current = expression;
+      while (
+        ts.isParenthesizedExpression(current) ||
+        ts.isAsExpression(current) ||
+        ts.isSatisfiesExpression(current) ||
+        ts.isNonNullExpression(current)
+      ) {
+        current = current.expression;
+      }
+      return current;
+    };
+
+    const reportProduction = (node: ts.Node, kind: ProducedKind): void => {
+      productionErrors += 1;
+      this.report(
+        "NS1033",
+        kind === "collection"
+          ? "Every value returned by `windows` must be an array literal of direct `windowDescriptor(...)` results (factored constructor helpers are fine); copied, spread, or mutable descriptor collections can replace the statically registered label."
+          : "Every window returned by `windows` must flow directly from `windowDescriptor({...})` (or a helper whose own returns do); copying, spreading, or rebuilding a descriptor can replace its statically registered label.",
+        node,
+      );
+    };
+
+    const appFunctionTarget = (call: ts.CallExpression): ts.FunctionDeclaration | null => {
+      if (!ts.isIdentifier(call.expression) && !ts.isPropertyAccessExpression(call.expression)) return null;
+      const target = this.tast.declarationOf(
+        ts.isIdentifier(call.expression) ? call.expression : call.expression.name,
+      );
+      return target && ts.isFunctionDeclaration(target) && this.fileSet.has(target.getSourceFile()) ? target : null;
+    };
+
+    const returnExpressions = (fn: ts.FunctionDeclaration): ts.Expression[] => {
+      const returns: ts.Expression[] = [];
+      const visit = (node: ts.Node): void => {
+        if (node !== fn && (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node))) return;
+        if (ts.isReturnStatement(node)) {
+          if (node.expression) returns.push(node.expression);
+          return;
+        }
+        ts.forEachChild(node, visit);
+      };
+      if (fn.body) visit(fn.body);
+      return returns;
+    };
+
+    const validateConstructor = (call: ts.CallExpression): void => {
+      sawConstructor = true;
+      const spec = call.arguments[0];
+      if (!spec || !ts.isObjectLiteralExpression(unwrap(spec))) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          "A model-declared window must pass an inline object to `windowDescriptor`, with a static `label: asciiBytes(\"<label>\")` property selecting its compiled view.",
+          spec ?? call,
+        );
+        return;
+      }
+      const object = unwrap(spec) as ts.ObjectLiteralExpression;
+      const labelProp = object.properties.find((prop): prop is ts.PropertyAssignment =>
+        ts.isPropertyAssignment(prop) &&
+        ((ts.isIdentifier(prop.name) && prop.name.text === "label") ||
+          (ts.isStringLiteral(prop.name) && prop.name.text === "label")),
+      );
+      const labelIndex = labelProp === undefined ? -1 : object.properties.indexOf(labelProp);
+      if (object.properties.some((property, index) => ts.isSpreadAssignment(property) && index > labelIndex)) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          "A `windowDescriptor` spec cannot spread fields after its literal label: that spread can replace the identity after the registry check. Move the literal label after every spread.",
+          object,
+        );
+        return;
+      }
+      const labelExpr = labelProp?.initializer;
+      const labelArg = labelExpr && ts.isCallExpression(labelExpr) &&
+          this.sdkRootFunctionName(labelExpr.expression) === "asciiBytes"
+        ? labelExpr.arguments[0]
+        : undefined;
+      if (!labelArg || !ts.isStringLiteral(labelArg)) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          "A model-declared window label must be a static `asciiBytes(\"<label>\")` property inside `windowDescriptor({...})`; that literal selects `src/windows/<label>.native` at build time.",
+          labelProp ?? object,
+        );
+        return;
+      }
+      const label = labelArg.text;
+      if (
+        label.length === 0 ||
+        label.length > 64 ||
+        label === "." ||
+        label === ".." ||
+        label.includes("\0") ||
+        label.includes("/") ||
+        label.includes("\\")
+      ) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          "A model-declared window label must be a non-empty filename stem of at most 64 ASCII bytes, without path separators or NUL bytes.",
+          labelArg,
+        );
+        return;
+      }
+      if (!this.windowViews.has(labelArg.text)) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          `Window label \`${labelArg.text}\` has no compiled view; add \`src/windows/${labelArg.text}.native\` or change the descriptor label to an existing root.`,
+          labelArg,
+        );
+      }
+
+      const propertyNamed = (name: string): ts.PropertyAssignment | undefined =>
+        object.properties.find((prop): prop is ts.PropertyAssignment =>
+          ts.isPropertyAssignment(prop) &&
+          ((ts.isIdentifier(prop.name) && prop.name.text === name) ||
+            (ts.isStringLiteral(prop.name) && prop.name.text === name)),
+        );
+      const closePolicy = propertyNamed("closePolicy")?.initializer;
+      const alwaysHides = closePolicy !== undefined && ts.isStringLiteral(unwrap(closePolicy)) && unwrap(closePolicy).text === "hide";
+      const closeCommand = propertyNamed("onCloseCommand")?.initializer;
+      const closeCommandArg = closeCommand !== undefined && ts.isCallExpression(unwrap(closeCommand)) &&
+          this.sdkRootFunctionName((unwrap(closeCommand) as ts.CallExpression).expression) === "asciiBytes"
+        ? (unwrap(closeCommand) as ts.CallExpression).arguments[0]
+        : undefined;
+      const definitelyEmptyCloseCommand = closeCommandArg !== undefined && ts.isStringLiteral(closeCommandArg) && closeCommandArg.text.length === 0;
+      if (
+        closeCommand !== undefined &&
+        !definitelyEmptyCloseCommand &&
+        !alwaysHides &&
+        this.entryExportedFunction("commandMsg") === null
+      ) {
+        productionErrors += 1;
+        this.report(
+          "NS1033",
+          "A quit-close `onCloseCommand` requires `commandMsg(name: string): Msg | null`; otherwise the generated launcher cannot map the command to the Msg that removes the window declaration.",
+          closeCommand,
+        );
+      }
+    };
+
+    const validateFunction = (fn: ts.FunctionDeclaration, kind: ProducedKind): void => {
+      const validating = kind === "collection" ? validatingCollections : validatingDescriptors;
+      const validated = kind === "collection" ? validatedCollections : validatedDescriptors;
+      if (validated.has(fn) || validating.has(fn)) return;
+      validating.add(fn);
+      const returns = returnExpressions(fn);
+      if (returns.length === 0) reportProduction(fn.name ?? fn, kind);
+      for (const expression of returns) validateExpression(expression, kind);
+      validating.delete(fn);
+      validated.add(fn);
+    };
+
+    const validateExpression = (raw: ts.Expression, kind: ProducedKind): void => {
+      const expression = unwrap(raw);
+      if (ts.isConditionalExpression(expression)) {
+        validateExpression(expression.whenTrue, kind);
+        validateExpression(expression.whenFalse, kind);
+        return;
+      }
+      if (kind === "collection" && ts.isArrayLiteralExpression(expression)) {
+        for (const element of expression.elements) {
+          if (ts.isSpreadElement(element)) validateExpression(element.expression, "collection");
+          else validateExpression(element, "descriptor");
+        }
+        return;
+      }
+      if (kind === "descriptor" && ts.isIdentifier(expression)) {
+        const declaration = this.tast.declarationOf(expression);
+        if (
+          declaration &&
+          ts.isVariableDeclaration(declaration) &&
+          declaration.initializer &&
+          ts.isVariableDeclarationList(declaration.parent) &&
+          (declaration.parent.flags & ts.NodeFlags.Const) !== 0
+        ) {
+          validateExpression(declaration.initializer, "descriptor");
+          return;
+        }
+      }
+      if (ts.isCallExpression(expression)) {
+        if (kind === "descriptor" && this.sdkRootFunctionName(expression.expression) === "windowDescriptor") {
+          validateConstructor(expression);
+          return;
+        }
+        const helper = appFunctionTarget(expression);
+        if (helper) {
+          validateFunction(helper, kind);
+          return;
+        }
+      }
+      reportProduction(expression, kind);
+    };
+
+    validateFunction(windowsDecl, "collection");
+
+    if (!sawConstructor && productionErrors === 0) {
+      this.report(
+        "NS1033",
+        "`windows` must construct each possible entry with `windowDescriptor({ label: asciiBytes(\"<label>\"), ... })` so the generated launcher can prove its `src/windows/<label>.native` view exists.",
+        windowsDecl.name ?? windowsDecl,
+      );
+    }
+  }
+
   private checkStatusItemsHelper(): void {
     let decl: ts.FunctionDeclaration | null = null;
     for (const stmt of this.entry.statements) {
@@ -1106,6 +1358,86 @@ export class SubsetChecker {
         decl.type,
       );
     }
+  }
+
+  /// `windows(model)` is the TypeScript launcher's model-declared secondary
+  /// window set. Keep the descriptor exact: the Zig adapter projects it into
+  /// UiApp.WindowDescriptor, including close-command routing and closePolicy.
+  private checkWindowsHelper(): void {
+    let decl: ts.FunctionDeclaration | null = null;
+    for (const stmt of this.entry.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === "windows" && hasExportModifier(stmt)) {
+        decl = stmt;
+        break;
+      }
+    }
+    if (decl === null) {
+      for (const binding of exportListBindings(this.tast, this.entry)) {
+        if (
+          binding.exportedName === "windows" &&
+          binding.target !== null &&
+          binding.target !== undefined &&
+          ts.isFunctionDeclaration(binding.target) &&
+          binding.target.getSourceFile() === this.entry
+        ) {
+          decl = binding.target;
+          break;
+        }
+      }
+    }
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(
+      (candidate) => candidate.name === "windows" && candidate.decl === decl,
+    );
+    if (helper === undefined || decl.type === undefined) {
+      this.report(
+        "NS1033",
+        "`windows` must be a single-Model-parameter helper with an explicit `readonly WindowDescriptor[]` return type.",
+        decl.name ?? decl,
+      );
+      return;
+    }
+    const returns = this.table.resolveTypeNode(decl.type);
+    const descriptorType = returns.k === "slice" && returns.elem.k === "struct" ? returns.elem : null;
+    const descriptor = descriptorType === null ? undefined : this.table.structs.get(descriptorType.name);
+    const names = descriptor?.fields.map((field) => field.tsName).sort() ?? [];
+    const field = (name: string) => descriptor?.fields.find((candidate) => candidate.tsName === name);
+    const numeric = (name: string): boolean => {
+      const candidate = field(name);
+      return candidate !== undefined && ["number", "i64", "f64", "numAlias"].includes(candidate.type.k);
+    };
+    const enumMembersAre = (name: string, expected: readonly string[]): boolean => {
+      const candidate = field(name);
+      if (candidate?.type.k !== "enum") return false;
+      const found = this.table.enums.get(candidate.type.name)?.members.slice().sort() ?? [];
+      return found.join(",") === expected.slice().sort().join(",");
+    };
+    const optionalNumeric = (name: string): boolean => {
+      const candidate = field(name);
+      return candidate?.type.k === "optional" && ["number", "i64", "f64", "numAlias"].includes(candidate.type.inner.k);
+    };
+    const valid =
+      names.join(",") === "activateOnShow,allowsFullscreen,alwaysOnTop,canvasLabel,clickThrough,closePolicy,height,label,minHeight,minWidth,onCloseCommand,resizable,title,titlebar,transparent,width,x,y" &&
+      field("label")?.type.k === "bytes" &&
+      field("canvasLabel")?.type.k === "bytes" &&
+      field("title")?.type.k === "bytes" &&
+      numeric("width") && numeric("height") && optionalNumeric("x") && optionalNumeric("y") &&
+      field("resizable")?.type.k === "bool" && numeric("minWidth") && numeric("minHeight") &&
+      enumMembersAre("titlebar", ["standard", "hidden_inset", "hidden_inset_tall", "chromeless"]) &&
+      field("transparent")?.type.k === "bool" && field("alwaysOnTop")?.type.k === "bool" &&
+      field("clickThrough")?.type.k === "bool" && field("activateOnShow")?.type.k === "bool" &&
+      field("allowsFullscreen")?.type.k === "bool" && enumMembersAre("closePolicy", ["quit", "hide"]) &&
+      field("onCloseCommand")?.type.k === "bytes";
+    if (!valid) {
+      const shape = descriptor?.fields.map((candidate) => `${candidate.tsName}:${candidate.type.k}${candidate.type.k === "optional" ? `(${candidate.type.inner.k}${candidate.type.inner.k === "union" ? `:${candidate.type.inner.name}` : ""})` : candidate.type.k === "enum" ? `:${candidate.type.name}` : ""}`).join(", ") ?? `missing descriptor (return=${returns.k}${returns.k === "slice" ? ` elem=${returns.elem.k}` : ""})`;
+      this.report(
+        "NS1033",
+        `\`windows\` must return \`readonly WindowDescriptor[]\`; import \`WindowDescriptor\` from \`@native-sdk/core/events\` and construct entries with \`windowDescriptor(...)\`. Resolved: ${shape}`,
+        decl.type,
+      );
+      return;
+    }
+    this.checkWindowViewRegistry(decl);
   }
 
   /// NS1032 — `export const viewUnbound = [...] as const`: the dead-state
@@ -1539,7 +1871,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "statusItem", "statusItems",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "statusItem", "statusItems", "windows",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 
@@ -2631,7 +2963,7 @@ export class SubsetChecker {
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
-        ["readFile", "writeFile", "appendFile", "statFile", "readFileStream", "writeFileStream"].includes(node.expression.name.text) &&
+        ["readFile", "writeFile", "appendFile", "statFile", "deleteFile", "readFileStream", "writeFileStream"].includes(node.expression.name.text) &&
         ts.isIdentifier(node.expression.expression) &&
         this.cmdNames.has(node.expression.expression.text) &&
         this.isSdkReference(node.expression.expression) &&

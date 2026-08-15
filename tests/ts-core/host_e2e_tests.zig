@@ -57,6 +57,11 @@ fn e2eView(ui: *App.Ui, model: *const fixture.Model) App.Ui.Node {
     });
 }
 
+fn e2eWindowView(ui: *App.Ui, model: *const fixture.Model, label: []const u8) App.Ui.Node {
+    std.debug.assert(std.mem.eql(u8, label, "settings"));
+    return ui.text(.{}, if (model.polling) "settings polling" else "settings paused");
+}
+
 fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.toggle")) return .toggle;
     if (std.mem.eql(u8, name, "core.refresh")) return .refresh;
@@ -67,6 +72,7 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.load")) return .load;
     if (std.mem.eql(u8, name, "core.filestat")) return .stat_file;
     if (std.mem.eql(u8, name, "core.fileappend")) return .append_file;
+    if (std.mem.eql(u8, name, "core.filedelete")) return .delete_file;
     if (std.mem.eql(u8, name, "core.streamopen")) return .stream_open;
     if (std.mem.eql(u8, name, "core.streamchunk")) return .stream_chunk;
     if (std.mem.eql(u8, name, "core.streamclose")) return .stream_close;
@@ -108,6 +114,8 @@ fn e2eCommand(name: []const u8) ?fixture.Msg {
     if (std.mem.eql(u8, name, "core.mixreject")) return .mix_reject;
     if (std.mem.eql(u8, name, "core.mixrejectflip")) return .mix_reject_flip;
     if (std.mem.eql(u8, name, "core.notify")) return .notify;
+    if (std.mem.eql(u8, name, "core.open-settings")) return .open_settings;
+    if (std.mem.startsWith(u8, name, "core.close-settings:")) return .{ .close_settings = name["core.close-settings:".len..] };
     if (std.mem.eql(u8, name, "core.storeput")) return .store_put;
     if (std.mem.eql(u8, name, "core.storeget")) return .store_get;
     if (std.mem.eql(u8, name, "core.storedelete")) return .store_delete;
@@ -144,6 +152,7 @@ fn e2eOptions() App.Options {
         .scene = e2e_scene,
         .canvas_label = canvas_label,
         .view = e2eView,
+        .window_view = e2eWindowView,
         .on_command = e2eCommand,
     };
 }
@@ -643,6 +652,15 @@ test "compiled stat, append, and file-stream verbs route through the runtime" {
     const appended = try std.Io.Dir.cwd().readFileAlloc(io, tier5_append_path, std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(appended);
     try std.testing.expectEqualStrings("chunk-byteschunk-bytes", appended);
+
+    try h.menu("core.filedelete");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, tier5_append_path, .{}));
+    try h.menu("core.filedelete");
+    try h.waitPending();
+    try h.wake();
+    try std.testing.expectEqualStrings("not_found", Bridge.model().lastErr);
 }
 
 test "every Cmd.store factory emits its bounded v3 record through the external core" {
@@ -847,6 +865,75 @@ test "showNotification reaches the desktop platform from the compiled core" {
     const activation = h.harness.null_platform.activateNotification("build-status") orelse return error.TestUnexpectedResult;
     try h.harness.runtime.dispatchPlatformEvent(h.app, activation);
     try std.testing.expect(!Bridge.model().polling);
+}
+
+test "compiled TypeScript windows helper projects hide close policy and command-routed close" {
+    HostStub.reset();
+    const h = try Harness.create();
+    defer h.destroy();
+
+    try h.menu("core.open-settings");
+    try std.testing.expect(Bridge.model().settingsOpen);
+    var buffer: [native_sdk.platform.max_windows]native_sdk.WindowInfo = undefined;
+    var settings_id: native_sdk.WindowId = 0;
+    for (h.harness.runtime.listWindows(&buffer)) |window| {
+        if (std.mem.eql(u8, window.label, "settings")) settings_id = window.id;
+    }
+    try std.testing.expect(settings_id != 0);
+    try std.testing.expectEqual(native_sdk.WindowClosePolicy.hide, h.harness.null_platform.closePolicyForWindow(settings_id).?);
+
+    try h.harness.runtime.dispatchPlatformEvent(h.app, .{ .gpu_surface_frame = .{
+        .window_id = settings_id,
+        .label = "settings-canvas",
+        .size = native_sdk.geometry.SizeF.init(320, 240),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+    _ = try h.harness.runtime.canvasWidgetLayout(settings_id, "settings-canvas");
+
+    const hide = h.harness.null_platform.userCloseWindow(settings_id) orelse return error.TestUnexpectedResult;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, hide);
+    try std.testing.expect(Bridge.model().settingsOpen);
+    try std.testing.expectEqual(@as(usize, 1), h.app_state.window_slot_count);
+
+    // Switch the descriptor to .quit through the compiled helper's model
+    // source, then close through the normal command mapper. This pins that
+    // onCloseCommand resolves to an ordinary Msg and removes the declaration.
+    try h.menu("core.close-settings:manual");
+    try std.testing.expect(!Bridge.model().settingsOpen);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.window_slot_count);
+
+    // Recreate under .quit, then exercise the USER close path. The close
+    // command resolves through the same commandMsg mapper and clears the
+    // declaration after the platform has already closed the window.
+    try h.menu("core.toggle");
+    try h.menu("core.open-settings");
+    settings_id = 0;
+    for (h.harness.runtime.listWindows(&buffer)) |window| {
+        if (std.mem.eql(u8, window.label, "settings")) settings_id = window.id;
+    }
+    try std.testing.expect(settings_id != 0);
+    try std.testing.expectEqual(native_sdk.WindowClosePolicy.quit, h.harness.null_platform.closePolicyForWindow(settings_id).?);
+    var settings_index: ?usize = null;
+    for (h.harness.null_platform.windows[0..h.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id == settings_id) settings_index = index;
+    }
+    const platform_index = settings_index orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(native_sdk.WindowTitlebarStyle.chromeless, h.harness.null_platform.window_titlebar[platform_index]);
+    try std.testing.expect(h.harness.null_platform.window_transparent[platform_index]);
+    // Reuse the decode arena that produced the close message before the
+    // user closes the window. This proves the live slot owns the payload
+    // rather than retaining a borrowed pointer into that arena.
+    fixture.rt.frameReset();
+    const overwrite = fixture.rt.frameAlloc(u8, "core.close-settings:payload".len);
+    @memset(overwrite, '!');
+    const close = h.harness.null_platform.userCloseWindow(settings_id) orelse return error.TestUnexpectedResult;
+    try h.harness.runtime.dispatchPlatformEvent(h.app, close);
+    try std.testing.expect(!Bridge.model().settingsOpen);
+    try std.testing.expectEqualStrings("payload", Bridge.model().status);
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.window_slot_count);
 }
 
 test "fetch parks on the engine and routes the { status, body } record and err reasons" {

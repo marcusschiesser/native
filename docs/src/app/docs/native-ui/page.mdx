@@ -437,7 +437,7 @@ case "fetched":
 
 Response bodies are binary-safe and bounded (256 KiB; longer arrives cut with `truncated = true`), the whole exchange honors a per-fetch timeout (default 30 s), and cancelling a fetch delivers exactly one `cancelled` Msg with nothing after it.
 
-Files ride the same channel without smuggling an `Io` handle from `main` into `update`. Whole-file reads and writes remain bounded at 1 MiB; `appendFile` and `statFile` handle logs and planning, while the dedicated streaming family carries large imports and atomic exports. External paths require the `filesystem` permission; app-owned directories are exempt after symlink-safe normalization. See [Files & Streaming](/docs/files).
+Files ride the same channel without smuggling an `Io` handle from `main` into `update`. Whole-file reads and writes remain bounded at 1 MiB; `appendFile`, `statFile`, and `deleteFile` handle logs and file lifecycle, while the dedicated streaming family carries large imports and atomic exports. External paths require the `filesystem` permission; app-owned directories are exempt after symlink-safe normalization. See [Files & Streaming](/docs/files).
 
 ```zig
 .save => fx.writeFile(.{
@@ -484,7 +484,9 @@ For timestamps, the facade owns the clocks (Zig 0.16 puts `std.time` behind `std
 
 ## Secondary windows
 
-Windows are model-declared, exactly like the tray: `Options.windows_fn` returns the window descriptors that should exist right now (presence IS liveness), and `Options.window_view` builds each declared window's whole canvas tree, keyed by the descriptor's window label. After every dispatched Msg the runtime reconciles: windows the model started declaring are created (a source-less native window wearing one `gpu_surface` view with the descriptor's `canvas_label`, inheriting the main canvas's gpu options), windows it stopped declaring close, and every open window's view rebuilds from the same model — a theme picked in the settings window restyles the main window on the same dispatch. There is no `visible` flag: transient visibility is host state changed through `hideWindow`/`showWindow` or a `.hide` close policy; stop declaring a window to really close it and release its retained views.
+In a default TypeScript app, export `windows(model): readonly WindowDescriptor[]` and put each possible window's markup at `src/windows/<label>.native`; the generated launcher compiles those files, maps descriptor labels to them, and includes shared components they import from nested paths under `src/windows/`. Construct descriptors with `windowDescriptor`. `closePolicy: "quit"` routes `onCloseCommand` through `commandMsg`; `"hide"` retains the window and dispatches no close command. `titlebar` includes `"chromeless"` for fully skinned windows. `examples/system-monitor-ts` is the complete default-path reference.
+
+In Zig cores and custom wiring, windows are model-declared exactly like the tray: `Options.windows_fn` returns the window descriptors that should exist right now (presence IS liveness), and `Options.window_view` builds each declared window's whole canvas tree, keyed by the descriptor's window label. After every dispatched Msg the runtime reconciles: windows the model started declaring are created (a source-less native window wearing one `gpu_surface` view with the descriptor's `canvas_label`, inheriting the main canvas's gpu options), windows it stopped declaring close, and every open window's view rebuilds from the same model — a theme picked in the settings window restyles the main window on the same dispatch. There is no `visible` flag: transient visibility is host state changed through `hideWindow`/`showWindow` or a `.hide` close policy; stop declaring a window to really close it and release its retained views.
 
 ```zig
 fn windows(model: *const Model, scratch: *App.WindowsScratch) []const App.WindowDescriptor {
